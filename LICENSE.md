@@ -1,4 +1,3 @@
-
 # Functional Source License 1.1 (FSL-1.1) – "MrAI"
 
 **Copyright (c) 2025 Konstantin Yeftifeyev**
