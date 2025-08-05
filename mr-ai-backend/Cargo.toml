@@ -3,4 +3,14 @@ name = "mr-ai-backend"
 version = "0.1.0"
 edition = "2024"
 
+
+[workspace]
+members = [".", "api"]
+
 [dependencies]
+api = { path = "api" }
+
+tokio = { workspace = true }
+
+[workspace.dependencies]
+tokio = { version = "1.47", features = ["full"] }
