@@ -12,5 +12,7 @@ api = { path = "api" }
 
 tokio = { workspace = true }
 
+dotenvy = "0.15"
+
 [workspace.dependencies]
 tokio = { version = "1.47", features = ["full"] }
