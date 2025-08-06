@@ -1,7 +1,33 @@
-use std::env;
+use std::{env, error::Error};
 
-pub fn start() {
-    let project_name = env::var("PROJECT_NAME").expect("PROJECT_NAME must be set in environment");
+mod routes;
 
-    println!("{project_name}")
+use axum::{Router, routing::get};
+use tokio::signal;
+
+use crate::routes::learn_code_route::learn_code;
+
+pub async fn start() -> Result<(), Box<dyn Error>> {
+    let host_url = env::var("API_ADDRESS").expect("API_ADDRESS must be set in environment");
+
+    let app = Router::new().route("/learn_code", get(learn_code));
+
+    // Bind to address
+    let listener = tokio::net::TcpListener::bind(&host_url).await.unwrap();
+
+    // Start server with graceful shutdown on Ctrl+C
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+
+    Ok(())
+}
+
+/// Returns a future that resolves when Ctrl+C is pressed
+async fn shutdown_signal() {
+    // Wait for the Ctrl+C signal
+    signal::ctrl_c()
+        .await
+        .expect("Failed to listen for shutdown signal");
 }

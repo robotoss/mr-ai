@@ -8,9 +8,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Fails if .env file not found, not readable or invalid.
     dotenvy::dotenv()?;
 
-    println!("Hello, world!");
-
-    api::start();
+    api::start().await?;
 
     Ok(())
 }
