@@ -1,6 +1,10 @@
+use std::env;
+
 use git2::{Cred, FetchOptions, RemoteCallbacks};
 
 pub fn git_clone_with_token(repo_url: &str) -> Result<(), git2::Error> {
+    let project_name = env::var("PROJECT_NAME").expect("PROJECT_NAME must be set in environment");
+
     println!("🔗 Repository URL: {}", repo_url);
 
     let git_name = extract_repo_name(repo_url).unwrap_or_else(|| {
@@ -10,7 +14,7 @@ pub fn git_clone_with_token(repo_url: &str) -> Result<(), git2::Error> {
 
     println!("📁 Repository name extracted: {}", git_name);
 
-    let target_dir = format!("code_data/{}", git_name);
+    let target_dir = format!("code_data/{}/{}", project_name, git_name);
     println!("📂 Target clone directory: {}", target_dir);
 
     let token_path = "ssh_keys/bot_key";
