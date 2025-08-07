@@ -5,7 +5,7 @@ edition = "2024"
 
 
 [workspace]
-members = [".", "api"]
+members = [".", "api", "services"]
 
 [dependencies]
 api = { path = "api" }
