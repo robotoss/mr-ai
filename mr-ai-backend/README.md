@@ -1,4 +1,3 @@
-
 # 🤖 MR-AI Backend
 
 Self-hosted AI-powered backend service for **automated Merge Request (MR) reviews** using custom AI models.
