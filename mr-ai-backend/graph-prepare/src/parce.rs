@@ -1,41 +1,39 @@
+//! High-level API: parse monorepo, build a language-aware graph, and persist artifacts.
+//! This API returns nothing on success; all outputs are saved under
+//! `root/graphs_data/<timestamp>/` (JSONL + GraphML + summary.json).
+
 use crate::ast::parse_monorepo;
-use crate::export::{PersistSummary, TimingsMs, save_all};
-use crate::graph::{GraphEdge, build_graph};
-use crate::models::ast_node::ASTNode;
+use crate::export::{TimingsMs, save_all};
+use crate::graphs::build_graph_language_aware;
 use anyhow::Result;
-use petgraph::Graph;
 use std::time::Instant;
 
-/// Parses the entire monorepo at `root` and returns (AST nodes, dependency graph).
-pub fn parse(root: &str) -> Result<(Vec<ASTNode>, Graph<ASTNode, GraphEdge>)> {
-    let _t_total = Instant::now();
-    let nodes = parse_monorepo(root)?;
-    let graph = build_graph(&nodes);
-    Ok((nodes, graph))
-}
+/// Parse, build, and persist. No values are returned to the caller.
+pub fn parse_and_save_language_aware(root: &str) -> Result<()> {
+    let t0 = Instant::now();
 
-/// Parses, builds graph, and persists artifacts under `root/graphs_data/<timestamp>/`.
-pub fn parse_and_save(root: &str) -> Result<PersistSummary> {
-    let t_total = Instant::now();
-
+    // 1) Collect AST facts from all supported languages
     let t_ast = Instant::now();
     let nodes = parse_monorepo(root)?;
     let ast_ms = t_ast.elapsed().as_millis();
 
+    // 2) Build a language-aware dependency graph (e.g., Dart gets proper file-level linking)
     let t_graph = Instant::now();
-    let graph = build_graph(&nodes);
+    let graph = build_graph_language_aware(root, &nodes)?;
     let graph_ms = t_graph.elapsed().as_millis();
 
-    let summary = save_all(
+    // 3) Persist artifacts under `root/graphs_data/<timestamp>/`
+    //    (summary.json includes counts, timings, and file paths)
+    let _ = save_all(
         root,
         &nodes,
         &graph,
         TimingsMs {
             ast_collect: ast_ms,
             graph_build: graph_ms,
-            total: t_total.elapsed().as_millis(),
+            total: t0.elapsed().as_millis(),
         },
     )?;
 
-    Ok(summary)
+    Ok(())
 }

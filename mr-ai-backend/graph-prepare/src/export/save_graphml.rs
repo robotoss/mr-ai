@@ -1,4 +1,4 @@
-use crate::{graph::GraphEdge, models::ast_node::ASTNode};
+use crate::{graphs::edge::GraphEdge, models::ast_node::ASTNode};
 use anyhow::{Context, Result};
 use petgraph::graph::Graph;
 use std::{

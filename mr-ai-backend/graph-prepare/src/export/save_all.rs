@@ -1,5 +1,5 @@
 use crate::export::{write_graph_jsonl, write_graphml, write_nodes_jsonl};
-use crate::graph::GraphEdge;
+use crate::graphs::edge::GraphEdge;
 use crate::models::ast_node::ASTNode;
 use anyhow::{Context, Result};
 use chrono::Utc;

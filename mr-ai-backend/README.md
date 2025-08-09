@@ -120,3 +120,10 @@ python
 javascript
 typescript
 dart
+
+
+Saved artifacts are stored in code_data/<project_name>/graphs_data/<timestamp>/.
+
+For Gephi, graph.graphml is created — it can be imported immediately.
+
+Additionally, ast_nodes.jsonl, graph_nodes.jsonl, graph_edges.jsonl, and summary.json are saved.
