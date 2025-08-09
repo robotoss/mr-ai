@@ -1,9 +1,16 @@
-use services::git::git_clone_with_token_async;
+use std::env;
+
+use graph_prepare::parce;
 
 pub async fn learn_code() -> &'static str {
-    let _ = git_clone_with_token_async("git@gitlab.com:kulllgar/testprojectmain.git".to_string())
-        .await
-        .unwrap();
+    let project_name = env::var("PROJECT_NAME").expect("PROJECT_NAME must be set in environment");
+
+    let result = parce::parse_and_save(&format!("code_data/{}", project_name));
+
+    match result {
+        Ok(_) => {}
+        Err(ex) => println!("Failed learn {}", ex),
+    }
 
     "Hello, World!"
 }

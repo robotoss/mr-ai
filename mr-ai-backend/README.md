@@ -109,3 +109,14 @@ ssh_keys/
 * `ssh_keys/` should **never** be committed.
 
 ---
+
+
+
+we use tree-sitter (https://tree-sitter.github.io/tree-sitter) for get syntaxis tree for build graphs
+
+at this moment we add work with
+rust
+python
+javascript
+typescript
+dart
