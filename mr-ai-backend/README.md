@@ -1,21 +1,20 @@
 # 🤖 MR-AI Backend
 
-Self-hosted AI-powered backend service for **automated Merge Request (MR) reviews** using custom AI models.
-Supports integration with **GitHub**, **GitLab**, and other Git providers over **SSH**.
+A **self-hosted AI-powered backend** for **automated Merge Request (MR) reviews** using custom AI models.
+Supports integration with **GitHub**, **GitLab**, and other Git providers via **SSH**.
 
 ---
 
-## 📦 Project Structure
+## 📂 Project Structure
 
+```bash
+├── api/
+├── code_data/
+├── graph-prepare/
+├── services/
+├── ssh_keys/
+├── .env
 ```
-
-├── api\_lib         # API interface layer
-├── service\_lib     # Core business logic
-├── code\_data/      # Cloned Git repositories (auto-managed)
-├── ssh\_keys/       # Private SSH keys for repo access
-├── .env            # Environment configuration
-
-````
 
 ---
 
@@ -26,66 +25,60 @@ Configure the service via `.env` file or environment variables:
 ```env
 PROJECT_NAME=test_project      # Unique folder name per project
 API_ADDRESS=0.0.0.0:3000       # API server binding address
-````
+```
 
-You can run multiple project services by assigning different `PROJECT_NAME` values.
+> You can run multiple project services by using different `PROJECT_NAME` values.
 
 ---
 
 ## 🔐 SSH Setup for Git Access
 
-This service uses **SSH keys** to access private Git repositories (GitHub, GitLab, etc.). Follow the steps below to configure secure, headless cloning.
+This service uses **SSH keys** for secure access to private repositories.
 
----
-
-### ✅ Step 1: Generate SSH Key
-
-If you don't already have a key:
+### 1️⃣ Generate SSH Key
 
 ```bash
 ssh-keygen -t ed25519 -C "bot@mr-ai.com" -f ./ssh_keys/bot_key
 ```
 
-This creates:
+This generates:
 
-* **Private key**: `ssh_keys/bot_key`
-* **Public key**: `ssh_keys/bot_key.pub`
+* **Private key:** `ssh_keys/bot_key`
+* **Public key:** `ssh_keys/bot_key.pub`
 
-> ⚠️ Do **not** commit your private key to version control.
-
----
-
-### ✅ Step 2: Add Public Key to Git Provider
-
-#### 🔗 GitHub
-
-1. Go to: `GitHub → Settings → SSH and GPG Keys → New SSH Key`
-2. Paste the contents of `ssh_keys/bot_key.pub`
-
-#### 🔗 GitLab
-
-1. Go to: `GitLab → User Settings → SSH Keys`
-2. Paste the contents of `ssh_keys/bot_key.pub`
+> ⚠️ **Never** commit your private key to version control.
 
 ---
 
-### ✅ Step 3: Accept SSH Host Fingerprint (Required for libgit2)
+### 2️⃣ Add Public Key to Git Provider
 
-Run this once on your host machine:
+#### GitHub
+
+1. Go to **Settings → SSH and GPG Keys → New SSH Key**
+2. Paste contents of `ssh_keys/bot_key.pub`
+
+#### GitLab
+
+1. Go to **User Settings → SSH Keys**
+2. Paste contents of `ssh_keys/bot_key.pub`
+
+---
+
+### 3️⃣ Accept SSH Host Fingerprint (Required for `libgit2`)
 
 ```bash
 ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
 ```
 
-> This avoids host verification errors during repo cloning.
+This prevents host verification errors during cloning.
 
 ---
 
 ## 🚀 Running the Service
 
-1. Set up your `.env` file.
-2. Ensure SSH access is configured.
-3. Start the service:
+1. Configure `.env`
+2. Set up SSH access
+3. Start service:
 
 ```bash
 cargo run --release
@@ -93,9 +86,9 @@ cargo run --release
 
 ---
 
-## 📁 Git Ignore Best Practice
+## 📁 Git Ignore Best Practices
 
-In your `.gitignore`, ignore all generated/cloned repo data:
+Add to `.gitignore`:
 
 ```gitignore
 code_data/*
@@ -104,26 +97,49 @@ ssh_keys/
 !ssh_keys/.gitkeep
 ```
 
-* `code_data/` is managed dynamically and can contain multiple cloned projects.
-* `.gitkeep` ensures the folder is tracked (but empty).
-* `ssh_keys/` should **never** be committed.
+* `code_data/` — contains dynamically cloned repos (keep empty `.gitkeep`)
+* `ssh_keys/` — should **never** be committed
 
 ---
 
+## 🌳 Syntax Tree & Graph Generation
 
+We use [Tree-sitter](https://tree-sitter.github.io/tree-sitter) to parse source code into syntax trees, which are then used to build graphs.
 
-we use tree-sitter (https://tree-sitter.github.io/tree-sitter) for get syntaxis tree for build graphs
+### Currently Supported / In Progress
 
-at this moment we add work with
-rust
-python
-javascript
-typescript
-dart
+* ✅ Dart *(ready)*
+* 🚧 Rust *(in progress)*
+* 🚧 Python *(in progress)*
+* 🚧 JavaScript *(in progress)*
+* 🚧 TypeScript *(in progress)*
 
+> Contributions to support more languages are **very welcome**.
 
-Saved artifacts are stored in code_data/<project_name>/graphs_data/<timestamp>/.
+---
 
-For Gephi, graph.graphml is created — it can be imported immediately.
+## 📦 Saved Artifacts
 
-Additionally, ast_nodes.jsonl, graph_nodes.jsonl, graph_edges.jsonl, and summary.json are saved.
+When processing a project, the following are stored at:
+
+```
+code_data/<project_name>/graphs_data/<timestamp>/
+```
+
+* `graph.graphml` → import directly into [Gephi](https://gephi.org/)
+* `ast_nodes.jsonl` → Abstract syntax tree nodes
+* `graph_nodes.jsonl` → Graph node data
+* `graph_edges.jsonl` → Graph edge data
+* `summary.json` → Summary metadata
+
+---
+
+## 🛠 API Endpoints
+
+1. **Upload Project Data**
+   `POST /upload_project_data`
+   Send repository data to the service.
+
+2. **Learn Code & Generate Graphs**
+   `POST /learn_code`
+   Create graph representations of your code.
