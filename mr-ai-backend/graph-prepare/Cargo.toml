@@ -8,6 +8,8 @@ tree-sitter = "0.24"
 walkdir = "2.5"
 petgraph = "0.8"
 serde_yml = "0.0.12"
+dunce = "1"
+regex = "1.11"
 
 # Grammar
 tree-sitter-rust = "0.24"

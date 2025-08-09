@@ -22,6 +22,8 @@ pub struct PersistSummary {
     pub graph_edges: usize,
     pub files: PersistFiles,
     pub timings_ms: TimingsMs,
+    pub counts_by_type: std::collections::HashMap<String, usize>,
+    pub edge_labels: std::collections::HashMap<String, usize>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -66,6 +68,18 @@ pub fn save_all(
         summary_json: p_summary.to_string_lossy().into_owned(),
     };
 
+    // after computing graph, before writing summary:
+    let mut counts_by_type = std::collections::HashMap::new();
+    for n in nodes {
+        *counts_by_type.entry(n.node_type.clone()).or_insert(0) += 1;
+    }
+
+    let mut edge_labels = std::collections::HashMap::new();
+    for eidx in graph.edge_indices() {
+        let lbl = graph[eidx].0.clone();
+        *edge_labels.entry(lbl).or_insert(0) += 1;
+    }
+
     let summary = PersistSummary {
         root: root.to_string(),
         out_dir: target_dir.to_string_lossy().into_owned(),
@@ -79,6 +93,8 @@ pub fn save_all(
         graph_edges: graph.edge_count(),
         files: files.clone(),
         timings_ms: timings,
+        counts_by_type,
+        edge_labels,
     };
 
     // write summary.json
