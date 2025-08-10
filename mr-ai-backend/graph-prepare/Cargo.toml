@@ -1,0 +1,24 @@
+[package]
+name = "graph-prepare"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tree-sitter = "0.24"
+walkdir = "2.5"
+petgraph = "0.8"
+serde_yml = "0.0.12"
+dunce = "1"
+regex = "1.11"
+
+# Grammar
+tree-sitter-rust = "0.24"
+tree-sitter-dart-orchard = "0.1"
+tree-sitter-python = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = {workspace = true}
+chrono = {workspace = true}
