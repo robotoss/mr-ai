@@ -1,9 +1,12 @@
-use services::git::git_clone_with_token_async;
+use axum::Json;
+use services::git::git_clone_list_async;
 
-pub async fn upload_project_data() -> &'static str {
-    let _ = git_clone_with_token_async("git@gitlab.com:kulllgar/testprojectmain.git".to_string())
-        .await
-        .unwrap();
+use crate::models::git_projects_data::GitProjectsPayload;
 
-    "Hello, World!"
+pub async fn upload_project_data(Json(payload): Json<GitProjectsPayload>) -> &'static str {
+    println!("Get urls: {:?}", payload.urls);
+
+    let _ = git_clone_list_async(payload.urls, 4).await.unwrap();
+
+    "Code Success upload"
 }

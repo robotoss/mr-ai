@@ -1,8 +1,12 @@
 use std::{env, error::Error};
 
+mod models;
 mod routes;
 
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use tokio::signal;
 
 use crate::routes::{learn_code_route::learn_code, upload_project_data::upload_project_data};
@@ -12,7 +16,7 @@ pub async fn start() -> Result<(), Box<dyn Error>> {
 
     let app = Router::new()
         .route("/learn_code", get(learn_code))
-        .route("/upload_project_data", get(upload_project_data));
+        .route("/upload_project_data", post(upload_project_data));
 
     // Bind to address
     let listener = tokio::net::TcpListener::bind(&host_url).await.unwrap();
