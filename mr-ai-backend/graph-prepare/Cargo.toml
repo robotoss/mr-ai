@@ -10,6 +10,7 @@ petgraph = "0.8"
 serde_yml = "0.0.12"
 dunce = "1"
 regex = "1.11"
+globset = "0.4"
 
 # Grammar
 tree-sitter-rust = "0.24"

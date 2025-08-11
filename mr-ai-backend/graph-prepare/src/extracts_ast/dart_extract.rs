@@ -5,41 +5,71 @@ use tree_sitter::{Node, Tree};
 
 use crate::models::ast_node::ASTNode;
 
-// If your type lives at `crate::models::ASTNode`, change the import accordingly.
-
 /// Robust Dart extractor tolerant to Dart 3 modifiers and grammar variants (Orchard/Harper).
-/// Collects *normalized* facts into `ASTNode`:
-///   - Declarations: `class`, `mixin`, `mixin_class`, `enum`, `extension`, `extension_type`, `function`
-///   - Directives:   `import`, `export`, `part`
+/// Produces normalized `ASTNode`s:
+///   - Declarations: `file`, `class`, `mixin`, `mixin_class`, `enum`, `extension`,
+///                   `extension_type`, `function`, `method` (incl. getters/setters/ctors)
+///   - Directives:   `import`, `export`, `part`, `part_of`
 ///
-/// Notes:
-/// - We normalize node kinds coming from different grammars (snake_case / camelCase).
-/// - We add **regex fallbacks** for directives and class-like declarations, so the pipeline
-///   remains resilient even if the concrete tree-sitter grammar shifts node shapes.
-/// - Linking (`package:` → repo path), re-export flattening, etc. are handled later in `dart_graph`.
+/// Key points:
+/// - Iterative DFS that carries `owner_class` in the stack, so methods are attached to containers.
+/// - `import` may capture `import_alias` (`as alias`).
+/// - `resolved_target` stays None here (resolve in graph/link stage).
+/// - Regex fallbacks keep extractor resilient when grammar shifts.
 pub fn extract(tree: &Tree, code: &str, path: &Path, out: &mut Vec<ASTNode>) -> Result<()> {
     let file = path.to_string_lossy().to_string();
 
-    // Dedup to avoid duplicates when both AST and regex catch the same declaration.
-    // Key = (file, node_type, name, start_line, end_line)
-    let mut seen: HashSet<(String, String, String, usize, usize)> = HashSet::new();
+    // Dedup when both AST and regex catch same declaration.
+    // Key = (file, node_type, name, start_line, end_line, owner_class, import_alias)
+    let mut seen: HashSet<(
+        String,
+        String,
+        String,
+        usize,
+        usize,
+        Option<String>,
+        Option<String>,
+    )> = HashSet::new();
+
+    // Always emit a single "file" node.
+    push_unique(&mut seen, out, &file, "file", &file, 0, 0, None, None, None);
 
     let root = tree.root_node();
-    let mut stack = vec![root];
 
-    // Track whether AST produced anything for each "family" (for conditional fallbacks).
+    // Stack carries owner_class context for methods.
+    let mut stack: Vec<(Node, Option<String>)> = vec![(root, None)];
+
+    // Flags for conditional regex fallback.
     let mut got_directives = false;
     let mut got_any_class_like = false;
 
-    while let Some(node) = stack.pop() {
-        // DFS
-        let mut w = node.walk();
-        for c in node.children(&mut w) {
-            stack.push(c);
-        }
+    while let Some((node, owner_class)) = stack.pop() {
+        // Decide owner for children; may be overridden by current node if it declares a container.
+        let mut owner_for_children = owner_class.clone();
 
         match node.kind() {
-            // -------- Classes (support many variants, incl. different grammar names) ----------
+            // ------------------- Directives -------------------
+            "import_or_export" | "importOrExport" | "import_directive" | "importDirective"
+            | "export_directive" | "exportDirective" | "part_directive" | "partDirective"
+            | "part_of_directive" | "partOfDirective" => {
+                if let Some((kind, uri, alias)) = parse_directive_from_ast(&node, code) {
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        &kind,
+                        &uri,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        None,
+                        alias,
+                        None,
+                    );
+                    got_directives = true;
+                }
+            }
+
+            // ------------------- Class-like containers -------------------
             "class_declaration"
             | "classDeclaration"
             | "class_definition"
@@ -47,125 +77,244 @@ pub fn extract(tree: &Tree, code: &str, path: &Path, out: &mut Vec<ASTNode>) -> 
             | "class_member_declaration"
             | "classMemberDeclaration" => {
                 if let Some(name_node) = pick_name_node_for_class(&node) {
-                    push_unique_decl("class", code, &file, node, name_node, &mut seen, out);
+                    let name = code[name_node.byte_range()].to_string();
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        "class",
+                        &name,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        None,
+                        None,
+                        None,
+                    );
+                    owner_for_children = Some(name);
                     got_any_class_like = true;
                 }
             }
 
-            // -------- Mixins ----------
             "mixin_declaration" | "mixinDeclaration" => {
                 if let Some(name_node) = pick_name_node_generic(&node) {
-                    push_unique_decl("mixin", code, &file, node, name_node, &mut seen, out);
+                    let name = code[name_node.byte_range()].to_string();
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        "mixin",
+                        &name,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        None,
+                        None,
+                        None,
+                    );
+                    owner_for_children = Some(name);
+                    got_any_class_like = true;
                 }
-                got_any_class_like = true;
             }
 
-            // -------- Mixin class (Dart 3) ----------
             "mixin_class_declaration" | "mixinClassDeclaration" => {
                 if let Some(name_node) = pick_name_node_for_class(&node) {
-                    push_unique_decl("mixin_class", code, &file, node, name_node, &mut seen, out);
+                    let name = code[name_node.byte_range()].to_string();
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        "mixin_class",
+                        &name,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        None,
+                        None,
+                        None,
+                    );
+                    owner_for_children = Some(name);
+                    got_any_class_like = true;
                 }
-                got_any_class_like = true;
             }
 
-            // -------- Enums ----------
             "enum_declaration" | "enumDeclaration" => {
                 if let Some(name_node) = pick_name_node_generic(&node) {
-                    push_unique_decl("enum", code, &file, node, name_node, &mut seen, out);
+                    let name = code[name_node.byte_range()].to_string();
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        "enum",
+                        &name,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        None,
+                        None,
+                        None,
+                    );
+                    owner_for_children = Some(name);
+                    got_any_class_like = true;
                 }
-                got_any_class_like = true;
             }
 
-            // -------- Extensions (may be named or anonymous) ----------
             "extension_declaration" | "extensionDeclaration" => {
-                if let Some(opt_name_node) = pick_optional_name_node(&node) {
-                    match opt_name_node {
-                        Some(name_node) => {
-                            let name = code[name_node.byte_range()].to_string();
-                            push_unique_simple("extension", &name, &file, node, &mut seen, out);
-                        }
-                        None => {
-                            // Unnamed extension: synthesize a readable name
-                            push_unique_simple(
-                                "extension",
-                                "extension",
-                                &file,
-                                node,
-                                &mut seen,
-                                out,
-                            );
-                        }
-                    }
-                } else {
-                    // Grammar didn't expose name field; still record an anonymous extension.
-                    push_unique_simple("extension", "extension", &file, node, &mut seen, out);
-                }
+                let ext_name = match pick_optional_name_node(&node) {
+                    Some(Some(n)) => code[n.byte_range()].to_string(),
+                    Some(None) | None => "extension".to_string(),
+                };
+                push_unique(
+                    &mut seen,
+                    out,
+                    &file,
+                    "extension",
+                    &ext_name,
+                    node.start_position().row + 1,
+                    node.end_position().row + 1,
+                    None,
+                    None,
+                    None,
+                );
+                owner_for_children = Some(ext_name);
                 got_any_class_like = true;
             }
 
-            // -------- Extension types ----------
             "extension_type_declaration" | "extensionTypeDeclaration" => {
-                if let Some(name_node) = pick_name_node_generic(&node) {
-                    push_unique_decl(
-                        "extension_type",
-                        code,
-                        &file,
-                        node,
-                        name_node,
-                        &mut seen,
-                        out,
-                    );
-                } else {
-                    push_unique_simple(
-                        "extension_type",
-                        "extension type",
-                        &file,
-                        node,
-                        &mut seen,
-                        out,
-                    );
-                }
+                let name = pick_name_node_generic(&node)
+                    .map(|n| code[n.byte_range()].to_string())
+                    .unwrap_or_else(|| "extension type".to_string());
+                push_unique(
+                    &mut seen,
+                    out,
+                    &file,
+                    "extension_type",
+                    &name,
+                    node.start_position().row + 1,
+                    node.end_position().row + 1,
+                    None,
+                    None,
+                    None,
+                );
+                owner_for_children = Some(name);
                 got_any_class_like = true;
             }
 
-            // -------- Functions / Methods ----------
-            "function_declaration"
-            | "method_declaration"
-            | "functionDeclaration"
-            | "methodDeclaration"
-            | "function_signature"
-            | "method_signature"
-            | "functionSignature"
-            | "methodSignature" => {
+            // ------------------- Functions / Methods -------------------
+            "method_declaration" | "methodDeclaration" | "method_signature" | "methodSignature" => {
                 if let Some(name_node) = pick_name_node_generic(&node) {
-                    push_unique_decl("function", code, &file, node, name_node, &mut seen, out);
+                    let name = code[name_node.byte_range()].to_string();
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        "method",
+                        &name,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        owner_class.clone(),
+                        None,
+                        None,
+                    );
                 }
             }
 
-            // -------- Directives: import/export/part (many grammar variants) ----------
-            "import_or_export" | "importOrExport" | "import_directive" | "importDirective"
-            | "export_directive" | "exportDirective" | "part_directive" | "partDirective"
-            | "part_of_directive" | "partOfDirective" => {
-                if let Some((kind, uri)) = parse_directive_from_ast(&node, code) {
-                    push_unique_directive(&file, node, &kind, &uri, &mut seen, out);
-                    got_directives = true;
+            "function_declaration"
+            | "functionDeclaration"
+            | "function_signature"
+            | "functionSignature" => {
+                if let Some(name_node) = pick_name_node_generic(&node) {
+                    let name = code[name_node.byte_range()].to_string();
+                    let node_type = if owner_class.is_some() {
+                        "method"
+                    } else {
+                        "function"
+                    };
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        node_type,
+                        &name,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        owner_class.clone(),
+                        None,
+                        None,
+                    );
                 }
+            }
+
+            // Getters/Setters
+            "getter_declaration" | "getterDeclaration" => {
+                if let Some(name_node) = pick_name_node_generic(&node) {
+                    let name = format!("get {}", code[name_node.byte_range()].to_string());
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        "method",
+                        &name,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        owner_class.clone(),
+                        None,
+                        None,
+                    );
+                }
+            }
+            "setter_declaration" | "setterDeclaration" => {
+                if let Some(name_node) = pick_name_node_generic(&node) {
+                    let name = format!("set {}", code[name_node.byte_range()].to_string());
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        "method",
+                        &name,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        owner_class.clone(),
+                        None,
+                        None,
+                    );
+                }
+            }
+
+            // Constructors
+            "constructor_declaration" | "constructorDeclaration" => {
+                let ctor_name = pick_name_node_generic(&node)
+                    .map(|n| code[n.byte_range()].to_string())
+                    .unwrap_or_else(|| "constructor".to_string());
+                push_unique(
+                    &mut seen,
+                    out,
+                    &file,
+                    "method",
+                    &ctor_name,
+                    node.start_position().row + 1,
+                    node.end_position().row + 1,
+                    owner_class.clone(),
+                    None,
+                    None,
+                );
             }
 
             _ => {}
+        }
+
+        // Push children with decided owner context.
+        let mut w = node.walk();
+        for c in node.children(&mut w) {
+            stack.push((c, owner_for_children.clone()));
         }
     }
 
     // ------------------------ Regex fallbacks -------------------------------------
 
-    // 1) If AST missed directives, scan via regex.
+    // 1) If AST missed directives, scan via regex (incl. `as alias`, `part of`).
     if !got_directives {
         scan_directives_by_regex(code, &file, &mut seen, out);
     }
 
-    // 2) If AST missed class-like forms, scan for *all* variants via regex (Dart 3 friendly).
+    // 2) If AST missed class-like forms, scan for variants via regex (Dart 3 friendly).
     if !got_any_class_like {
-        // class with arbitrary modifiers (abstract/base/interface/final/sealed)
         scan_named_decl_by_regex(
             code,
             &file,
@@ -174,8 +323,6 @@ pub fn extract(tree: &Tree, code: &str, path: &Path, out: &mut Vec<ASTNode>) -> 
             &mut seen,
             out,
         );
-
-        // mixin (optionally `base mixin`)
         scan_named_decl_by_regex(
             code,
             &file,
@@ -184,8 +331,6 @@ pub fn extract(tree: &Tree, code: &str, path: &Path, out: &mut Vec<ASTNode>) -> 
             &mut seen,
             out,
         );
-
-        // mixin class (with arbitrary modifiers before "mixin class")
         scan_named_decl_by_regex(
             code,
             &file,
@@ -194,8 +339,6 @@ pub fn extract(tree: &Tree, code: &str, path: &Path, out: &mut Vec<ASTNode>) -> 
             &mut seen,
             out,
         );
-
-        // enum
         scan_named_decl_by_regex(
             code,
             &file,
@@ -204,8 +347,6 @@ pub fn extract(tree: &Tree, code: &str, path: &Path, out: &mut Vec<ASTNode>) -> 
             &mut seen,
             out,
         );
-
-        // extension type
         scan_named_decl_by_regex(
             code,
             &file,
@@ -214,8 +355,6 @@ pub fn extract(tree: &Tree, code: &str, path: &Path, out: &mut Vec<ASTNode>) -> 
             &mut seen,
             out,
         );
-
-        // extension: named and anonymous
         scan_extension_decl_by_regex(code, &file, &mut seen, out);
     }
 
@@ -261,15 +400,27 @@ fn pick_optional_name_node<'a>(node: &'a Node) -> Option<Option<Node<'a>>> {
     Some(None)
 }
 
-/// Extract (kind, uri) from a directive node. Returns uri *without* quotes.
-/// kind ∈ {"import","export","part"}.
-fn parse_directive_from_ast(node: &Node, code: &str) -> Option<(String, String)> {
+/// Extract (kind, uri, alias) from a directive node. Returns uri *without* quotes.
+/// kind ∈ {"import","export","part","part_of"}.
+/// `alias` is only meaningful for `import` (`as <alias>`).
+fn parse_directive_from_ast(node: &Node, code: &str) -> Option<(String, String, Option<String>)> {
     let kind = detect_directive_keyword(node, code);
-    if let Some(uri_raw) = find_first_string_literal(node, code) {
-        let uri = strip_quotes(&uri_raw);
-        return Some((kind, uri));
+
+    // Try to locate the string literal (may be nested).
+    let uri_opt = find_first_string_literal(node, code).map(|raw| strip_quotes(&raw));
+
+    // Try to capture `as <alias>` for imports.
+    let alias = if kind == "import" {
+        pick_import_alias(node, code).or_else(|| pick_import_alias_regex(code, node))
+    } else {
+        None
+    };
+
+    match (kind.as_str(), uri_opt) {
+        ("import" | "export" | "part", Some(uri)) => Some((kind, uri, alias)),
+        ("part_of", Some(uri_or_name)) => Some((kind, uri_or_name, None)),
+        _ => None,
     }
-    None
 }
 
 /// Detect directive keyword via token children; fallback to text sniffing.
@@ -280,12 +431,15 @@ fn detect_directive_keyword(node: &Node, code: &str) -> String {
             "import" | "importKeyword" => return "import".into(),
             "export" | "exportKeyword" => return "export".into(),
             "part" | "partKeyword" => return "part".into(),
+            "part_of" | "partOf" => return "part_of".into(),
             _ => {}
         }
     }
     let leading = code[node.byte_range()].trim_start();
     if leading.starts_with("export") {
         "export".into()
+    } else if leading.starts_with("part of") {
+        "part_of".into()
     } else if leading.starts_with("part") {
         "part".into()
     } else {
@@ -294,43 +448,109 @@ fn detect_directive_keyword(node: &Node, code: &str) -> String {
 }
 
 /// Return the first string literal child content (with quotes) if present.
+/// Different grammars may wrap the string (e.g., `uri`).
 fn find_first_string_literal(node: &Node, code: &str) -> Option<String> {
     let mut w = node.walk();
     for ch in node.children(&mut w) {
-        if ch.kind() == "string_literal" || ch.kind() == "StringLiteral" {
+        if matches!(
+            ch.kind(),
+            "string_literal" | "StringLiteral" | "uri" | "uri_literal"
+        ) {
+            // If wrapper, try to find nested string
+            if matches!(ch.kind(), "uri" | "uri_literal") {
+                let mut w2 = ch.walk();
+                for g in ch.children(&mut w2) {
+                    if matches!(g.kind(), "string_literal" | "StringLiteral") {
+                        return Some(code[g.byte_range()].to_string());
+                    }
+                }
+            }
             return Some(code[ch.byte_range()].to_string());
+        }
+        // one more nested level for safety
+        let mut w2 = ch.walk();
+        for g in ch.children(&mut w2) {
+            if matches!(g.kind(), "string_literal" | "StringLiteral") {
+                return Some(code[g.byte_range()].to_string());
+            }
         }
     }
     None
 }
 
-fn strip_quotes(s: &str) -> String {
-    let t = s.trim();
-    if (t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')) {
-        t[1..t.len() - 1].to_string()
-    } else {
-        t.to_string()
+/// Try to extract `as <alias>` from an import directive by AST structure.
+fn pick_import_alias(node: &Node, code: &str) -> Option<String> {
+    // Strategy: scan tokens; when we see "as", the next identifier-like token is alias.
+    let mut w = node.walk();
+    let mut seen_as = false;
+    for ch in node.children(&mut w) {
+        let text = code[ch.byte_range()].trim();
+        if seen_as {
+            let id = text
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
+                .to_string();
+            if !id.is_empty() {
+                return Some(id);
+            }
+            break;
+        }
+        if text == "as" {
+            seen_as = true;
+        }
     }
+    None
+}
+
+/// Fallback alias detection using regex within the directive's slice.
+fn pick_import_alias_regex(code: &str, node: &Node) -> Option<String> {
+    let slice = &code[node.byte_range()];
+    let re = Regex::new(r#"\bas\s+([A-Za-z_]\w*)\b"#).ok()?;
+    re.captures(slice)
+        .and_then(|cap| cap.get(1).map(|m| m.as_str().to_string()))
 }
 
 /* ============================ Regex fallbacks ================================= */
 
 /// If AST missed directives, scan text lines with a regex.
-/// Pattern: `^\s*(import|export|part)\s+(['"][^'"]+['"])`
+///   - `^\s*(import|export|part)\s+(['"][^'"]+['"])(?:\s+as\s+([A-Za-z_]\w*))?`
+///   - `^\s*part\s+of\s+(['"][^'"]+['"]|[A-Za-z_]\w*)`
 fn scan_directives_by_regex(
     code: &str,
     file: &str,
-    seen: &mut HashSet<(String, String, String, usize, usize)>,
+    seen: &mut HashSet<(
+        String,
+        String,
+        String,
+        usize,
+        usize,
+        Option<String>,
+        Option<String>,
+    )>,
     out: &mut Vec<ASTNode>,
 ) {
-    let re = Regex::new(r#"(?m)^\s*(import|export|part)\s+(['"][^'"]+['"])"#).unwrap();
-    for cap in re.captures_iter(code) {
+    let re_ie =
+        Regex::new(r#"(?m)^\s*(import|export|part)\s+(['"][^'"]+['"])(?:\s+as\s+([A-Za-z_]\w*))?"#)
+            .unwrap();
+    for cap in re_ie.captures_iter(code) {
         let kind = cap.get(1).unwrap().as_str();
         let uriq = cap.get(2).unwrap().as_str();
+        let alias = cap.get(3).map(|m| m.as_str().to_string());
         let uri = strip_quotes(uriq);
         let start = cap.get(0).unwrap().start();
         let line = 1 + byte_offset_to_line(code, start);
-        push_unique(seen, out, file, kind, &uri, line, line);
+        push_unique(seen, out, file, kind, &uri, line, line, None, alias, None);
+    }
+
+    let re_part_of =
+        Regex::new(r#"(?m)^\s*part\s+of\s+((?:['"][^'"]+['"])|(?:[A-Za-z_]\w*))"#).unwrap();
+    for cap in re_part_of.captures_iter(code) {
+        let uriq = cap.get(1).unwrap().as_str();
+        let name = strip_quotes(uriq);
+        let start = cap.get(0).unwrap().start();
+        let line = 1 + byte_offset_to_line(code, start);
+        push_unique(
+            seen, out, file, "part_of", &name, line, line, None, None, None,
+        );
     }
 }
 
@@ -340,7 +560,15 @@ fn scan_named_decl_by_regex(
     file: &str,
     node_type: &str,
     pattern: &str,
-    seen: &mut HashSet<(String, String, String, usize, usize)>,
+    seen: &mut HashSet<(
+        String,
+        String,
+        String,
+        usize,
+        usize,
+        Option<String>,
+        Option<String>,
+    )>,
     out: &mut Vec<ASTNode>,
 ) {
     let re = Regex::new(pattern).unwrap();
@@ -348,7 +576,9 @@ fn scan_named_decl_by_regex(
         let name = cap.get(1).unwrap().as_str();
         let start = cap.get(0).unwrap().start();
         let line = 1 + byte_offset_to_line(code, start);
-        push_unique(seen, out, file, node_type, name, line, line);
+        push_unique(
+            seen, out, file, node_type, name, line, line, None, None, None,
+        );
     }
 }
 
@@ -358,7 +588,15 @@ fn scan_named_decl_by_regex(
 fn scan_extension_decl_by_regex(
     code: &str,
     file: &str,
-    seen: &mut HashSet<(String, String, String, usize, usize)>,
+    seen: &mut HashSet<(
+        String,
+        String,
+        String,
+        usize,
+        usize,
+        Option<String>,
+        Option<String>,
+    )>,
     out: &mut Vec<ASTNode>,
 ) {
     // Named: capture the name before `on`
@@ -367,7 +605,18 @@ fn scan_extension_decl_by_regex(
         let name = cap.get(1).unwrap().as_str();
         let start = cap.get(0).unwrap().start();
         let line = 1 + byte_offset_to_line(code, start);
-        push_unique(seen, out, file, "extension", name, line, line);
+        push_unique(
+            seen,
+            out,
+            file,
+            "extension",
+            name,
+            line,
+            line,
+            None,
+            None,
+            None,
+        );
     }
 
     // Anonymous: just `extension on Type`
@@ -375,7 +624,18 @@ fn scan_extension_decl_by_regex(
     for cap in re_anon.captures_iter(code) {
         let start = cap.get(0).unwrap().start();
         let line = 1 + byte_offset_to_line(code, start);
-        push_unique(seen, out, file, "extension", "extension", line, line);
+        push_unique(
+            seen,
+            out,
+            file,
+            "extension",
+            "extension",
+            line,
+            line,
+            None,
+            None,
+            None,
+        );
     }
 }
 
@@ -390,53 +650,36 @@ fn byte_offset_to_line(code: &str, byte_idx: usize) -> usize {
         .count()
 }
 
-fn push_unique_decl(
-    decl_type: &str,
-    code: &str,
-    file: &str,
-    node: Node,
-    name_node: Node,
-    seen: &mut HashSet<(String, String, String, usize, usize)>,
-    out: &mut Vec<ASTNode>,
-) {
-    let name = code[name_node.byte_range()].to_string();
-    push_unique_simple(decl_type, &name, file, node, seen, out);
+/// Strip single or double quotes from a string literal if present.
+fn strip_quotes(s: &str) -> String {
+    let t = s.trim();
+    if (t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')) {
+        t[1..t.len() - 1].to_string()
+    } else {
+        t.to_string()
+    }
 }
 
-fn push_unique_simple(
-    decl_type: &str,
-    name: &str,
-    file: &str,
-    node: Node,
-    seen: &mut HashSet<(String, String, String, usize, usize)>,
-    out: &mut Vec<ASTNode>,
-) {
-    let start_line = node.start_position().row + 1;
-    let end_line = node.end_position().row + 1;
-    push_unique(seen, out, file, decl_type, name, start_line, end_line);
-}
-
-fn push_unique_directive(
-    file: &str,
-    node: Node,
-    kind: &str,
-    uri: &str,
-    seen: &mut HashSet<(String, String, String, usize, usize)>,
-    out: &mut Vec<ASTNode>,
-) {
-    let start_line = node.start_position().row + 1;
-    let end_line = node.end_position().row + 1;
-    push_unique(seen, out, file, kind, uri, start_line, end_line);
-}
-
+/// Push unique node into `out`. All optionals default to None if not provided.
 fn push_unique(
-    seen: &mut HashSet<(String, String, String, usize, usize)>,
+    seen: &mut HashSet<(
+        String,
+        String,
+        String,
+        usize,
+        usize,
+        Option<String>,
+        Option<String>,
+    )>,
     out: &mut Vec<ASTNode>,
     file: &str,
     node_type: &str,
     name: &str,
     start_line: usize,
     end_line: usize,
+    owner_class: Option<String>,
+    import_alias: Option<String>,
+    resolved_target: Option<String>,
 ) {
     let key = (
         file.to_string(),
@@ -444,6 +687,8 @@ fn push_unique(
         name.to_string(),
         start_line,
         end_line,
+        owner_class.clone(),
+        import_alias.clone(),
     );
     if !seen.insert(key) {
         return;
@@ -454,5 +699,8 @@ fn push_unique(
         file: file.to_string(),
         start_line,
         end_line,
+        owner_class,
+        import_alias,
+        resolved_target,
     });
 }

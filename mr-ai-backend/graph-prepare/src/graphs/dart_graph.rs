@@ -32,7 +32,7 @@ use std::{
 use walkdir::WalkDir;
 
 /// Toggle whether to add direct edges from importers to re-exported files.
-/// When `true`, for an edge `A --imports--> façade.dart` and `façade.dart --exports--> impl.dart`,
+/// When `true`, for an edge `A --imports--> facade.dart` and `facade.dart --exports--> impl.dart`,
 /// we also add `A --imports_via_export--> impl.dart`.
 const FLATTEN_EXPORTS: bool = true;
 
@@ -61,7 +61,7 @@ pub fn build_graph_dart(root: &str, nodes: &[ASTNode]) -> Result<Graph<ASTNode, 
 
     // 3) Gather file-to-file edges from import/export/part directives.
     let mut edges: Vec<(String, String, String)> = Vec::new(); // (src_key, dst_key, label)
-    let mut exported_from: HashMap<String, Vec<String>> = HashMap::new(); // façade_key -> [impl_keys]
+    let mut exported_from: HashMap<String, Vec<String>> = HashMap::new(); // facade_key -> [impl_keys]
 
     for n in &dart_nodes {
         match n.node_type.as_str() {
@@ -124,14 +124,26 @@ pub fn build_graph_dart(root: &str, nodes: &[ASTNode]) -> Result<Graph<ASTNode, 
             file: f.clone(), // keep the same for convenience
             start_line: 0,
             end_line: 0,
+            owner_class: None,
+            import_alias: None,
+            resolved_target: None,
         });
         file_idx.insert(f, idx);
     }
 
     // 5) Add declarations and connect them with `declares` from their file node.
     for n in &dart_nodes {
-        if n.node_type == "function" || n.node_type == "class" {
-            let idx = g.add_node((*n).clone());
+        if n.node_type == "function" || n.node_type == "class" || n.node_type == "method" {
+            let idx = g.add_node(ASTNode {
+                name: n.name.clone(),
+                node_type: n.node_type.clone(),
+                file: norm_repo_str(rootp, Path::new(&n.file)),
+                start_line: n.start_line,
+                end_line: n.end_line,
+                owner_class: n.owner_class.clone(),
+                import_alias: n.import_alias.clone(),
+                resolved_target: n.resolved_target.clone(),
+            });
 
             // Normalize the file key in the same manner as for file nodes.
             let fkey = norm_repo_str(rootp, Path::new(&n.file));

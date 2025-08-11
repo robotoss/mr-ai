@@ -1,16 +1,22 @@
 use serde::{Deserialize, Serialize};
 
-/// Represents a node in the AST: a function, class or import/export.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ASTNode {
-    /// Identifier of the node (function name, class name, or import text).
     pub name: String,
-    /// Type of the node: "function", "class", or "import".
-    pub node_type: String,
-    /// File path where this node was found.
+    pub node_type: String, // "file","class","function","method","import","export","part",...
     pub file: String,
-    /// Starting line number (1-based).
     pub start_line: usize,
-    /// Ending line number (1-based).
     pub end_line: usize,
+
+    /// Owner class for methods, if any.
+    #[serde(default)]
+    pub owner_class: Option<String>,
+
+    /// For import nodes: optional alias (e.g., `import 'x.dart' as api;`)
+    #[serde(default)]
+    pub import_alias: Option<String>,
+
+    /// For import/export/part nodes: best-effort resolved absolute file path.
+    #[serde(default)]
+    pub resolved_target: Option<String>,
 }
