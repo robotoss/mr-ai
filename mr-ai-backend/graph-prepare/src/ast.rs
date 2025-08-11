@@ -2,10 +2,10 @@ use crate::{
     extracts_ast::{extract_for_lang, pick_language},
     models::ast_node::ASTNode,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::{env, fs, path::Path};
-use tree_sitter::{Parser, Tree};
+use tree_sitter::Parser;
 use walkdir::{DirEntry, WalkDir};
 
 /// Max readable file size (bytes) to avoid excessive memory usage.
@@ -59,36 +59,6 @@ pub fn parse_monorepo(root: &str) -> Result<Vec<ASTNode>> {
     }
 
     Ok(nodes)
-}
-
-/// Parse a single source file into a Tree-Sitter `Tree` + source string.
-/// Used by Step 2 (e.g., to extract `calls` for specific languages like Dart).
-pub fn parse_file_to_tree(path: &Path) -> Result<(Tree, String)> {
-    // Determine language from file path using the same router as in `parse_monorepo`.
-    let Some((language, _lang_tag)) = pick_language(path) else {
-        bail!(
-            "unsupported file for parse_file_to_tree: {}",
-            path.display()
-        );
-    };
-
-    // Read source with size guard.
-    let code = read_file_safely(path)?;
-    if code.is_empty() {
-        bail!(
-            "file is empty or exceeds MAX_FILE_BYTES: {}",
-            path.display()
-        );
-    }
-
-    // Parse to tree.
-    let mut parser = Parser::new();
-    parser
-        .set_language(&language)
-        .context("failed to set language")?;
-    let tree = parser.parse(&code, None).context("parse returned None")?;
-
-    Ok((tree, code))
 }
 
 /// Skip heavy/vendor directories to speed up scanning.
