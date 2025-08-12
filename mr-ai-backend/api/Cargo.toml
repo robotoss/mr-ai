@@ -7,8 +7,10 @@ edition = "2024"
 tokio = { workspace = true }
 
 axum = "0.8"
+
 services = { path = "../services" }
 graph-prepare = { path = "../graph-prepare" }
+vector-lib = { path = "../vector-lib" }
 
 serde = { workspace = true }
 anyhow = { workspace = true }

@@ -1,4 +1,7 @@
-pub mod chunker;
-pub mod embeddings;
-pub mod neighbors;
+pub mod ask;
+pub mod chunk;
+pub mod ingest;
+pub mod models;
+pub mod ollama;
 pub mod qdrant;
+pub mod query;

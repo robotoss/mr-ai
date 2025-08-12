@@ -1,3 +1,4 @@
+// qdrant.rs
 use anyhow::{Result, anyhow};
 use qdrant_client::{
     Payload, Qdrant,
@@ -7,20 +8,15 @@ use qdrant_client::{
     },
 };
 
-/// Thin wrapper around the official Qdrant Rust client (crate `qdrant-client = "1.15"`).
-/// Uses only stable, existing APIs:
-/// - `Qdrant::from_url(...).build()`
-/// - `collection_exists`, `create_collection`, `delete_collection`
-/// - `upsert_points` (with `.wait(true)`) and `SearchPointsBuilder`
 pub struct QdrantStore {
     pub client: Qdrant,
     pub url: String,
 }
 
 impl QdrantStore {
-    /// Build a client for a given base URL, e.g. "http://localhost:6333".
-    /// For Qdrant Cloud add `.api_key(...)` before `.build()`.
+    /// Build Qdrant client. Prefer gRPC port 6334 for the Rust client.
     pub fn new(url: &str) -> Result<Self> {
+        // e.g. "http://localhost:6334"
         let client = Qdrant::from_url(url).build()?;
         Ok(Self {
             client,
@@ -28,9 +24,6 @@ impl QdrantStore {
         })
     }
 
-    /// Ensure the collection exists. If it doesn't, create it with single-vector config.
-    /// `dim` is the vector dimension; `distance` ∈ {"Cosine","Dot","Euclid"} (case-insensitive).
-    /// Note: Quantization config is optional and omitted here to keep the API strictly-valid across versions.
     pub async fn ensure_collection(
         &self,
         collection: &str,
@@ -41,18 +34,14 @@ impl QdrantStore {
         if self.client.collection_exists(collection).await? {
             return Ok(());
         }
-
         let dist = parse_distance(distance)?;
         let vectors_cfg = VectorParamsBuilder::new(dim, dist).on_disk(on_disk);
-
-        // Create the collection with the vector params; no quantization by default.
         self.client
             .create_collection(CreateCollectionBuilder::new(collection).vectors_config(vectors_cfg))
             .await?;
         Ok(())
     }
 
-    /// Convenience: drop & recreate the collection (useful for repeatable tests).
     pub async fn recreate_collection(
         &self,
         collection: &str,
@@ -67,8 +56,7 @@ impl QdrantStore {
             .await
     }
 
-    /// Upsert a batch of points with string IDs, vectors and JSON payloads.
-    /// Uses `.wait(true)` to make the call synchronous/durable (CI-friendly).
+    /// Upsert a batch of points and wait for persistence.
     pub async fn upsert_points_wait(
         &self,
         collection: &str,
@@ -84,7 +72,6 @@ impl QdrantStore {
                 payloads.len()
             ));
         }
-
         let points: Vec<PointStruct> = ids
             .into_iter()
             .zip(vectors.into_iter())
@@ -92,7 +79,6 @@ impl QdrantStore {
             .map(|((id, vec), payload)| PointStruct::new(id, vec, payload))
             .collect();
 
-        // `upsert_points` + `.wait(true)` replaces the removed `upsert_points_blocking`.
         self.client
             .upsert_points(
                 qdrant_client::qdrant::UpsertPointsBuilder::new(collection, points).wait(true),
@@ -101,9 +87,7 @@ impl QdrantStore {
         Ok(())
     }
 
-    /// Semantic search for top-k neighbors.
-    /// If `score_threshold` is `Some(t)`, points with score < t are filtered out.
-    /// `with_payload` toggles returning payloads in results.
+    /// KNN search with optional score threshold and payload switch.
     pub async fn search(
         &self,
         collection: &str,
@@ -117,7 +101,13 @@ impl QdrantStore {
         if with_payload {
             builder = builder.with_payload(true);
         }
+        // Use a sane default threshold if caller passed Some(1.0) which is usually too strict.
         if let Some(t) = score_threshold {
+            let t = if (t - 1.0).abs() < f32::EPSILON {
+                0.2
+            } else {
+                t
+            };
             builder = builder.score_threshold(t);
         }
 
@@ -126,7 +116,6 @@ impl QdrantStore {
     }
 }
 
-/// Map string distance to Qdrant `Distance`.
 fn parse_distance(s: &str) -> Result<Distance> {
     match s.to_ascii_lowercase().as_str() {
         "cosine" => Ok(Distance::Cosine),
