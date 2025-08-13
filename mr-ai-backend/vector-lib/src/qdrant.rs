@@ -3,7 +3,7 @@ use qdrant_client::{
     Payload, Qdrant,
     qdrant::{
         CreateCollectionBuilder, Distance, PointStruct, ScoredPoint, SearchPointsBuilder,
-        VectorParamsBuilder,
+        UpsertPointsBuilder, VectorParamsBuilder,
     },
 };
 
@@ -94,9 +94,7 @@ impl QdrantStore {
 
         // `upsert_points` + `.wait(true)` replaces the removed `upsert_points_blocking`.
         self.client
-            .upsert_points(
-                qdrant_client::qdrant::UpsertPointsBuilder::new(collection, points).wait(true),
-            )
+            .upsert_points(UpsertPointsBuilder::new(collection, points).wait(true))
             .await?;
         Ok(())
     }

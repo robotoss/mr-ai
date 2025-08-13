@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 graph-prepare = { path = "../graph-prepare" }
+services = { path = "../services" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

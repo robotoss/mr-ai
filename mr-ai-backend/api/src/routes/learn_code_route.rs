@@ -1,7 +1,9 @@
 use std::env;
 
 use graph_prepare::parce;
-use vector_lib::{ask::ask_question, ollama::OllamaEmb, qdrant::QdrantStore};
+use vector_lib::{
+    ask::ask_question, ingest::ingest_from_graph_prepare, ollama::OllamaEmb, qdrant::QdrantStore,
+};
 
 pub async fn learn_code() -> &'static str {
     let project_name = env::var("PROJECT_NAME").expect("PROJECT_NAME must be set in environment");
@@ -31,14 +33,28 @@ pub async fn learn_code() -> &'static str {
     let dim: u64 = env::var("EMBEDDING_DIM")
         .unwrap_or_else(|_| "1536".into())
         .parse()
-        .unwrap_or(1536);
+        .unwrap_or(1024);
+
     match q.ensure_collection(&collection, dim, "Cosine", false).await {
         Ok(_) => {}
         Err(err) => println!("Ensure Collection Error: {}", err),
     }
 
+    if let Err(e) = ingest_from_graph_prepare(
+        &format!("code_data/{}", project_name),
+        /* out_dir = */ None,
+        &q,
+        &collection,
+        &emb,
+    )
+    .await
+    {
+        eprintln!("Ingest error: {e}");
+        return "Hello, World!";
+    }
+
     // Natural language question
-    let question = "Where is the RAWG API key configured in the project.unwrap()";
+    let question = "Where registerSingleton<ApiAdapter> in witch file";
     let hits = match ask_question(&q, &collection, &emb, question, 5).await {
         Ok(hits) => hits,
         Err(err) => {
