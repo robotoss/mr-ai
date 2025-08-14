@@ -10,6 +10,7 @@ axum = "0.8"
 
 services = { path = "../services" }
 graph-prepare = { path = "../graph-prepare" }
+codegraph-prep = { path = "../codegraph-prep" }
 vector-lib = { path = "../vector-lib" }
 
 serde = { workspace = true }
