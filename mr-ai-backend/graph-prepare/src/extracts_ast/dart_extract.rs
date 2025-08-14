@@ -296,6 +296,37 @@ pub fn extract(tree: &Tree, code: &str, path: &Path, out: &mut Vec<ASTNode>) -> 
                 );
             }
 
+            // ---------- Fields / Variables ----------
+            "field_declaration"
+            | "fieldDeclaration"
+            | "top_level_variable_declaration"
+            | "topLevelVariableDeclaration"
+            | "variable_declaration"
+            | "variableDeclaration" => {
+                // Collect variable identifiers (may be multiple separated by commas)
+                for name in collect_var_names(&node, code) {
+                    // Distinguish between class fields and top-level variables
+                    let node_ty = if owner_class.is_some() {
+                        "field"
+                    } else {
+                        "variable"
+                    };
+
+                    push_unique(
+                        &mut seen,
+                        out,
+                        &file,
+                        node_ty,
+                        &name,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        owner_class.clone(), // Attach class fields to their container
+                        None,
+                        None,
+                    );
+                }
+            }
+
             _ => {}
         }
 
@@ -703,4 +734,60 @@ fn push_unique(
         import_alias,
         resolved_target,
     });
+}
+
+/// Collects variable names from a variable/field declaration node.
+/// Works for `field_declaration`, top-level declarations, and generic `variable_declaration`.
+fn collect_var_names(node: &tree_sitter::Node, code: &str) -> Vec<String> {
+    // Common node kinds for identifiers in Dart
+    const ID_KINDS: [&str; 6] = [
+        "identifier",
+        "simple_identifier",
+        "Identifier",
+        "SimpleIdentifier",
+        "type_identifier",
+        "TypeIdentifier",
+    ];
+
+    let mut names = Vec::new();
+    let mut w = node.walk();
+    for ch in node.children(&mut w) {
+        // Variable declarations are often nested, so go one level deeper
+        let mut w2 = ch.walk();
+        for g in ch.children(&mut w2) {
+            if ID_KINDS.contains(&g.kind()) {
+                let text = code[g.byte_range()].to_string();
+
+                // Skip obvious type-related tokens by checking nearby characters
+                let after = code
+                    .get(g.end_byte()..g.end_byte().saturating_add(1))
+                    .unwrap_or("");
+                if after == "<" || after == "." || after == ">" {
+                    continue;
+                }
+
+                // Skip declaration keywords
+                if matches!(text.as_str(), "final" | "const" | "var") {
+                    continue;
+                }
+
+                // Keep only valid identifiers
+                if !text.is_empty()
+                    && text
+                        .chars()
+                        .next()
+                        .map(|c| c.is_alphabetic() || c == '_')
+                        .unwrap_or(false)
+                {
+                    names.push(text);
+                }
+            }
+        }
+    }
+
+    // Deduplicate while preserving order
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    names.retain(|n| seen.insert(n.clone()));
+    names
 }

@@ -1,3 +1,12 @@
+use std::{fs, path::Path};
+
+use graph_prepare::models::graph_node::GraphNode;
+use qdrant_client::Payload;
+use serde_json::json;
+use services::uuid::stable_uuid;
+
+use crate::models::VectorDoc;
+
 /// Build a symbol-level document text (to be embedded).
 /// Keeps a compact, structured header + optional code snippet.
 pub fn symbol_doc_text(
@@ -92,6 +101,100 @@ pub fn load_snippet(file: &str, start_line: usize, end_line: usize) -> Option<St
         return None;
     }
     Some(lines[start_idx..end_idx].join("\n"))
+}
+
+/// Read file as UTF-8 text; return None if unreadable or looks binary.
+pub fn load_text(path: &str) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    // Heuristic: if more than 2% of bytes are zero, likely not text
+    let nul = bytes.iter().filter(|b| **b == 0).count();
+    if nul * 50 > bytes.len().max(1) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Map file extension to a language label (best-effort).
+pub fn lang_from_ext(path: &str) -> &'static str {
+    match Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+    {
+        "dart" => "dart",
+        "ts" => "typescript",
+        "tsx" => "typescript",
+        "js" => "javascript",
+        "jsx" => "javascript",
+        "py" => "python",
+        "rs" => "rust",
+        "yaml" | "yml" => "yaml",
+        "json" => "json",
+        "md" => "markdown",
+        _ => "text",
+    }
+}
+
+/// Append file-chunk docs for every `file` node found in graph_nodes.jsonl
+pub async fn add_file_chunks(
+    docs: &mut Vec<VectorDoc>,
+    file_nodes: &[GraphNode],
+    max_lines: usize,
+    overlap: usize,
+) {
+    for n in file_nodes.iter().filter(|n| n.node_type == "file") {
+        let Some(code) = load_text(&n.file) else {
+            continue;
+        };
+
+        // Skip clearly generated/huge artifacts (optional hard guard)
+        if code.len() > 2_000_000 {
+            continue;
+        } // 2 MB text cap
+
+        let lang = lang_from_ext(&n.file);
+        let chunks = chunk_by_lines(&code, max_lines, overlap);
+
+        for (i, (s_line, e_line, body)) in chunks.into_iter().enumerate() {
+            // Human-readable logical id
+            let human_id = format!("file_chunk::{path}#{}", i + 1, path = n.file);
+
+            // Stable UUIDv5 from human_id — Qdrant wants UUID or u64
+            let point_id = stable_uuid(human_id.as_str()).to_string();
+
+            // Text fed to the embedder: tiny header + the code itself
+            let text = format!(
+                "file: {path}\nlines: {s}-{e}\nlanguage: {lang}\n\n{body}",
+                path = n.file,
+                s = s_line,
+                e = e_line,
+                lang = lang,
+                body = body
+            );
+
+            // Minimal payload to let you show exact location back to user
+            let payload: Payload = json!({
+                "source": "file_chunk",
+                "file": n.file,
+                "start_line": s_line as i64,
+                "end_line": e_line as i64,
+                "language": lang,
+                "human_id": human_id, // useful for debugging
+                "text": text,         // optional: for inspection
+                "kind": "file_chunk",
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+            .into();
+
+            docs.push(VectorDoc {
+                id: point_id,
+                text,
+                payload,
+            });
+        }
+    }
 }
 
 /// Simple line-based chunking to avoid tokenizers.

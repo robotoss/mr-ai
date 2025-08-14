@@ -54,7 +54,7 @@ pub async fn learn_code() -> &'static str {
     }
 
     // Natural language question
-    let question = "Where registerSingleton<ApiAdapter> in witch file";
+    let question = "Where change gamesIcon";
     let hits = match ask_question(&q, &collection, &emb, question, 5).await {
         Ok(hits) => hits,
         Err(err) => {

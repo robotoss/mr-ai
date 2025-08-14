@@ -13,7 +13,7 @@ use serde_json::json;
 use services::uuid::stable_uuid;
 
 use crate::{
-    chunk::{neigh_text, symbol_doc_text},
+    chunk::{add_file_chunks, neigh_text, symbol_doc_text},
     models::VectorDoc,
     ollama::OllamaEmb,
     qdrant::QdrantStore,
@@ -95,6 +95,23 @@ pub async fn ingest_from_graph_prepare(
     }
     let mut neigh: HashMap<usize, FileNeigh> = HashMap::new();
 
+    // read env or use sane defaults
+    let max_lines: usize = std::env::var("CHUNK_MAX_LINES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+    let overlap: usize = std::env::var("CHUNK_OVERLAP_LINES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+
+    // Keep a local copy of file nodes (we already have `nodes: Vec<GraphNode>`)
+    let file_nodes: Vec<GraphNode> = nodes
+        .iter()
+        .filter(|n| n.node_type == "file")
+        .cloned()
+        .collect();
+
     let is_file = |n: &GraphNode| n.node_type == "file";
     let is_symbol = |n: &GraphNode| {
         matches!(
@@ -147,6 +164,9 @@ pub async fn ingest_from_graph_prepare(
 
     // 3) Build VectorDocs
     let mut docs: Vec<VectorDoc> = Vec::new();
+
+    // Append file chunks
+    add_file_chunks(&mut docs, &file_nodes, max_lines, overlap).await;
 
     // Symbol documents
     for (i, n) in nodes.iter().enumerate() {
