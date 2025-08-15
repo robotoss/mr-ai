@@ -37,6 +37,7 @@
 
 use crate::core::fs_scan::ScanResult;
 use crate::model::ast::{AstKind, AstNode};
+use crate::model::graph::GraphEdgeLabel;
 use chrono::{DateTime, Utc};
 use petgraph::Graph;
 use serde::{Deserialize, Serialize};
@@ -112,7 +113,7 @@ impl PipelineSummary {
     pub fn from_counts(
         scan: &ScanResult,
         ast_nodes: &[AstNode],
-        graph: &Graph<AstNode, ()>,
+        graph: &Graph<AstNode, GraphEdgeLabel>,
     ) -> Self {
         let generated_at: DateTime<Utc> = Utc::now();
 

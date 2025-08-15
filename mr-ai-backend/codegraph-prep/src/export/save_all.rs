@@ -1,6 +1,6 @@
 //! Persistence layer: writes AST nodes, graph, and RAG payload to disk.
 
-use crate::model::{ast::AstNode, payload::RagRecord};
+use crate::model::{ast::AstNode, graph::GraphEdgeLabel, payload::RagRecord};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use petgraph::Graph;
@@ -23,7 +23,7 @@ pub struct PersistSummary {
 pub fn persist_all(
     out_dir: &Path,
     ast_nodes: &[AstNode],
-    graph: &Graph<AstNode, ()>,
+    graph: &Graph<AstNode, GraphEdgeLabel>,
     rag_records: &[RagRecord],
     _summary_data: impl Serialize,
 ) -> Result<PersistSummary> {

@@ -9,7 +9,7 @@
 
 use crate::{
     config::model::GraphConfig,
-    model::{ast::AstNode, payload::RagRecord},
+    model::{ast::AstNode, graph::GraphEdgeLabel, payload::RagRecord},
 };
 use anyhow::Result;
 use petgraph::Graph;
@@ -18,7 +18,7 @@ use tracing::info;
 /// Split AST nodes into RAG records. The graph can be used for context enrichment later.
 pub fn chunk_ast_nodes(
     nodes: &[AstNode],
-    _graph: &Graph<AstNode, ()>,
+    _graph: &Graph<AstNode, GraphEdgeLabel>,
     _config: &GraphConfig,
 ) -> Result<Vec<RagRecord>> {
     info!("chunking: start, nodes={}", nodes.len());
