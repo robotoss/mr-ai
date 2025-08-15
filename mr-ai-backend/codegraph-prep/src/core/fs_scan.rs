@@ -1,74 +1,126 @@
-//! Filesystem scanning: walks the repository, applies filters from config, and detects language.
+//! Filesystem scanning: walks the repository tree, applies ignore/generated globs,
+//! detects language by extension, and returns a list of candidate files.
 //!
-//! Output: [`ScanResult`] containing all files that match filters and their detected language.
+//! Principles:
+//! - **Fast**: only metadata reads here (no file content I/O);
+//! - **Safe**: skip very large files early using config limit;
+//! - **Configurable**: honor ignore and generated globs from `GraphConfig`.
 
-use crate::{config::model::GraphConfig, model::language::LanguageKind};
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use crate::{
+    config::model::GraphConfig,
+    core::normalize::{build_globset, detect_language, is_generated_by, is_ignored_by},
+    model::language::LanguageKind,
+};
+use anyhow::{Result, bail};
+use globset::GlobSet;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+use tracing::{debug, info, warn};
 use walkdir::{DirEntry, WalkDir};
 
-/// Single scanned file with an optional language detection result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A discovered file entry (no contents are loaded at scan time).
+#[derive(Debug, Clone)]
 pub struct ScannedFile {
     pub path: PathBuf,
     pub language: Option<LanguageKind>,
+    pub size: u64,
+    pub is_generated: bool,
 }
 
-/// Result of scanning the repository.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The scan result with the repo root and all selected files.
+#[derive(Debug, Clone)]
 pub struct ScanResult {
+    pub root: PathBuf,
     pub files: Vec<ScannedFile>,
 }
 
-/// Recursively scans a repository, applying `GraphConfig` filters.
-#[tracing::instrument(level = "info", skip_all)]
-pub fn scan_repo(root: &Path, config: &GraphConfig) -> Result<ScanResult> {
-    let mut files = Vec::new();
+/// Walk the repository and select files for parsing.
+///
+/// - Skips heavy/vendor directories quickly (e.g., `.git`, `node_modules`, etc.);
+/// - Applies ignore/glob filters from config;
+/// - Drops files beyond `max_file_bytes`.
+pub fn scan_repo(root: &Path, cfg: &GraphConfig) -> Result<ScanResult> {
+    if !root.exists() {
+        bail!("fs_scan: root does not exist: {}", root.display());
+    }
 
+    info!("fs_scan: start -> {}", root.display());
+
+    // Prepare glob sets once per scan.
+    let ignore_globs: Option<GlobSet> = build_globset(&cfg.filters.ignore_globs);
+    let generated_globs: Option<GlobSet> = if cfg.filters.exclude_generated {
+        build_globset(&cfg.filters.generated_globs)
+    } else {
+        None
+    };
+
+    let mut files = Vec::<ScannedFile>::new();
     let walker = WalkDir::new(root)
         .into_iter()
-        .filter_entry(|e| keep_entry(e, config));
+        .filter_entry(|e| keep_entry(e));
 
     for entry in walker.filter_map(Result::ok) {
         if !entry.file_type().is_file() {
             continue;
         }
-        let path = entry.path().to_path_buf();
-        let lang = detect_language(&path);
+        let path = entry.path();
+
+        // Glob-based ignore.
+        if is_ignored_by(path, ignore_globs.as_ref()) {
+            debug!("fs_scan: ignore {}", path.display());
+            continue;
+        }
+
+        // Metadata + size guard.
+        let meta = match fs::metadata(path) {
+            Ok(m) => m,
+            Err(err) => {
+                warn!("fs_scan: metadata failed for {}: {}", path.display(), err);
+                continue;
+            }
+        };
+        let size = meta.len();
+        if size as usize > cfg.limits.max_file_bytes {
+            debug!(
+                "fs_scan: skip (size {} > max {}) {}",
+                size,
+                cfg.limits.max_file_bytes,
+                path.display()
+            );
+            continue;
+        }
+
+        // Detect language by extension and mark generated.
+        let language = detect_language(path);
+        let is_generated = is_generated_by(path, generated_globs.as_ref());
+
         files.push(ScannedFile {
-            path,
-            language: lang,
+            path: path.to_path_buf(),
+            language,
+            size,
+            is_generated,
         });
     }
 
-    Ok(ScanResult { files })
+    info!("fs_scan: done, {} files", files.len());
+    Ok(ScanResult {
+        root: root.to_path_buf(),
+        files,
+    })
 }
 
-/// Basic directory filter using config ignore patterns.
-fn keep_entry(entry: &DirEntry, config: &GraphConfig) -> bool {
+/// Coarse directory filter to avoid descending into heavy/vendor folders early.
+/// This complements the glob-based ignore.
+fn keep_entry(entry: &DirEntry) -> bool {
     if entry.file_type().is_dir() {
         if let Some(name) = entry.file_name().to_str() {
-            return !config
-                .filters
-                .ignore_globs
-                .iter()
-                .any(|pattern| name.contains(pattern));
+            return !matches!(
+                name,
+                ".git" | "node_modules" | "build" | "target" | ".dart_tool" | ".idea" | ".vscode"
+            );
         }
     }
     true
-}
-
-/// Very basic language detection by file extension.
-/// Replace with registry-based detection later.
-fn detect_language(path: &PathBuf) -> Option<LanguageKind> {
-    let ext = path.extension()?.to_str()?.to_lowercase();
-    match ext.as_str() {
-        "dart" => Some(LanguageKind::Dart),
-        "py" => Some(LanguageKind::Python),
-        "js" | "mjs" | "cjs" | "jsx" => Some(LanguageKind::JavaScript),
-        "ts" | "tsx" => Some(LanguageKind::TypeScript),
-        "rs" => Some(LanguageKind::Rust),
-        _ => None,
-    }
 }
