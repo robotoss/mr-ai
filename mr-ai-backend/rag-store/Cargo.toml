@@ -1,0 +1,36 @@
+[package]
+name = "rag-store"
+version = "0.1.0"
+edition = "2024"
+description = "RAG ingestion and retrieval library for Qdrant using JSONL dumps"
+keywords = ["rag", "qdrant", "vector", "retrieval", "jsonl"]
+categories = ["database", "science", "data-structures"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "fs"] }
+futures = "0.3"
+
+# Qdrant vector database client
+qdrant-client = "1.15"
+
+# Logging & tracing
+tracing = "0.1"
+tracing-futures = "0.2"
+
+# Error handling
+thiserror = "1.0"
+
+# HTTP client (for embedding providers or external integrations)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Local workspace dependencies
+graph-prepare = { path = "../graph-prepare" }
+services = { path = "../services" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "fs", "test-util"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

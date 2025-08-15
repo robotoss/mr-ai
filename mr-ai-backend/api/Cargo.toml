@@ -12,6 +12,7 @@ services = { path = "../services" }
 graph-prepare = { path = "../graph-prepare" }
 codegraph-prep = { path = "../codegraph-prep" }
 vector-lib = { path = "../vector-lib" }
+rag-store = { path = "../rag-store" }
 
 serde = { workspace = true }
 anyhow = { workspace = true }

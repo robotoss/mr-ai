@@ -61,6 +61,7 @@ dependencies = [
  "axum 0.8.4",
  "codegraph-prep",
  "graph-prepare",
+ "rag-store",
  "serde",
  "services",
  "tokio",
@@ -1593,6 +1594,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
+name = "rag-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "graph-prepare",
+ "qdrant-client",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "services",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-futures",
+]
+
+[[package]]
 name = "rand"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2437,6 +2456,16 @@ checksum = "b9d12581f227e93f094d3af2ae690a574abb8a2b9b7a96e7cfe9647b2b617678"
 dependencies = [
  "once_cell",
  "valuable",
+]
+
+[[package]]
+name = "tracing-futures"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97d095ae15e245a057c8e8451bab9b3ee1e1f68e9ba2b4fbc18d0ac5237835f2"
+dependencies = [
+ "pin-project",
+ "tracing",
 ]
 
 [[package]]

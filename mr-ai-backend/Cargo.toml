@@ -5,7 +5,7 @@ edition = "2024"
 
 
 [workspace]
-members = [".", "api", "codegraph-prep", "graph-prepare", "services", "vector-lib"]
+members = [".", "api", "codegraph-prep", "graph-prepare", "rag-store", "services", "vector-lib"]
 
 [dependencies]
 api = { path = "api" }

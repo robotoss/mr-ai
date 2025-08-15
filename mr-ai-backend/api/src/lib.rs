@@ -11,7 +11,7 @@ use tokio::signal;
 
 use crate::routes::{
     learn_code_route::learn_code, prepare_graph_route::prepare_graph,
-    upload_project_data::upload_project_data,
+    prepare_qdrant_route::prepare_qdrant, upload_project_data::upload_project_data,
 };
 
 pub async fn start() -> Result<(), Box<dyn Error>> {
@@ -20,6 +20,7 @@ pub async fn start() -> Result<(), Box<dyn Error>> {
     let app = Router::new()
         .route("/learn_code", get(learn_code))
         .route("/prepare_graph", get(prepare_graph))
+        .route("/prepare_qdrant", get(prepare_qdrant))
         .route("/upload_project_data", post(upload_project_data));
 
     // Bind to address
