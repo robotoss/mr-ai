@@ -5,14 +5,14 @@ edition = "2024"
 
 [dependencies]
 # AST core
-tree-sitter = "0.24"
+tree-sitter = "0.22.6"
 
 # Grammars
-tree-sitter-rust = "0.24"
-tree-sitter-dart-orchard = "0.1"
-tree-sitter-python = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-javascript = "0.23"
+tree-sitter-rust = "0.21"
+tree-sitter-dart = "0.0.4"
+tree-sitter-python = "0.21"
+tree-sitter-typescript = "0.21"
+tree-sitter-javascript = "0.21"
 
 # FS & path utils
 walkdir = "2.5"

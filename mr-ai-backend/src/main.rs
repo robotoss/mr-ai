@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use api;
-use tracing_subscriber::{EnvFilter, FmtSubscriber, fmt, layer::SubscriberExt};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -10,18 +10,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv()?;
 
     let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info,codegraph_prep=info"))
+        .or_else(|_| EnvFilter::try_new("debug"))
         .unwrap();
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_target(false));
-
-    let subscriber = FmtSubscriber::builder().finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+        .with(fmt::layer().with_target(false))
+        .init();
 
     api::start().await?;
-
     Ok(())
 }

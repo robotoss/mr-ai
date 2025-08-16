@@ -1,188 +1,153 @@
 //! Docstring and signature enrichment for Dart.
 //!
-//! - `//!` lines at the top of the file are attached to the `file` node.
-//! - `///` (inline) and `/** ... */` (block) docs are attached to declarations.
-//! - Signature grabs the declaration head including generic params until `{`/`=>`/`;`.
+//! - Attaches `//!` header comments to the file node (current file only).
+//! - Attaches inline docs (`///` and `/** ... */`) above declarations.
+//! - Extracts a compact signature from declaration head until `{` / `;` / `=>`.
+//!
+//! Important: we always touch nodes ONLY from the current `path` to avoid
+//! cross-file contamination when `out` is a shared vector.
 
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::model::ast::{AstKind, AstNode};
 use std::path::Path;
 
-pub fn enrich_docs_and_signatures(code: &str, _path: &Path, out: &mut Vec<AstNode>) {
+/// Enrich Dart AST nodes with docstrings and signatures for the *current* file.
+pub fn enrich_docs_and_signatures(code: &str, path: &Path, out: &mut Vec<AstNode>) {
+    let file_path = path.to_string_lossy().to_string();
     let lines: Vec<&str> = code.lines().collect();
+    let file_len = code.len();
 
-    // Attach module-level docs (`//!`) to the file node.
-    if let Some(file_node) = out.iter_mut().find(|n| matches!(n.kind, AstKind::File)) {
+    // 1) Module-level docs (`//!`) => only the file node of the current file.
+    if let Some(file_node) = out
+        .iter_mut()
+        .find(|n| matches!(n.kind, AstKind::File) && n.file == file_path)
+    {
         let module_doc = gather_module_doc(&lines);
         if !module_doc.is_empty() {
             file_node.doc = Some(module_doc);
         }
     }
 
-    for n in out.iter_mut() {
-        if matches!(
-            n.kind,
-            AstKind::File | AstKind::Import | AstKind::Export | AstKind::Part | AstKind::PartOf
-        ) {
-            continue;
-        }
+    // 2) Declarations in THIS file only.
+    for n in out.iter_mut().filter(|n| n.file == file_path) {
+        match n.kind {
+            AstKind::Class
+            | AstKind::Enum
+            | AstKind::Extension
+            | AstKind::ExtensionType
+            | AstKind::Function
+            | AstKind::Method
+            | AstKind::Field
+            | AstKind::Variable => {
+                // --- docs ---
+                let doc = gather_inline_doc(&lines, n.span.start_line);
+                if !doc.is_empty() {
+                    n.doc = Some(doc);
+                }
 
-        // --- docs (line-based, safe) ---
-        if n.span.start_line != 0 && n.span.start_line <= lines.len() {
-            let doc = gather_docstrings(&lines, n.span.start_line.saturating_sub(1));
-            if !doc.is_empty() {
-                n.doc = Some(doc);
+                // --- signature ---
+                let s = n.span.start_byte.min(file_len);
+                let mut e = n.span.end_byte.min(file_len);
+
+                if s >= file_len {
+                    warn!(
+                        target: "codegraph_prep::languages::dart::docsig",
+                        "dart/docs: start_byte {} >= file len {} for '{}'",
+                        n.span.start_byte, file_len, n.name
+                    );
+                    continue;
+                }
+
+                if let Some(slice) = code.get(s..e) {
+                    // Earliest terminating token among '{', ';', '=>'
+                    let semi = slice.find(';');
+                    let brace = slice.find('{');
+                    let arrow = slice.find("=>");
+
+                    let mut cut = None;
+                    for p in [brace, semi, arrow].into_iter().flatten() {
+                        cut = Some(cut.map_or(p, |c: usize| c.min(p)));
+                    }
+                    if let Some(p) = cut {
+                        e = s + p + if arrow == Some(p) { 2 } else { 1 };
+                    }
+                }
+
+                if let Some(snippet) = code.get(s..e) {
+                    n.signature = Some(snippet.trim().to_string());
+                } else {
+                    warn!(
+                        target: "codegraph_prep::languages::dart::docsig",
+                        "dart/docs: invalid span [{}, {}) for '{}' (file len {})",
+                        n.span.start_byte, n.span.end_byte, n.name, file_len
+                    );
+                }
             }
-        } else {
-            debug!(
-                "dart/docs: suspicious start_line={} for {}",
-                n.span.start_line, n.name
-            );
-        }
-
-        // --- signature (byte-based, UTF-8 lossy safe) ---
-        let sig = safe_signature(code, n.span.start_byte, n.span.end_byte, &n.name);
-        if !sig.is_empty() {
-            n.signature = Some(sig);
+            _ => {}
         }
     }
 }
 
-/// Build a compact signature **safely** from byte offsets:
-/// - clamp indices to [0..len];
-/// - if `end <= start` use the rest of file;
-/// - slice by bytes and decode with `from_utf8_lossy` to avoid UTF-8 boundary panics;
-/// - stop at `{`, `;`, `=>`, or newline.
-fn safe_signature(code: &str, start_byte: usize, end_byte: usize, name_for_log: &str) -> String {
-    let len = code.len();
-
-    if start_byte >= len {
-        warn!(
-            "dart/docs: start_byte {} out of bounds for '{}'",
-            start_byte, name_for_log
-        );
-        return String::new();
-    }
-
-    // Clamp end; if reversed or OOB, scan to EOF.
-    let tail_end = if end_byte <= start_byte || end_byte > len {
-        len
-    } else {
-        end_byte
-    };
-
-    // Slice by **bytes** and decode lossy to avoid char boundary panics.
-    let tail = slice_lossy(code, start_byte, tail_end);
-
-    // Collect until stopper.
-    let mut sig = String::new();
-    let mut prev = '\0';
-    for ch in tail.chars() {
-        if ch == '{' || ch == ';' || ch == '\n' || (prev == '=' && ch == '>') {
+/// Gather `//!` lines from the beginning of the file.
+fn gather_module_doc(lines: &[&str]) -> String {
+    let mut acc = Vec::new();
+    for l in lines {
+        let lt = l.trim_start();
+        if lt.starts_with("//!") {
+            acc.push(lt.trim_start_matches("//!").trim().to_string());
+        } else if lt.is_empty() {
+            // allow blank lines at file head
+            continue;
+        } else {
             break;
         }
-        sig.push(ch);
-        prev = ch;
     }
-
-    // If empty and we cut too early, try to extend a little further (defensive).
-    if sig.is_empty() && tail_end < len {
-        let extra = slice_lossy(code, tail_end, len);
-        for ch in extra.chars() {
-            if ch == '{' || ch == ';' || ch == '\n' {
-                break;
-            }
-            sig.push(ch);
-        }
-    }
-
-    sig.trim().to_string()
+    acc.join("\n")
 }
 
-/// Lossy, UTF-8-safe slicing by **bytes**. Always returns a valid `String`.
-#[inline]
-fn slice_lossy(code: &str, start: usize, end: usize) -> String {
-    let len = code.len();
-    let s = start.min(len);
-    let e = end.min(len);
-    let (s, e) = if s <= e { (s, e) } else { (s, len) };
-    let bytes = &code.as_bytes()[s..e];
-    String::from_utf8_lossy(bytes).into_owned()
-}
+/// Gather contiguous `///` lines or a `/** ... */` block immediately above the declaration line.
+fn gather_inline_doc(lines: &[&str], decl_start_line_1based: usize) -> String {
+    if decl_start_line_1based == 0 {
+        return String::new();
+    }
+    let mut i = decl_start_line_1based.saturating_sub(2); // Span is 1-based
+    let mut acc = Vec::new();
+    let mut in_block = false;
 
-fn gather_module_doc(lines: &[&str]) -> String {
-    let mut buf = Vec::new();
-    let mut i = 0usize;
     while i < lines.len() {
         let l = lines[i].trim_start();
-        if l.starts_with("//!") {
-            buf.push(l.trim_start_matches("//!").trim().to_string());
-            i += 1;
+
+        if l.starts_with("///") {
+            acc.push(l.trim_start_matches("///").trim().to_string());
+        } else if l.ends_with("*/") || in_block {
+            // Collect a block doc upward until '/**'
+            in_block = true;
+            let mut text = l.to_string();
+            // Clean block edges if present on the same line
+            if text.ends_with("*/") {
+                text.truncate(text.len().saturating_sub(2));
+            }
+            if text.starts_with("/**") {
+                text = text.trim_start_matches("/**").to_string();
+            }
+            acc.push(text.trim().trim_start_matches('*').trim().to_string());
+            if l.starts_with("/**") {
+                in_block = false;
+            }
         } else if l.is_empty() {
-            // allow blank lines at top
-            i += 1;
+            // allow a blank line within doc block
         } else {
             break;
         }
-    }
-    buf.join("\n")
-}
 
-fn gather_docstrings(lines: &[&str], decl_start_line_0based: usize) -> String {
-    if decl_start_line_0based >= lines.len() {
-        return String::new();
-    }
-    // Collect inline `///` immediately above.
-    let mut docs: Vec<String> = Vec::new();
-    let mut i = decl_start_line_0based;
-    while i < lines.len() {
-        let line = lines[i].trim_start();
-        if line.starts_with("///") {
-            docs.push(line.trim_start_matches("///").trim().to_string());
-            if i == 0 {
-                break;
-            }
-            i -= 1;
-        } else {
+        if i == 0 {
             break;
         }
-    }
-    docs.reverse();
-
-    // If no `///`, try `/** ... */` right above declaration.
-    if docs.is_empty() && decl_start_line_0based > 0 {
-        let mut j = decl_start_line_0based - 1;
-        let mut block = String::new();
-        let mut seen_end = false;
-        while j < lines.len() {
-            let l = lines[j];
-            if l.contains("*/") {
-                seen_end = true;
-            }
-            if seen_end {
-                block = l.to_string() + "\n" + &block;
-            }
-            if l.contains("/**") {
-                break;
-            }
-            if j == 0 {
-                break;
-            }
-            j -= 1;
-        }
-        if !block.is_empty() {
-            let mut s = block.replace("/**", "").replace("*/", "");
-            s = s
-                .lines()
-                .map(|l| l.trim_start().trim_start_matches('*').trim().to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !s.trim().is_empty() {
-                return s;
-            }
-        }
+        i -= 1;
     }
 
-    docs.join("\n")
+    acc.reverse();
+    let doc = acc.join("\n").trim().to_string();
+    doc
 }

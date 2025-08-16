@@ -162,6 +162,23 @@ Includes:
 
 ---
 
+### Dart AST Debugging
+
+This project includes a helper to inspect the Dart AST of a specific file.
+
+#### Environment variables
+- `PROJECT_NAME` (required): project name, e.g. `project_x`.
+  Source root is always assumed to be `code_data/{PROJECT_NAME}`.
+- `AST_TARGET_SUFFIX` (optional): path suffix of the Dart file.
+  Example: `splash_state.dart` or `presentation/state/splash_state.dart`.
+  If not set, the tool does nothing.
+
+#### Usage
+```bash
+# Run AST dump for a Dart file
+PROJECT_NAME=project_x AST_TARGET_SUFFIX=lib/features/splash/presentation/state/splash_state.dart \
+cargo run --bin dart-ast-dump
+
 ## 🛠 API Endpoints
 
 1. **Upload Project Data**

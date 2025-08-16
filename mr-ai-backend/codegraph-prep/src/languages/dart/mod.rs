@@ -3,7 +3,7 @@
 //! This module collects Dart AST facts with Tree-sitter, enriches them with
 //! docstrings/signatures, and applies regex fallbacks when necessary.
 //!
-//! Notes on resolution:
+//! Resolution notes:
 //! - We resolve **relative** URIs (./, ../, *.dart) in the extractor (no global IO).
 //! - We do **package:** resolution in the graph linker using `DartPackageRegistry`.
 
@@ -12,6 +12,7 @@ mod directives;
 mod docsig;
 mod fallback_regex;
 pub mod uri; // public: used by the graph linker
+mod vars;
 
 use crate::{
     config::model::GraphConfig,
@@ -24,18 +25,16 @@ use crate::{
 };
 use anyhow::Result;
 use std::path::Path;
-use tracing::info;
 use tree_sitter::Tree;
-
-pub use uri::{DartPackageRegistry, resolve_relative};
 
 /// Extract Dart AST facts from a parsed tree + source code.
 ///
-/// - Emits a `file` node.
-/// - Collects directives and declarations.
-/// - Enriches with doc/signatures.
-/// - Applies robust regex fallbacks.
-/// - Flags likely generated files to reduce noise.
+/// Steps:
+/// - Emit a `file` node.
+/// - Collect directives and declarations.
+/// - Enrich via docs/signatures (per-file).
+/// - Apply regex fallbacks.
+/// - Flag likely generated files to reduce noise.
 pub fn extract(
     tree: &Tree,
     code: &str,
@@ -46,7 +45,6 @@ pub fn extract(
     let file = path.to_string_lossy().to_string();
     let span = Span::new(0, 0, 0, 0);
 
-    // Emit file node first so linkers can rely on it even if parsing fails later.
     out.push(AstNode {
         symbol_id: symbol_id(LanguageKind::Dart, &file, &span, &file, &AstKind::File),
         name: file.clone(),
@@ -67,15 +65,19 @@ pub fn extract(
 
     // 1) Directives
     directives::collect_directives(tree, code, path, out)?;
-    // 2) Declarations (+ visibility + annotations + enum enumerators)
+
+    // 2) Declarations
     decls::collect_decls(tree, code, path, out)?;
-    // 3) Docs + signatures (+ module-level //!)
+
+    // 2b) Field variables
+    vars::collect_field_vars(tree, code, path, out)?;
+
+    // 3) Docs + signatures
     docsig::enrich_docs_and_signatures(code, path, out);
 
     // 4) Fallbacks
     fallback_regex::maybe_apply_regex_fallbacks(code, path, out);
 
-    info!("dart: extracted {} nodes from {}", out.len(), file);
     Ok(())
 }
 

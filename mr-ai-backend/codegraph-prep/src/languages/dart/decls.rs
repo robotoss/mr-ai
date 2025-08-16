@@ -32,7 +32,7 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
             | "classMemberDeclaration" => {
                 if let Some(name_node) = pick_name_node(&node, code) {
                     let name = text(code, name_node.byte_range());
-                    let span = node_span(&node);
+                    let span = node_span_clipped(&node, code);
                     push_decl(path, out, AstKind::Class, &name, span, &owner, code, &node);
                     owner_for_children = push_owner(owner, name);
                 }
@@ -40,7 +40,7 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
             "mixin_declaration" | "mixinDeclaration" => {
                 if let Some(name_node) = pick_name_node(&node, code) {
                     let name = text(code, name_node.byte_range());
-                    let span = node_span(&node);
+                    let span = node_span_clipped(&node, code);
                     push_decl(path, out, AstKind::Mixin, &name, span, &owner, code, &node);
                     owner_for_children = push_owner(owner, name);
                 }
@@ -48,7 +48,7 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
             "mixin_class_declaration" | "mixinClassDeclaration" => {
                 if let Some(name_node) = pick_name_node(&node, code) {
                     let name = text(code, name_node.byte_range());
-                    let span = node_span(&node);
+                    let span = node_span_clipped(&node, code);
                     push_decl(path, out, AstKind::Class, &name, span, &owner, code, &node);
                     owner_for_children = push_owner(owner, name);
                 }
@@ -56,12 +56,12 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
             "enum_declaration" | "enumDeclaration" => {
                 if let Some(name_node) = pick_name_node(&node, code) {
                     let name = text(code, name_node.byte_range());
-                    let span = node_span(&node);
+                    let span = node_span_clipped(&node, code);
                     push_decl(path, out, AstKind::Enum, &name, span, &owner, code, &node);
                     owner_for_children = push_owner(owner, name);
                     // Enumerators as Fields
                     for en in collect_enum_enumerators(&node, code) {
-                        let esp = node_span(&node); // cheap: reuse enum span for simplicity
+                        let esp = span; // cheap: reuse enum span for simplicity
                         push_decl(
                             path,
                             out,
@@ -78,7 +78,7 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
             "extension_declaration" | "extensionDeclaration" => {
                 let name =
                     pick_optional_name(&node, code).unwrap_or_else(|| "extension".to_string());
-                let span = node_span(&node);
+                let span = node_span_clipped(&node, code);
                 push_decl(
                     path,
                     out,
@@ -95,7 +95,7 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
                 let name = pick_name_node(&node, code)
                     .map(|n| text(code, n.byte_range()))
                     .unwrap_or_else(|| "extension type".to_string());
-                let span = node_span(&node);
+                let span = node_span_clipped(&node, code);
                 push_decl(
                     path,
                     out,
@@ -113,7 +113,7 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
             "method_declaration" | "methodDeclaration" | "method_signature" | "methodSignature" => {
                 if let Some(name_node) = pick_name_node(&node, code) {
                     let name = text(code, name_node.byte_range());
-                    let span = node_span(&node);
+                    let span = node_span_clipped(&node, code);
                     let kind = if owner.is_empty() {
                         AstKind::Function
                     } else {
@@ -128,7 +128,7 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
             | "functionSignature" => {
                 if let Some(name_node) = pick_name_node(&node, code) {
                     let name = text(code, name_node.byte_range());
-                    let span = node_span(&node);
+                    let span = node_span_clipped(&node, code);
                     let kind = if owner.is_empty() {
                         AstKind::Function
                     } else {
@@ -140,14 +140,14 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
             "getter_declaration" | "getterDeclaration" => {
                 if let Some(name_node) = pick_name_node(&node, code) {
                     let name = format!("get {}", text(code, name_node.byte_range()));
-                    let span = node_span(&node);
+                    let span = node_span_clipped(&node, code);
                     push_decl(path, out, AstKind::Method, &name, span, &owner, code, &node);
                 }
             }
             "setter_declaration" | "setterDeclaration" => {
                 if let Some(name_node) = pick_name_node(&node, code) {
                     let name = format!("set {}", text(code, name_node.byte_range()));
-                    let span = node_span(&node);
+                    let span = node_span_clipped(&node, code);
                     push_decl(path, out, AstKind::Method, &name, span, &owner, code, &node);
                 }
             }
@@ -155,7 +155,7 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
                 let name = pick_name_node(&node, code)
                     .map(|n| text(code, n.byte_range()))
                     .unwrap_or_else(|| "constructor".to_string());
-                let span = node_span(&node);
+                let span = node_span_clipped(&node, code);
                 push_decl(path, out, AstKind::Method, &name, span, &owner, code, &node);
             }
 
@@ -165,9 +165,15 @@ pub fn collect_decls(tree: &Tree, code: &str, path: &Path, out: &mut Vec<AstNode
             | "top_level_variable_declaration"
             | "topLevelVariableDeclaration"
             | "variable_declaration"
-            | "variableDeclaration" => {
+            | "variableDeclaration"
+            | "initialized_variable_declaration"
+            | "initializedVariableDeclaration"
+            | "variable_declaration_list"
+            | "variableDeclarationList"
+            | "variable_declarator"
+            | "variableDeclarator" => {
                 for name in collect_var_names(&node, code) {
-                    let span = node_span(&node);
+                    let span = node_span_clipped(&node, code);
                     let kind = if owner.is_empty() {
                         AstKind::Variable
                     } else {
@@ -270,7 +276,35 @@ fn pick_name_node<'a>(node: &'a Node, code: &str) -> Option<Node<'a>> {
     None
 }
 
-fn collect_var_names(node: &Node, code: &str) -> Vec<String> {
+/// Collect variable and field names from a given Dart AST node (deep DFS, robust).
+///
+/// Strategy:
+/// - Walk the full subtree (DFS).
+/// - Consider a node as a "declaration context" if its kind contains:
+///   `field_declaration`, `variable_declaration`, `initialized_variable_declaration`,
+///   `variable_declaration_list`, or `variable_declarator` (camelCase/snake_case variants).
+/// - Inside that context, gather identifier-like tokens that:
+///   * are not reserved keywords (`final`, `const`, `var`);
+///   * are not inside a type context (Type/TypeAnnotation/type_identifier);
+///   * are not part of a qualified/property access (Icons.*, foo.bar).
+/// - If there is `=`, pick the last candidate ending before `=`; otherwise pick the last candidate.
+///
+/// This reliably catches:
+///   `final IconData gamesIcon = Icons.games_outlined;` → `gamesIcon`.
+pub fn collect_var_names(node: &Node, code: &str) -> Vec<String> {
+    // Kinds (варианты на разные версии grammar)
+    const DECL_CTX: [&str; 10] = [
+        "field_declaration",
+        "fieldDeclaration",
+        "variable_declaration",
+        "variableDeclaration",
+        "initialized_variable_declaration",
+        "initializedVariableDeclaration",
+        "variable_declaration_list",
+        "variableDeclarationList",
+        "variable_declarator",
+        "variableDeclarator",
+    ];
     const ID_KINDS: [&str; 6] = [
         "identifier",
         "simple_identifier",
@@ -279,34 +313,147 @@ fn collect_var_names(node: &Node, code: &str) -> Vec<String> {
         "type_identifier",
         "TypeIdentifier",
     ];
-    let mut names = Vec::new();
-    let mut w = node.walk();
-    for ch in node.children(&mut w) {
-        let mut w2 = ch.walk();
-        for g in ch.children(&mut w2) {
-            if ID_KINDS.contains(&g.kind()) {
-                let text = text(code, g.byte_range());
-                if matches!(text.as_str(), "final" | "const" | "var") {
-                    continue;
-                }
-                let next_char = code
-                    .get(g.end_byte()..g.end_byte().saturating_add(1))
-                    .unwrap_or("");
-                if next_char == "<" || next_char == "." || next_char == ">" {
-                    continue;
-                }
-                if !text.is_empty()
-                    && text
-                        .chars()
-                        .next()
-                        .map(|c| c.is_alphabetic() || c == '_')
-                        .unwrap_or(false)
-                {
-                    names.push(text);
-                }
+    const TYPE_CTX: [&str; 8] = [
+        "type",
+        "type_annotation",
+        "TypeAnnotation",
+        "typeName",
+        "type_identifier",
+        "TypeIdentifier",
+        "return_type",
+        "ReturnType",
+    ];
+    const QUAL_CTX: [&str; 12] = [
+        "qualified",
+        "prefixed_identifier",
+        "prefixedIdentifier",
+        "scoped_identifier",
+        "scopedIdentifier",
+        "property_access",
+        "propertyAccess",
+        "member_expression",
+        "memberExpression",
+        "prefixed_type_identifier",
+        "prefixedTypeIdentifier",
+        "constructor_name",
+    ];
+
+    #[inline]
+    fn is_decl_ctx(kind: &str) -> bool {
+        DECL_CTX.iter().any(|k| kind.contains(k))
+    }
+    #[inline]
+    fn txt(code: &str, range: std::ops::Range<usize>) -> String {
+        let len = code.len();
+        let s = range.start.min(len);
+        let e = range.end.min(len);
+        let (s, e) = if s <= e { (s, e) } else { (s, len) };
+        String::from_utf8_lossy(&code.as_bytes()[s..e]).into_owned()
+    }
+    #[inline]
+    fn is_type_context(mut n: Node) -> bool {
+        while let Some(p) = n.parent() {
+            let k = p.kind();
+            if TYPE_CTX.contains(&k) {
+                return true;
             }
+            if is_decl_ctx(k) {
+                break;
+            }
+            n = p;
+        }
+        false
+    }
+    #[inline]
+    fn is_qualified(mut n: Node) -> bool {
+        while let Some(p) = n.parent() {
+            let k = p.kind();
+            if QUAL_CTX.contains(&k) {
+                return true;
+            }
+            if is_decl_ctx(k) {
+                break;
+            }
+            n = p;
+        }
+        false
+    }
+
+    // 1) Соберём все "контексты деклараций" под `node` явным стеком
+    let mut decl_nodes: Vec<Node> = Vec::new();
+    let mut stack = vec![*node];
+    while let Some(cur) = stack.pop() {
+        if is_decl_ctx(cur.kind()) {
+            decl_nodes.push(cur);
+        }
+        let mut w = cur.walk();
+        for ch in cur.children(&mut w) {
+            stack.push(ch);
         }
     }
+    if decl_nodes.is_empty() && is_decl_ctx(node.kind()) {
+        decl_nodes.push(*node);
+    }
+
+    // 2) Для каждого контекста достанем имя(ена) переменных
+    let mut names: Vec<String> = Vec::new();
+
+    for ctx in decl_nodes {
+        // 2.1) Позиция '=' (если есть) внутри контекста
+        let mut eq_pos: Option<usize> = None;
+        let mut st = vec![ctx];
+        while let Some(n2) = st.pop() {
+            let r = n2.byte_range();
+            if r.start < r.end {
+                let s = txt(code, r.clone());
+                if s.trim() == "=" {
+                    eq_pos = Some(r.start);
+                }
+            }
+            let mut w = n2.walk();
+            for g in n2.children(&mut w) {
+                st.push(g);
+            }
+        }
+
+        // 2.2) Кандидаты-идентификаторы до '='
+        let mut candidates: Vec<(String, usize)> = Vec::new();
+        let mut st2 = vec![ctx];
+        while let Some(n3) = st2.pop() {
+            if ID_KINDS.contains(&n3.kind()) {
+                let ident = txt(code, n3.byte_range());
+                if !ident.is_empty() {
+                    // фильтры
+                    if matches!(ident.as_str(), "final" | "const" | "var") {
+                        // ключевые слова — не имена
+                    } else if is_type_context(n3) {
+                        // часть типа — пропускаем
+                    } else if is_qualified(n3) {
+                        // часть qualified / property доступа — пропускаем
+                    } else {
+                        if let Some(eq) = eq_pos {
+                            if n3.end_byte() <= eq {
+                                candidates.push((ident, n3.end_byte()));
+                            }
+                        } else {
+                            candidates.push((ident, n3.end_byte()));
+                        }
+                    }
+                }
+            }
+            let mut w = n3.walk();
+            for g in n3.children(&mut w) {
+                st2.push(g);
+            }
+        }
+
+        // Берём «последний» кандидат до '=' — это и есть имя переменной
+        if let Some((name, _)) = candidates.into_iter().max_by_key(|(_, e)| *e) {
+            names.push(name);
+        }
+    }
+
+    // 3) Уберём дубли, сохранив порядок
     let mut seen = std::collections::HashSet::new();
     names.retain(|n| seen.insert(n.clone()));
     names
@@ -408,12 +555,24 @@ fn parse_annotation_line(s: &str) -> Option<Annotation> {
     }
 }
 
-fn node_span(node: &Node) -> Span {
+fn node_span_clipped(node: &Node, code: &str) -> Span {
+    let len = code.len();
+    let mut s = node.start_byte();
+    let mut e = node.end_byte();
+    if s > len {
+        s = len;
+    }
+    if e > len {
+        e = len;
+    }
+    if s > e {
+        s = e;
+    }
     Span {
         start_line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
-        start_byte: node.start_byte(),
-        end_byte: node.end_byte(),
+        start_byte: s,
+        end_byte: e,
     }
 }
 

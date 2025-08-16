@@ -1,8 +1,8 @@
 //! URI helpers for Dart.
 //!
-//! - `resolve_relative`: handles `./`, `../`, and direct `*.dart` relative to the source file.
-//! - `DartPackageRegistry`: scans all `pubspec.yaml` in a monorepo to build a `package:` map.
-//!   It also reads path-based deps in `dependencies`, `dev_dependencies`, and `dependency_overrides`.
+//! - [`resolve_relative`] handles `./`, `../`, and direct `*.dart` relative to the source file.
+//! - [`DartPackageRegistry`] scans all `pubspec.yaml` files in a monorepo to build a `package:` map.
+//!   It also reads path-based dependencies in `dependencies`, `dev_dependencies`, and `dependency_overrides`.
 
 use serde::Deserialize;
 use serde_yml::Value;
@@ -11,27 +11,69 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use tracing::{debug, warn};
 use walkdir::WalkDir;
 
+/// Resolve a relative Dart import/export spec into an absolute path.
+///
+/// This handles only local paths (`./`, `../`, `*.dart`).
+/// `package:` and `dart:` URIs are ignored (handled elsewhere).
+///
+/// # Example
+/// ```rust
+/// use std::path::Path;
+/// use codegraph_prep::languages::dart::uri::resolve_relative;
+///
+/// let src = Path::new("/proj/lib/src/foo.dart");
+/// let resolved = resolve_relative(src, "../bar.dart");
+/// assert!(resolved.unwrap().ends_with("lib/bar.dart"));
+/// ```
 pub fn resolve_relative(src_file: &Path, spec: &str) -> Option<PathBuf> {
     if !(spec.starts_with("./") || spec.starts_with("../") || spec.ends_with(".dart")) {
         return None;
     }
     let base = src_file.parent().unwrap_or_else(|| Path::new(""));
-    let p = base.join(spec);
-    Some(dunce::canonicalize(&p).unwrap_or(p))
+    let candidate = base.join(spec);
+
+    match dunce::canonicalize(&candidate) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            warn!(
+                "Failed to canonicalize relative path {:?} from base {:?}: {}",
+                spec, base, e
+            );
+            Some(candidate) // fallback to non-canonicalized path
+        }
+    }
 }
 
-/// Monorepo-wide package registry for `package:` URI resolution.
+/// Monorepo-wide registry mapping Dart `package:` URIs to filesystem paths.
 ///
-/// `package:foo/bar.dart` → `<pkg-root>/lib/bar.dart`
+/// It scans all `pubspec.yaml` files under a given root directory.
+/// Each entry is mapped as: `package:foo/bar.dart` → `<pkg-root>/lib/bar.dart`.
 #[derive(Debug, Default, Clone)]
 pub struct DartPackageRegistry {
     packages: HashMap<String, PathBuf>, // name -> <dir>/lib
 }
 
 impl DartPackageRegistry {
-    /// Build registry by scanning all `pubspec.yaml` under `root`.
+    /// Build a package registry by scanning all `pubspec.yaml` under the given root directory.
+    ///
+    /// - Extracts the `name:` field from each pubspec.
+    /// - Collects path-based dependencies (`dependencies`, `dev_dependencies`, `dependency_overrides`).
+    ///
+    /// # Errors
+    /// Returns [`anyhow::Error`] if reading or parsing a `pubspec.yaml` fails.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::path::Path;
+    /// use codegraph_prep::languages::dart::uri::DartPackageRegistry;
+    ///
+    /// let root = Path::new("/path/to/monorepo");
+    /// let registry = DartPackageRegistry::from_root(root).unwrap();
+    /// let resolved = registry.resolve_package("package:foo/src/bar.dart");
+    /// ```
     pub fn from_root(root: &Path) -> anyhow::Result<Self> {
         #[derive(Deserialize, Default)]
         struct PubspecName {
@@ -47,15 +89,24 @@ impl DartPackageRegistry {
             }
 
             let base_dir = p.parent().unwrap_or(root);
-            let content = fs::read_to_string(p)?;
-            // name:
+            debug!("Parsing pubspec: {:?}", p);
+
+            let content = match fs::read_to_string(p) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Failed to read {:?}: {}", p, e);
+                    continue;
+                }
+            };
+
+            // Extract package name
             if let Ok(meta) = serde_yml::from_str::<PubspecName>(&content) {
                 if let Some(name) = meta.name {
                     map.entry(name).or_insert(base_dir.join("lib"));
                 }
             }
 
-            // path-based deps
+            // Path-based dependencies
             let val: Value = serde_yml::from_str(&content).unwrap_or(Value::Null);
             collect_path_deps_into(base_dir, &val, "dependencies", &mut map);
             collect_path_deps_into(base_dir, &val, "dev_dependencies", &mut map);
@@ -65,7 +116,18 @@ impl DartPackageRegistry {
         Ok(Self { packages: map })
     }
 
-    /// Given `package:foo/path.dart`, return absolute path `<lib-of-foo>/path.dart` if known.
+    /// Resolve a `package:` URI to its absolute path if known.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::path::Path;
+    /// use codegraph_prep::languages::dart::uri::DartPackageRegistry;
+    ///
+    /// let registry = DartPackageRegistry::from_root(Path::new("/repo")).unwrap();
+    /// if let Some(abs) = registry.resolve_package("package:foo/bar.dart") {
+    ///     println!("Resolved path: {:?}", abs);
+    /// }
+    /// ```
     pub fn resolve_package(&self, spec: &str) -> Option<PathBuf> {
         if !spec.starts_with("package:") {
             return None;
@@ -75,10 +137,24 @@ impl DartPackageRegistry {
         let pkg = it.next()?;
         let rel = it.next().unwrap_or("");
         let lib = self.packages.get(pkg)?;
-        Some(lib.join(rel))
+
+        let resolved = lib.join(rel);
+        debug!("Resolved package spec '{}' -> {:?}", spec, resolved);
+        Some(resolved)
+    }
+
+    /// Number of registered packages.
+    pub fn len(&self) -> usize {
+        self.packages.len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.packages.is_empty()
     }
 }
 
+/// Collect path-based dependencies into the registry map.
 fn collect_path_deps_into(
     base_dir: &Path,
     root: &Value,
@@ -104,6 +180,7 @@ fn collect_path_deps_into(
                     } else {
                         base_dir.join(path_str)
                     };
+                    debug!("Found path-based dep: {} -> {:?}", dep_name, dir);
                     out.entry(dep_name.to_string()).or_insert(dir.join("lib"));
                 }
             }

@@ -9,7 +9,6 @@ use crate::{
     model::{
         ast::{AstKind, AstNode},
         language::LanguageKind,
-        span::Span,
     },
 };
 use anyhow::Result;

@@ -11,7 +11,7 @@
 
 use crate::{
     config::model::GraphConfig,
-    core::fs_scan::ScannedFile,
+    core::{debug_ast::maybe_debug_ast, fs_scan::ScannedFile},
     languages::{dart, javascript, python, rust, typescript},
     model::{ast::AstNode, language::LanguageKind},
 };
@@ -38,13 +38,31 @@ pub fn parse_and_extract(
         .parse(&code, None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed: {}", file.path.display()))?;
 
+    // Print AST only for base_home_page.dart (temporary filter)
+    let _ = maybe_debug_ast(&file.path, lang);
+
     info!("extract: lang={:?} file={}", lang, file.path.display());
     let res = match lang {
-        LanguageKind::Dart => dart::extract(&tree, &code, &file.path, out, config),
-        LanguageKind::Rust => rust::extract(&tree, &code, &file.path, out, config),
-        LanguageKind::Python => python::extract(&tree, &code, &file.path, out, config),
-        LanguageKind::JavaScript => javascript::extract(&tree, &code, &file.path, out, config),
-        LanguageKind::TypeScript => typescript::extract(&tree, &code, &file.path, out, config),
+        LanguageKind::Dart => {
+            debug!("extracting Dart from {}", file.path.display());
+            dart::extract(&tree, &code, &file.path, out, config)
+        }
+        LanguageKind::Rust => {
+            debug!("extracting Rust from {}", file.path.display());
+            rust::extract(&tree, &code, &file.path, out, config)
+        }
+        LanguageKind::Python => {
+            debug!("extracting Python from {}", file.path.display());
+            python::extract(&tree, &code, &file.path, out, config)
+        }
+        LanguageKind::JavaScript => {
+            debug!("extracting JavaScript from {}", file.path.display());
+            javascript::extract(&tree, &code, &file.path, out, config)
+        }
+        LanguageKind::TypeScript => {
+            debug!("extracting TypeScript from {}", file.path.display());
+            typescript::extract(&tree, &code, &file.path, out, config)
+        }
     };
 
     if let Err(e) = &res {
@@ -56,19 +74,19 @@ pub fn parse_and_extract(
 fn set_language(parser: &mut Parser, lang: LanguageKind) -> Result<()> {
     match lang {
         LanguageKind::Dart => {
-            parser.set_language(&tree_sitter_dart_orchard::LANGUAGE.into())?;
+            parser.set_language(&tree_sitter_dart::language())?;
         }
         LanguageKind::Rust => {
-            parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;
+            parser.set_language(&tree_sitter_rust::language())?;
         }
         LanguageKind::Python => {
-            parser.set_language(&tree_sitter_python::LANGUAGE.into())?;
+            parser.set_language(&tree_sitter_python::language())?;
         }
         LanguageKind::JavaScript => {
-            parser.set_language(&tree_sitter_javascript::LANGUAGE.into())?;
+            parser.set_language(&tree_sitter_javascript::language())?;
         }
         LanguageKind::TypeScript => {
-            parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())?;
+            parser.set_language(&tree_sitter_typescript::language_typescript())?;
         }
     }
     Ok(())
