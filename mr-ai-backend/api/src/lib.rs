@@ -10,16 +10,14 @@ use axum::{
 use tokio::signal;
 
 use crate::routes::{
-    ask_question_route::ask_question, learn_code_route::learn_code,
-    prepare_graph_route::prepare_graph, prepare_qdrant_route::prepare_qdrant,
-    upload_project_data::upload_project_data,
+    ask_question_route::ask_question, prepare_graph_route::prepare_graph,
+    prepare_qdrant_route::prepare_qdrant, upload_project_data::upload_project_data,
 };
 
 pub async fn start() -> Result<(), Box<dyn Error>> {
     let host_url = env::var("API_ADDRESS").expect("API_ADDRESS must be set in environment");
 
     let app = Router::new()
-        .route("/learn_code", get(learn_code))
         .route("/prepare_graph", get(prepare_graph))
         .route("/prepare_qdrant", get(prepare_qdrant))
         .route("/ask_question", get(ask_question))
