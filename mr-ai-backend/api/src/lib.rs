@@ -10,8 +10,9 @@ use axum::{
 use tokio::signal;
 
 use crate::routes::{
-    learn_code_route::learn_code, prepare_graph_route::prepare_graph,
-    prepare_qdrant_route::prepare_qdrant, upload_project_data::upload_project_data,
+    ask_question_route::ask_question, learn_code_route::learn_code,
+    prepare_graph_route::prepare_graph, prepare_qdrant_route::prepare_qdrant,
+    upload_project_data::upload_project_data,
 };
 
 pub async fn start() -> Result<(), Box<dyn Error>> {
@@ -21,6 +22,7 @@ pub async fn start() -> Result<(), Box<dyn Error>> {
         .route("/learn_code", get(learn_code))
         .route("/prepare_graph", get(prepare_graph))
         .route("/prepare_qdrant", get(prepare_qdrant))
+        .route("/ask_question", get(ask_question))
         .route("/upload_project_data", post(upload_project_data));
 
     // Bind to address
