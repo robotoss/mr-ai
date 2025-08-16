@@ -2,7 +2,7 @@
 //!
 //! This crate provides a clean API to:
 //! - Discover and ingest JSONL dumps with precomputed or on-the-fly embeddings
-//! - Retrieve top‑K context (RAG) for a textual query
+//! - Retrieve top-K context (RAG) for a textual query
 //!
 //! The design is flat (no deep nesting) and splits responsibilities into focused modules.
 
@@ -17,16 +17,24 @@ mod qdrant_facade;
 mod record;
 mod retrieve;
 
+// Optional helpers (compaction & embedding pool)
+mod embed_pool;
+mod mappers;
+mod normalize;
+
 pub use config::{DistanceKind, RagConfig, VectorSpace};
+pub use embed::ollama::{OllamaConfig, OllamaEmbedder};
 pub use embed::{EmbeddingPolicy, EmbeddingsProvider};
 pub use errors::RagError;
 pub use record::{RagFilter, RagHit, RagQuery, RagRecord};
 
-use tracing::{debug, trace};
+use tracing::{debug, info};
 
 /// High-level facade that wires configuration and Qdrant client.
 ///
-/// This is the single entry point recommended for application code.
+/// `RagStore` is the single entry point recommended for application code.
+/// It provides ingestion (strict/flexible JSONL + AST/graph mappers)
+/// and retrieval (vector search + RAG context).
 pub struct RagStore {
     cfg: RagConfig,
     client: qdrant_facade::QdrantFacade,
@@ -38,7 +46,7 @@ impl RagStore {
     /// # Errors
     /// Returns `RagError::Config` if the client initialization fails.
     pub fn new(cfg: RagConfig) -> Result<Self, RagError> {
-        trace!("RagStore::new collection={}", cfg.collection);
+        info!("RagStore::new collection={}", cfg.collection);
         let client = qdrant_facade::QdrantFacade::new(&cfg)?;
         Ok(Self { cfg, client })
     }
@@ -46,7 +54,7 @@ impl RagStore {
     /// Ingests `rag_records.jsonl` from the latest timestamp under:
     /// `<root>/project_x/graphs_data/<YYYYMMDD_HHMMSS>/rag_records.jsonl`.
     ///
-    /// Uses `EmbeddingPolicy` to resolve vectors.
+    /// Uses [`EmbeddingPolicy`] to resolve vectors.
     ///
     /// # Errors
     /// Returns errors on I/O, parse, vector size mismatch, or Qdrant failures.
@@ -54,8 +62,8 @@ impl RagStore {
         &self,
         root: impl AsRef<std::path::Path>,
         policy: EmbeddingPolicy<'_>,
-    ) -> Result<usize, RagError> {
-        debug!("RagStore::ingest_latest_from root={:?}", root.as_ref());
+    ) -> Result<u64, RagError> {
+        info!("RagStore::ingest_latest_from root={:?}", root.as_ref());
         ingest::ingest_latest_from(&self.cfg, root, policy, &self.client).await
     }
 
@@ -67,9 +75,26 @@ impl RagStore {
         &self,
         jsonl_path: impl AsRef<std::path::Path>,
         policy: EmbeddingPolicy<'_>,
-    ) -> Result<usize, RagError> {
-        trace!("RagStore::ingest_file path={:?}", jsonl_path.as_ref());
+    ) -> Result<u64, RagError> {
+        info!("RagStore::ingest_file path={:?}", jsonl_path.as_ref());
         ingest::ingest_file(&self.cfg, jsonl_path, policy, &self.client).await
+    }
+
+    /// Ingests **all** supported files (rag+ast+graph) from the latest dump directory,
+    /// computing embeddings inside the module using an embedding provider.
+    ///
+    /// # Errors
+    /// Returns errors on I/O, parse, embedding, vector size mismatch, or Qdrant failures.
+    pub async fn ingest_latest_all_embedded(
+        &self,
+        root: impl AsRef<std::path::Path>,
+        provider: &dyn EmbeddingsProvider,
+    ) -> Result<u64, RagError> {
+        info!(
+            "RagStore::ingest_latest_all_embedded root={:?}",
+            root.as_ref()
+        );
+        ingest::ingest_latest_all_embedded(&self.cfg, root, provider, &self.client).await
     }
 
     /// Performs a low-level vector search and returns `(score, payload)` tuples.
@@ -83,7 +108,10 @@ impl RagStore {
         filter: Option<RagFilter>,
         with_payload: bool,
     ) -> Result<Vec<(f32, serde_json::Value)>, RagError> {
-        trace!("RagStore::search_by_vector top_k={top_k} with_payload={with_payload}");
+        debug!(
+            "RagStore::search_by_vector top_k={} with_payload={}",
+            top_k, with_payload
+        );
         let qfilter = filter.as_ref().map(filters::to_qdrant_filter);
         retrieve::search_by_vector(
             &self.cfg,
@@ -106,7 +134,7 @@ impl RagStore {
         query: RagQuery<'_>,
         provider: &dyn EmbeddingsProvider,
     ) -> Result<Vec<RagHit>, RagError> {
-        trace!("RagStore::rag_context top_k={}", query.top_k);
+        debug!("RagStore::rag_context top_k={}", query.top_k);
         retrieve::rag_context(&self.cfg, &self.client, query, provider).await
     }
 }

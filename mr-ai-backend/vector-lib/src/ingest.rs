@@ -6,8 +6,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use graph_prepare::models::{ast_node::ASTNode, graph_node::GraphNode};
-use qdrant_client::{Payload, qdrant::PointId};
+use graph_prepare::models::graph_node::GraphNode;
+use qdrant_client::Payload;
 use serde::Deserialize;
 use serde_json::json;
 use services::uuid::stable_uuid;
@@ -169,7 +169,7 @@ pub async fn ingest_from_graph_prepare(
     add_file_chunks(&mut docs, &file_nodes, max_lines, overlap).await;
 
     // Symbol documents
-    for (i, n) in nodes.iter().enumerate() {
+    for (_i, n) in nodes.iter().enumerate() {
         if !is_symbol(n) {
             continue;
         }

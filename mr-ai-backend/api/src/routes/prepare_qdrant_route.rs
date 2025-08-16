@@ -1,15 +1,17 @@
-use rag_store::{DistanceKind, EmbeddingPolicy, EmbeddingsProvider, RagConfig, RagStore};
+use rag_store::{EmbeddingPolicy, OllamaConfig, OllamaEmbedder, RagConfig, RagStore};
 
 pub async fn prepare_qdrant() -> &'static str {
     // 1) Configure store
-    let cfg = RagConfig {
-        qdrant_url: "http://localhost:6334".to_string(),
-        qdrant_api_key: None,
-        collection: "project_x_latest".to_string(),
-        distance: DistanceKind::Cosine,
-        upsert_batch: 256,
-        exact_search: false,
+    let cfg = RagConfig::from_env();
+
+    let cfg = match cfg {
+        Ok(cfg) => cfg,
+        Err(ex) => {
+            println!("FAILED cfg: {}", ex);
+            return "Hello, World!";
+        }
     };
+
     let store = RagStore::new(cfg);
 
     let store = match store {
@@ -20,10 +22,16 @@ pub async fn prepare_qdrant() -> &'static str {
         }
     };
 
+    let ollama = OllamaEmbedder::new(OllamaConfig {
+        url: std::env::var("OLLAMA_URL").unwrap(),
+        model: std::env::var("EMBEDDING_MODEL").unwrap(),
+        dim: std::env::var("EMBEDDING_DIM").unwrap().parse().unwrap(),
+    });
+
     // 2) Ingest only `rag_records.jsonl` from the latest timestamp directory
     //    under: code_data/project_x/graphs_data/<YYYYMMDD_HHMMSS>/rag_records.jsonl
     let count = store
-        .ingest_latest_from("code_data", EmbeddingPolicy::PrecomputedOr(&NoopEmbedder))
+        .ingest_latest_from("code_data", EmbeddingPolicy::PrecomputedOr(&ollama))
         .await;
 
     let count = match count {
@@ -37,12 +45,4 @@ pub async fn prepare_qdrant() -> &'static str {
     println!("Ingested points: {count}");
 
     "Hello, World!"
-}
-
-struct NoopEmbedder;
-impl EmbeddingsProvider for NoopEmbedder {
-    fn embed(&self, _text: &str) -> Result<Vec<f32>, rag_store::RagError> {
-        // This should never be called if rag_records.jsonl has precomputed embeddings.
-        Err(rag_store::RagError::MissingEmbedding)
-    }
 }

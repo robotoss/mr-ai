@@ -7,30 +7,20 @@ keywords = ["rag", "qdrant", "vector", "retrieval", "jsonl"]
 categories = ["database", "science", "data-structures"]
 
 [dependencies]
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "fs"] }
-futures = "0.3"
+# ---- Shared via workspace (keep using the workspace pins) ----
+serde = { workspace = true, features = ["derive"] }     # data models (Serialize/Deserialize)
+serde_json = { workspace = true }                       # JSON (parsing JSONL rows & payload)
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# ^ we don't need "fs" here; std::fs is used in readers. "rt" is implied by "rt-multi-thread".
 
-# Qdrant vector database client
-qdrant-client = "1.15"
+# ---- External crates required by the library itself ----
+futures = "0.3"                                         # buffer_unordered for parallel embedding
+qdrant-client = "1.15"                                  # Qdrant client (builder API)
+tracing = "0.1"                                         # logging (trace/debug/info/warn/error)
+thiserror = "1.0"                                       # structured error type (RagError)
 
-# Logging & tracing
-tracing = "0.1"
-tracing-futures = "0.2"
+# HTTP client for embedding providers (Ollama).
+# We use blocking client + spawn_blocking; Rustls to avoid OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
-# Error handling
-thiserror = "1.0"
-
-# HTTP client (for embedding providers or external integrations)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
-# Local workspace dependencies
-graph-prepare = { path = "../graph-prepare" }
-services = { path = "../services" }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "fs", "test-util"] }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+indicatif = "0.18"

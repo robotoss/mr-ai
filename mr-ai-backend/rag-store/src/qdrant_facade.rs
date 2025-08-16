@@ -1,7 +1,8 @@
 //! Thin adapter around `qdrant-client` to isolate API usage.
 //!
-//! This facade concentrates all Qdrant interactions behind a small API,
-//! using the modern builder-based client (`qdrant_client::Qdrant`).
+//! This facade concentrates all Qdrant interactions behind a minimal API,
+//! hiding away the verbose builder pattern and keeping the rest of the
+//! application decoupled from `qdrant-client`.
 
 use crate::config::{DistanceKind, RagConfig, VectorSpace};
 use crate::errors::RagError;
@@ -9,29 +10,30 @@ use crate::errors::RagError;
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     CreateCollectionBuilder, Distance, Filter, PointStruct, SearchParamsBuilder,
-    SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
+    SearchPointsBuilder, UpsertPointsBuilder, Value as QValue, VectorParamsBuilder,
 };
-use tracing::trace;
+use tracing::{debug, info, warn};
 
-/// A minimal facade over the Qdrant client to keep the rest of the code decoupled.
+/// A facade over the Qdrant client to keep the rest of the code clean and stable.
+///
+/// This struct encapsulates:
+/// - The underlying Qdrant client.
+/// - The target collection name.
+/// - The distance function used in the vector space.
 pub struct QdrantFacade {
-    client: Qdrant,
-    collection: String,
+    pub(crate) client: Qdrant,
+    pub(crate) collection: String,
     distance: DistanceKind,
 }
 
 impl QdrantFacade {
     /// Creates a new facade from the given configuration.
     ///
-    /// Uses the new builder API:
-    /// `Qdrant::from_url(cfg.qdrant_url).api_key(...).build()?`
-    ///
-    /// # Errors
-    /// Returns `RagError::Config` for invalid cfg or wraps client init failures as `RagError::Qdrant`.
+    /// Uses the modern builder-based API of `qdrant-client` and supports
+    /// optional API key authentication.
     pub fn new(cfg: &RagConfig) -> Result<Self, RagError> {
-        cfg.validate()?;
+        cfg.validate()?; // Early validation of config.
 
-        // Build client via modern API (no deprecated configs).
         let mut builder = Qdrant::from_url(&cfg.qdrant_url);
         if let Some(key) = &cfg.qdrant_api_key {
             builder = builder.api_key(key.clone());
@@ -47,24 +49,27 @@ impl QdrantFacade {
         })
     }
 
-    /// Ensures the collection exists with the provided vector space.
+    /// Ensures that the collection exists in Qdrant.
     ///
-    /// If the collection is absent, it will be created using the selected distance function.
+    /// - If the collection already exists → no-op.
+    /// - If missing → creates it with the given vector space configuration.
     pub async fn ensure_collection(&self, space: &VectorSpace) -> Result<(), RagError> {
-        trace!(
-            "qdrant_facade::ensure_collection name={} size={} distance={:?}",
+        info!(
+            "Ensuring collection '{}' with size={} distance={:?}",
             self.collection, space.size, self.distance
         );
 
-        // Check existence via collection_info; if it exists - return Ok.
+        // Try to fetch collection info first.
         match self.client.collection_info(&self.collection).await {
             Ok(_) => {
-                trace!("qdrant_facade::ensure_collection already exists");
+                debug!("Collection '{}' already exists", self.collection);
                 return Ok(());
             }
             Err(err) => {
-                // Proceed to create; log the original error (likely NotFound).
-                trace!("qdrant_facade::collection_info miss: {}", err);
+                warn!(
+                    "Collection '{}' not found, will be created (error={})",
+                    self.collection, err
+                );
             }
         }
 
@@ -74,7 +79,7 @@ impl QdrantFacade {
             DistanceKind::Euclid => Distance::Euclid,
         };
 
-        // Create collection using builders.
+        // Create collection with vector configuration.
         self.client
             .create_collection(
                 CreateCollectionBuilder::new(&self.collection)
@@ -83,21 +88,24 @@ impl QdrantFacade {
             .await
             .map_err(|e| RagError::Qdrant(e.to_string()))?;
 
-        trace!("qdrant_facade::ensure_collection created");
+        info!("Collection '{}' created successfully", self.collection);
         Ok(())
     }
 
-    /// Upserts a batch of points into the collection. Returns number of points upserted.
+    /// Upserts (inserts or updates) a batch of points into the collection.
     ///
-    /// Uses `UpsertPointsBuilder` and waits for completion.
-    ///
-    /// # Errors
-    /// Wraps client errors as `RagError::Qdrant`.
-    pub async fn upsert_points(&self, points: Vec<PointStruct>) -> Result<usize, RagError> {
-        trace!("qdrant_facade::upsert_points count={}", points.len());
+    /// Returns the number of points acknowledged by Qdrant.
+    pub async fn upsert_points(&self, points: Vec<PointStruct>) -> Result<u64, RagError> {
         if points.is_empty() {
+            debug!("No points provided for upsert");
             return Ok(0);
         }
+
+        info!(
+            "Upserting {} points into collection '{}'",
+            points.len(),
+            self.collection
+        );
 
         let res = self
             .client
@@ -105,20 +113,14 @@ impl QdrantFacade {
             .await
             .map_err(|e| RagError::Qdrant(e.to_string()))?;
 
-        // The Upsert result may not always contain an operation id; return 0 then.
-        trace!("qdrant_facade::upsert_points status={:?}", res.result);
-        Ok(res
-            .result
-            .map(|r| r.operation_id.unwrap() as usize)
-            .unwrap_or(0))
+        debug!("Upsert operation result={:?}", res.result);
+
+        Ok(res.result.and_then(|r| r.operation_id).unwrap_or(0))
     }
 
-    /// Performs a similarity search and returns `(score, payload)` tuples.
+    /// Performs a similarity search in Qdrant.
     ///
-    /// Uses `SearchPointsBuilder`, optional `Filter`, and `SearchParamsBuilder` for `exact`.
-    ///
-    /// # Errors
-    /// Wraps client errors as `RagError::Qdrant`.
+    /// Returns `(score, payload)` tuples with results sorted by score.
     pub async fn search(
         &self,
         vector: Vec<f32>,
@@ -127,7 +129,10 @@ impl QdrantFacade {
         with_payload: bool,
         exact: bool,
     ) -> Result<Vec<(f32, serde_json::Value)>, RagError> {
-        trace!("qdrant_facade::search top_k={top_k} with_payload={with_payload} exact={exact}");
+        info!(
+            "Searching in '{}' with top_k={}, with_payload={}, exact={}",
+            self.collection, top_k, with_payload, exact
+        );
 
         let mut builder =
             SearchPointsBuilder::new(&self.collection, vector, top_k).with_payload(with_payload);
@@ -145,19 +150,36 @@ impl QdrantFacade {
             .await
             .map_err(|e| RagError::Qdrant(e.to_string()))?;
 
+        // Convert raw Qdrant payloads into JSON.
         let mut out = Vec::with_capacity(res.result.len());
         for r in res.result.into_iter() {
             let score = r.score;
-            // `payload` here is `HashMap<String, qdrant::Value>`; we convert it to JSON
-            // since the rest of our code expects `serde_json::Value`.
-            let payload = r
-                .payload
-                .into_iter()
-                .map(|(k, v)| (k, v.into_json()))
-                .collect::<serde_json::Map<_, _>>();
-            out.push((score, serde_json::Value::Object(payload)));
+            let payload_json = qpayload_to_json(r.payload);
+            out.push((score, payload_json));
         }
-        trace!("qdrant_facade::search hits={}", out.len());
+
+        debug!("Search completed: {} hits returned", out.len());
         Ok(out)
     }
+}
+
+/// Converts a Qdrant payload (`HashMap<String, qdrant::Value>`) into JSON.
+///
+/// Unsupported nested objects/arrays are mapped to `Null`.
+fn qpayload_to_json(mut p: std::collections::HashMap<String, QValue>) -> serde_json::Value {
+    use qdrant_client::qdrant::value::Kind as K;
+    let mut m = serde_json::Map::new();
+    for (k, v) in p.drain() {
+        let j = match v.kind {
+            Some(K::StringValue(s)) => serde_json::Value::String(s),
+            Some(K::IntegerValue(i)) => serde_json::Value::Number(i.into()),
+            Some(K::DoubleValue(f)) => serde_json::json!(f),
+            Some(K::BoolValue(b)) => serde_json::Value::Bool(b),
+            None => serde_json::Value::Null,
+            // For unsupported nested types, fallback to Null for safety.
+            _ => serde_json::Value::Null,
+        };
+        m.insert(k, j);
+    }
+    serde_json::Value::Object(m)
 }
