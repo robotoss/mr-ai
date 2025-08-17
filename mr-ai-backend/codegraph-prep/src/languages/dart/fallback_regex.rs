@@ -167,6 +167,19 @@ fn push(
         &file,
         &kind,
     );
+
+    // Try to extract a snippet of code from the source file using span boundaries.
+    // If the span is invalid, fall back to None.
+    let snippet = std::fs::read_to_string(&file).ok().and_then(|code| {
+        let start = span.start_byte.min(code.len());
+        let end = span.end_byte.min(code.len());
+        if start < end {
+            Some(code[start..end].trim().to_string())
+        } else {
+            None
+        }
+    });
+
     out.push(AstNode {
         symbol_id: id,
         name: name.to_string(),
@@ -183,6 +196,7 @@ fn push(
         import_alias,
         resolved_target: resolved.map(|p| p.to_string_lossy().to_string()),
         is_generated: false,
+        snippet, // new field added in AstNode
     });
 }
 

@@ -50,6 +50,7 @@ pub fn extract(
         annotations: Vec::new(),
         import_alias: None,
         resolved_target: None,
+        snippet: None,
         is_generated: false,
     });
 

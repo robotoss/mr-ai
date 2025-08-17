@@ -95,6 +95,11 @@ pub struct AstNode {
     #[serde(default)]
     pub signature: Option<String>,
 
+    /// A short code snippet (used for embeddings).
+    /// Usually overlaps with signature or includes declaration head.
+    #[serde(default)]
+    pub snippet: Option<String>,
+
     /// Docstring/comment attached to this node, if any.
     #[serde(default)]
     pub doc: Option<String>,
@@ -137,6 +142,7 @@ impl AstNode {
             fqn: String::new(),
             visibility: None,
             signature: None,
+            snippet: None,
             doc: None,
             annotations: Vec::new(),
             import_alias: None,

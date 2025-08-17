@@ -61,6 +61,7 @@ pub fn extract(
         import_alias: None,
         resolved_target: None,
         is_generated: is_probably_generated(&file),
+        snippet: None,
     });
 
     // 1) Directives

@@ -158,6 +158,14 @@ pub fn collect_field_vars(
     let file = path.to_string_lossy().to_string();
     for h in hits {
         let span = Span::new(0, 0, h.start, h.end);
+
+        // --- snippet extraction from code by byte range ---
+        let snippet = if h.start < h.end && h.end <= code.len() {
+            Some(code[h.start..h.end].to_string())
+        } else {
+            None
+        };
+
         let node = AstNode {
             symbol_id: symbol_id(
                 LanguageKind::Dart,
@@ -180,6 +188,7 @@ pub fn collect_field_vars(
             import_alias: None,
             resolved_target: None,
             is_generated: false,
+            snippet,
         };
         out.push(node);
     }

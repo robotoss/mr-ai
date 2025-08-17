@@ -6,7 +6,7 @@
 //! - `neighbors` — lightweight graph context
 //! - `metrics` — helpful ranking signals
 
-use crate::model::ast::{AstKind, AstNode};
+use crate::model::ast::AstNode;
 use serde::{Deserialize, Serialize};
 
 /// Reference to a neighboring symbol, used to keep minimal graph context within payload.
@@ -98,9 +98,15 @@ pub struct RagRecord {
 impl RagRecord {
     /// Minimal conversion helper from an `AstNode` to a stub record.
     ///
-    /// NOTE: This is intentionally minimal; the final pipeline should provide
-    /// snippet extraction and enrichment (doc/signature/owner_path/fqn).
+    /// Uses `AstNode.snippet` if available. Falls back to `signature`,
+    /// and finally empty string.
     pub fn from_ast_stub(n: &AstNode) -> Self {
+        let snippet = n
+            .snippet
+            .clone()
+            .or_else(|| n.signature.clone())
+            .unwrap_or_default();
+
         Self {
             id: n.symbol_id.clone(),
             path: n.file.clone(),
@@ -108,7 +114,7 @@ impl RagRecord {
             kind: format!("{:?}", n.kind),
             name: n.name.clone(),
             fqn: n.fqn.clone(),
-            snippet: String::from("// TODO: fill snippet from source span"),
+            snippet,
             doc: n.doc.clone(),
             signature: n.signature.clone(),
             owner_path: n.owner_path.clone(),

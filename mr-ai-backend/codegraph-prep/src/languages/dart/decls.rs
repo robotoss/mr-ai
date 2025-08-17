@@ -210,15 +210,20 @@ fn push_decl(
     let lang = LanguageKind::Dart;
     let id = crate::core::ids::symbol_id(lang, name, &span, &file, &kind);
 
-    // Dart convention: leading '_' means library-private.
+    // Dart convention: leading '_' means library-private
     let visibility: Option<Visibility> = Some(if name.starts_with('_') {
         Visibility::Private
     } else {
         Visibility::Public
     });
 
-    // Parse annotations above declaration into structured type.
+    // Parse annotations above declaration into structured type
     let annotations: Vec<Annotation> = gather_annotations_above(code, node);
+
+    // Extract snippet from source based on span range
+    let snippet = code
+        .get(span.start_byte.min(code.len())..span.end_byte.min(code.len()))
+        .map(|s| s.trim().to_string());
 
     out.push(AstNode {
         symbol_id: id,
@@ -236,6 +241,7 @@ fn push_decl(
         import_alias: None,
         resolved_target: None,
         is_generated: false,
+        snippet,
     });
 }
 

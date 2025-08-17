@@ -1,7 +1,7 @@
 //! Directive collector for Dart: `import`, `export`, `part`, and `part of`.
 //!
-//! We keep this extractor IO-free. It resolves **relative** specs into `resolved_target`.
-//! `package:` and `dart:` URIs are left unresolved; they will be handled by the linker.
+//! This extractor is IO-free, except resolving **relative** specs into `resolved_target`.
+//! `package:` and `dart:` URIs are left unresolved; they are handled later by the linker.
 
 use crate::{
     core::ids::symbol_id,
@@ -37,6 +37,12 @@ pub fn collect_directives(
 
                 let span = span_of(&node);
                 let file = path.to_string_lossy().to_string();
+
+                // Extract snippet from source using span range
+                let snippet = code
+                    .get(span.start_byte.min(code.len())..span.end_byte.min(code.len()))
+                    .map(|s| s.trim().to_string());
+
                 out.push(AstNode {
                     symbol_id: symbol_id(LanguageKind::Dart, &uri_or_name, &span, &file, &kind),
                     name: uri_or_name,
@@ -53,6 +59,7 @@ pub fn collect_directives(
                     import_alias,
                     resolved_target: resolved.map(|p| p.to_string_lossy().to_string()),
                     is_generated: false,
+                    snippet,
                 });
             }
         }

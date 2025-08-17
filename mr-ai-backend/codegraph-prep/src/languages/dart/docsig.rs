@@ -1,16 +1,14 @@
 //! Docstring and signature enrichment for Dart.
 //!
-//! - Attaches `//!` header comments to the file node (current file only).
+//! Responsibilities:
+//! - Attaches `//!` header comments to the file node.
 //! - Attaches inline docs (`///` and `/** ... */`) above declarations.
-//! - Extracts a compact signature from declaration head until `{` / `;` / `=>`.
-//!
-//! Important: we always touch nodes ONLY from the current `path` to avoid
-//! cross-file contamination when `out` is a shared vector.
-
-use tracing::warn;
+//! - Extracts a compact `signature` (until `{` / `;` / `=>`).
+//! - Fills `snippet` with the same short head if it's not set yet.
 
 use crate::model::ast::{AstKind, AstNode};
 use std::path::Path;
+use tracing::warn;
 
 /// Enrich Dart AST nodes with docstrings and signatures for the *current* file.
 pub fn enrich_docs_and_signatures(code: &str, path: &Path, out: &mut Vec<AstNode>) {
@@ -18,7 +16,7 @@ pub fn enrich_docs_and_signatures(code: &str, path: &Path, out: &mut Vec<AstNode
     let lines: Vec<&str> = code.lines().collect();
     let file_len = code.len();
 
-    // 1) Module-level docs (`//!`) => only the file node of the current file.
+    // 1) Module-level docs (`//!`) for the file node
     if let Some(file_node) = out
         .iter_mut()
         .find(|n| matches!(n.kind, AstKind::File) && n.file == file_path)
@@ -29,7 +27,7 @@ pub fn enrich_docs_and_signatures(code: &str, path: &Path, out: &mut Vec<AstNode
         }
     }
 
-    // 2) Declarations in THIS file only.
+    // 2) Per-declaration enrichment
     for n in out.iter_mut().filter(|n| n.file == file_path) {
         match n.kind {
             AstKind::Class
@@ -46,21 +44,21 @@ pub fn enrich_docs_and_signatures(code: &str, path: &Path, out: &mut Vec<AstNode
                     n.doc = Some(doc);
                 }
 
-                // --- signature ---
+                // --- signature/snippet ---
                 let s = n.span.start_byte.min(file_len);
                 let mut e = n.span.end_byte.min(file_len);
 
                 if s >= file_len {
                     warn!(
                         target: "codegraph_prep::languages::dart::docsig",
-                        "dart/docs: start_byte {} >= file len {} for '{}'",
+                        "span.start_byte {} >= file_len {} for '{}'",
                         n.span.start_byte, file_len, n.name
                     );
                     continue;
                 }
 
                 if let Some(slice) = code.get(s..e) {
-                    // Earliest terminating token among '{', ';', '=>'
+                    // Find earliest terminator ; { =>
                     let semi = slice.find(';');
                     let brace = slice.find('{');
                     let arrow = slice.find("=>");
@@ -74,12 +72,16 @@ pub fn enrich_docs_and_signatures(code: &str, path: &Path, out: &mut Vec<AstNode
                     }
                 }
 
-                if let Some(snippet) = code.get(s..e) {
-                    n.signature = Some(snippet.trim().to_string());
+                if let Some(head) = code.get(s..e) {
+                    let short = head.trim().to_string();
+                    n.signature = Some(short.clone());
+                    if n.snippet.is_none() {
+                        n.snippet = Some(short);
+                    }
                 } else {
                     warn!(
                         target: "codegraph_prep::languages::dart::docsig",
-                        "dart/docs: invalid span [{}, {}) for '{}' (file len {})",
+                        "invalid span [{}, {}) for '{}' (file_len {})",
                         n.span.start_byte, n.span.end_byte, n.name, file_len
                     );
                 }
@@ -89,7 +91,7 @@ pub fn enrich_docs_and_signatures(code: &str, path: &Path, out: &mut Vec<AstNode
     }
 }
 
-/// Gather `//!` lines from the beginning of the file.
+/// Gather `//!` lines at the file head.
 fn gather_module_doc(lines: &[&str]) -> String {
     let mut acc = Vec::new();
     for l in lines {
@@ -97,7 +99,6 @@ fn gather_module_doc(lines: &[&str]) -> String {
         if lt.starts_with("//!") {
             acc.push(lt.trim_start_matches("//!").trim().to_string());
         } else if lt.is_empty() {
-            // allow blank lines at file head
             continue;
         } else {
             break;
@@ -106,7 +107,7 @@ fn gather_module_doc(lines: &[&str]) -> String {
     acc.join("\n")
 }
 
-/// Gather contiguous `///` lines or a `/** ... */` block immediately above the declaration line.
+/// Gather contiguous `///` lines or `/** ... */` block immediately above a decl.
 fn gather_inline_doc(lines: &[&str], decl_start_line_1based: usize) -> String {
     if decl_start_line_1based == 0 {
         return String::new();
@@ -121,10 +122,8 @@ fn gather_inline_doc(lines: &[&str], decl_start_line_1based: usize) -> String {
         if l.starts_with("///") {
             acc.push(l.trim_start_matches("///").trim().to_string());
         } else if l.ends_with("*/") || in_block {
-            // Collect a block doc upward until '/**'
             in_block = true;
             let mut text = l.to_string();
-            // Clean block edges if present on the same line
             if text.ends_with("*/") {
                 text.truncate(text.len().saturating_sub(2));
             }
@@ -136,7 +135,7 @@ fn gather_inline_doc(lines: &[&str], decl_start_line_1based: usize) -> String {
                 in_block = false;
             }
         } else if l.is_empty() {
-            // allow a blank line within doc block
+            // allow blank lines inside doc block
         } else {
             break;
         }
@@ -148,6 +147,5 @@ fn gather_inline_doc(lines: &[&str], decl_start_line_1based: usize) -> String {
     }
 
     acc.reverse();
-    let doc = acc.join("\n").trim().to_string();
-    doc
+    acc.join("\n").trim().to_string()
 }
