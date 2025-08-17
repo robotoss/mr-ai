@@ -93,7 +93,7 @@ pub fn prepare_qdrant_context(root: &str) -> Result<save_all::PersistSummary> {
         &ast_nodes,
         &graph,
         &rag_records,
-        PipelineSummary::from_counts(&scan_result, &ast_nodes, &graph),
+        PipelineSummary::from_counts(&scan_result, &ast_nodes, &graph, root),
     )?;
 
     info!("persist: artifacts saved to {}", out_dir.display());

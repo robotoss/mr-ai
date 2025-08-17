@@ -1,34 +1,32 @@
-//! Persist all artifacts into the given output directory.
+//! Persist all pipeline artifacts into a given output directory.
 //!
-//! Layout:
-//!   out_dir/
-//!     ast_nodes.jsonl
-//!     graph_nodes.jsonl
-//!     graph_edges.jsonl
-//!     graph.graphml
-//!     rag_records.jsonl
-//!     summary.json
+//! Layout of `out_dir/` (caller provides timestamped path):
+//!   - `ast_nodes.jsonl`
+//!   - `graph_nodes.jsonl`
+//!   - `graph_edges.jsonl`
+//!   - `graph.graphml`
+//!   - `rag_records.jsonl`
+//!   - `summary.json`
 //!
-//! `out_dir` is expected to be a timestamped folder (caller creates it).
-//! This module ensures the directory exists and writes all files,
-//! returning a `PersistSummary` containing paths and counts.
+//! This module ensures the directory exists, writes all files, and returns a
+//! [`PersistSummary`] with resolved paths and statistics.
 
 use crate::{
-    core::summary::PipelineSummary,
+    core::{normalize::normalize_repo_rel_str, summary::PipelineSummary},
     export::{graphml::write_graphml, jsonl, qdrant_prep},
-    model::{ast::AstNode, graph::GraphEdgeLabel, payload::RagRecord},
+    model::{
+        ast::{AstKind, AstNode},
+        graph::GraphEdgeLabel,
+        payload::RagRecord,
+    },
 };
 use anyhow::{Context, Result};
 use petgraph::graph::Graph;
 use serde::Serialize;
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, path::Path};
 use tracing::info;
 
-/// File paths of the persisted artifacts (absolute).
+/// File paths of all persisted artifacts (absolute, host-specific).
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistFiles {
     pub ast_nodes_jsonl: String,
@@ -39,19 +37,43 @@ pub struct PersistFiles {
     pub summary_json: String,
 }
 
-/// Top-level summary returned to the caller and also written to `summary.json`.
+/// Top-level summary returned to caller and also written to `summary.json`.
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistSummary {
+    /// Output directory (absolute).
     pub out_dir: String,
+    /// Locations of all generated files.
     pub files: PersistFiles,
+    /// Counts of AST nodes by kind (e.g. class, function, import).
     pub counts_by_kind: BTreeMap<String, usize>,
+    /// Counts of graph edges by label (e.g. imports, exports).
     pub edge_labels: BTreeMap<String, usize>,
+    /// High-level pipeline summary (scan, parse, graph, chunk stats).
     pub summary: PipelineSummary,
 }
 
-/// Write all artifacts to `out_dir` and return `PersistSummary`.
+/// Write all artifacts to `out_dir` and return a [`PersistSummary`].
 ///
-/// Caller is responsible for choosing a timestamped directory; we just ensure it exists.
+/// Caller is responsible for choosing a unique/timestamped directory.
+/// We normalize all source paths into repo-relative strings before writing
+/// artifacts, to keep outputs stable and portable across environments.
+///
+/// # Example
+/// ```no_run
+/// use std::path::Path;
+/// use codegraph_prep::export::save_all::persist_all;
+/// use codegraph_prep::model::{ast::AstNode, graph::GraphEdgeLabel, payload::RagRecord};
+/// use petgraph::graph::Graph;
+///
+/// let out = Path::new("graphs_data/20250101_120000");
+/// let ast_nodes: Vec<AstNode> = vec![];
+/// let graph: Graph<AstNode, GraphEdgeLabel> = Graph::new();
+/// let rag_records: Vec<RagRecord> = vec![];
+/// let summary = Default::default();
+///
+/// let result = persist_all(out, &ast_nodes, &graph, &rag_records, summary).unwrap();
+/// println!("Artifacts written to {}", result.out_dir);
+/// ```
 pub fn persist_all(
     out_dir: &Path,
     ast_nodes: &[AstNode],
@@ -63,7 +85,7 @@ pub fn persist_all(
     fs::create_dir_all(out_dir).with_context(|| format!("create_dir_all {}", out_dir.display()))?;
     info!("persist: dir prepared -> {}", out_dir.display());
 
-    // Resolve paths
+    // Resolve file paths.
     let p_ast_nodes = out_dir.join("ast_nodes.jsonl");
     let p_gnodes = out_dir.join("graph_nodes.jsonl");
     let p_gedges = out_dir.join("graph_edges.jsonl");
@@ -71,18 +93,28 @@ pub fn persist_all(
     let p_rag = out_dir.join("rag_records.jsonl");
     let p_summary = out_dir.join("summary.json");
 
-    // Write artifact files
-    jsonl::write_ast_nodes_jsonl(&p_ast_nodes, ast_nodes)?;
-    jsonl::write_graph_jsonl(&p_gnodes, &p_gedges, graph)?;
-    write_graphml(&p_graphml, graph)?;
-    // Use either qdrant_prep or jsonl::write_rag_records_jsonl (identical content)
-    qdrant_prep::write_qdrant_payload_jsonl(&p_rag, rag_records)?;
+    // Normalize AST nodes and RAG records to repo-relative paths.
+    let root = Path::new(&summary.root_folder);
+    let ast_nodes_norm: Vec<AstNode> = ast_nodes
+        .iter()
+        .map(|n| n.with_normalized_path(root))
+        .collect();
+    let rag_records_norm: Vec<RagRecord> = rag_records
+        .iter()
+        .map(|r| r.with_normalized_path(root))
+        .collect();
 
-    // Aggregate counts
-    let counts_by_kind = count_by_kind(ast_nodes);
+    // Write artifact files.
+    jsonl::write_ast_nodes_jsonl(&p_ast_nodes, &ast_nodes_norm)?;
+    jsonl::write_graph_jsonl(&p_gnodes, &p_gedges, graph, root)?;
+    write_graphml(&p_graphml, graph, root)?;
+    qdrant_prep::write_qdrant_payload_jsonl(&p_rag, &rag_records_norm)?;
+
+    // Aggregate counts.
+    let counts_by_kind = count_by_kind(&ast_nodes_norm);
     let edge_labels = count_edge_labels(graph);
 
-    // Compose final summary
+    // Compose final summary.
     let files = PersistFiles {
         ast_nodes_jsonl: p_ast_nodes.to_string_lossy().into_owned(),
         graph_nodes_jsonl: p_gnodes.to_string_lossy().into_owned(),
@@ -99,13 +131,11 @@ pub fn persist_all(
         summary,
     };
 
-    // Write summary.json (pretty)
-    {
-        let f = fs::File::create(&p_summary)
-            .with_context(|| format!("create {}", p_summary.display()))?;
-        let w = std::io::BufWriter::new(f);
-        serde_json::to_writer_pretty(w, &persist)?;
-    }
+    // Write summary.json (pretty).
+    let f =
+        fs::File::create(&p_summary).with_context(|| format!("create {}", p_summary.display()))?;
+    let w = std::io::BufWriter::new(f);
+    serde_json::to_writer_pretty(w, &persist)?;
 
     info!("persist: all artifacts written");
     Ok(persist)
@@ -153,4 +183,52 @@ fn count_edge_labels(graph: &Graph<AstNode, GraphEdgeLabel>) -> BTreeMap<String,
         *m.entry(key).or_insert(0) += 1;
     }
     m
+}
+
+// --- extension helpers for normalization ---
+
+trait NormalizePath {
+    fn with_normalized_path(&self, root: &Path) -> Self;
+}
+
+impl NormalizePath for AstNode {
+    fn with_normalized_path(&self, root: &Path) -> Self {
+        let mut cloned = self.clone();
+
+        // Always normalize `file`
+        cloned.file = normalize_repo_rel_str(root, Path::new(&self.file));
+
+        // For file nodes: also normalize `name` (so graph nodes/graphml get repo-relative ID)
+        if cloned.kind == AstKind::File {
+            cloned.name = cloned.file.clone();
+        }
+
+        // For import/export/part nodes: normalize resolved target if present
+        if matches!(
+            cloned.kind,
+            AstKind::Import | AstKind::Export | AstKind::Part | AstKind::PartOf
+        ) {
+            if let Some(ref target) = cloned.resolved_target {
+                cloned.resolved_target = Some(normalize_repo_rel_str(root, Path::new(target)));
+            }
+        }
+
+        cloned
+    }
+}
+
+impl NormalizePath for RagRecord {
+    fn with_normalized_path(&self, root: &Path) -> Self {
+        let mut cloned = self.clone();
+
+        // Always normalize the file path
+        cloned.path = normalize_repo_rel_str(root, Path::new(&self.path));
+
+        // If this is a file-level record, normalize the name as well
+        if cloned.kind.to_lowercase() == "file" {
+            cloned.name = cloned.path.clone();
+        }
+
+        cloned
+    }
 }

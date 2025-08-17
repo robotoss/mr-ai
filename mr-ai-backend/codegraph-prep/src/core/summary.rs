@@ -59,6 +59,9 @@ pub struct PipelineSummary {
 
     /// Time spent in pipeline phases (milliseconds).
     pub timings_ms: TimingsMs,
+
+    /// Root Folder
+    pub root_folder: String,
 }
 
 /// Aggregate counters used by [`PipelineSummary`].
@@ -114,6 +117,7 @@ impl PipelineSummary {
         scan: &ScanResult,
         ast_nodes: &[AstNode],
         graph: &Graph<AstNode, GraphEdgeLabel>,
+        root_folder: &str,
     ) -> Self {
         let generated_at: DateTime<Utc> = Utc::now();
 
@@ -147,6 +151,7 @@ impl PipelineSummary {
             generated_at: generated_at.to_rfc3339(),
             counts,
             timings_ms: TimingsMs::default(),
+            root_folder: root_folder.to_string(),
         }
     }
 

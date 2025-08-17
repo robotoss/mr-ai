@@ -1,9 +1,13 @@
 //! GraphML exporter for Gephi and similar tools.
 //!
-//! We flatten nodes to a small set of attributes and write directed edges with labels.
-//! The format intentionally mirrors the JSONL export for easy cross-checking.
+//! Nodes and edges are exported with stable attributes. Paths are normalized
+//! to be relative to the repository root (keeping `code_data/project_x/...`),
+//! ensuring portability across machines.
 
-use crate::model::{ast::AstNode, graph::GraphEdgeLabel};
+use crate::{
+    core::normalize::normalize_repo_rel_str,
+    model::{ast::AstNode, graph::GraphEdgeLabel},
+};
 use anyhow::{Context, Result};
 use petgraph::graph::Graph;
 use std::{
@@ -14,7 +18,16 @@ use std::{
 use tracing::info;
 
 /// Write GraphML to `path`.
-pub fn write_graphml(path: &Path, graph: &Graph<AstNode, GraphEdgeLabel>) -> Result<()> {
+///
+/// # Arguments
+/// * `path` – output `.graphml` file
+/// * `graph` – the in-memory graph
+/// * `root` – repository root, used for path normalization
+pub fn write_graphml(
+    path: &Path,
+    graph: &Graph<AstNode, GraphEdgeLabel>,
+    root: &Path,
+) -> Result<()> {
     let f = File::create(path).with_context(|| format!("create {}", path.display()))?;
     let mut w = BufWriter::new(f);
 
@@ -27,6 +40,7 @@ pub fn write_graphml(path: &Path, graph: &Graph<AstNode, GraphEdgeLabel>) -> Res
         id_map[nidx.index()] = format!("n{}", i);
     }
 
+    // Header
     writeln!(w, r#"<?xml version="1.0" encoding="UTF-8"?>"#)?;
     writeln!(
         w,
@@ -63,27 +77,35 @@ pub fn write_graphml(path: &Path, graph: &Graph<AstNode, GraphEdgeLabel>) -> Res
         r#"<key id="e0" for="edge" attr.name="label" attr.type="string"/>"#
     )?;
 
-    // Graph
     writeln!(w, r#"<graph edgedefault="directed">"#)?;
 
-    // Nodes
+    // --- Nodes ---
     for nidx in graph.node_indices() {
         let id = &id_map[nidx.index()];
         let n = &graph[nidx];
+
+        // Normalize paths
+        let norm_file = normalize_repo_rel_str(root, Path::new(&n.file));
+        let norm_name = if n.kind == crate::model::ast::AstKind::File {
+            norm_file.clone()
+        } else {
+            n.name.clone()
+        };
+
         writeln!(w, r#"<node id="{}">"#, id)?;
-        writeln!(w, r#"  <data key="d0">{}</data>"#, xml_escape(&n.name))?;
+        writeln!(w, r#"  <data key="d0">{}</data>"#, xml_escape(&norm_name))?;
         writeln!(
             w,
             r#"  <data key="d1">{}</data>"#,
             xml_escape(ast_kind_key(&n.kind))
         )?;
-        writeln!(w, r#"  <data key="d2">{}</data>"#, xml_escape(&n.file))?;
+        writeln!(w, r#"  <data key="d2">{}</data>"#, xml_escape(&norm_file))?;
         writeln!(w, r#"  <data key="d3">{}</data>"#, n.span.start_line)?;
         writeln!(w, r#"  <data key="d4">{}</data>"#, n.span.end_line)?;
         writeln!(w, r#"</node>"#)?;
     }
 
-    // Edges
+    // --- Edges ---
     for (i, eidx) in graph.edge_indices().enumerate() {
         let (src, dst) = graph.edge_endpoints(eidx).unwrap();
         let src_id = &id_map[src.index()];
