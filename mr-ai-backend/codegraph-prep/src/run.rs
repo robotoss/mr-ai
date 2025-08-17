@@ -33,18 +33,8 @@ pub fn prepare_qdrant_context(root: &str) -> Result<save_all::PersistSummary> {
     let root_path = dunce::canonicalize(Path::new(root))?;
     info!("pipeline: start -> {}", root_path.display());
 
-    // 1) Load configuration (ENV > defaults).
-    // If you haven't implemented `load_from_env_or_default`, replace with `GraphConfig::default()`.
-    let config = match GraphConfig::load_from_env_or_default(&root_path) {
-        Ok(c) => {
-            info!("config: loaded from ENV/defaults");
-            c
-        }
-        Err(e) => {
-            warn!("config: failed to load from ENV, fallback to defaults: {e}");
-            GraphConfig::default()
-        }
-    };
+    // 1) Load configuration (defaults).
+    let config = GraphConfig::default();
 
     // 2) Scan filesystem and collect files to parse.
     let scan_result = fs_scan::scan_repo(&root_path, &config)?;

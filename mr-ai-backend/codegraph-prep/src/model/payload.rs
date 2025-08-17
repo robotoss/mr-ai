@@ -104,7 +104,13 @@ impl RagRecord {
         let snippet = n
             .snippet
             .clone()
-            .or_else(|| n.signature.clone())
+            .or_else(|| {
+                std::fs::read_to_string(&n.file).ok().and_then(|code| {
+                    let s = n.span.start_byte.min(code.len());
+                    let e = n.span.end_byte.min(code.len());
+                    code.get(s..e).map(|t| t.to_string())
+                })
+            })
             .unwrap_or_default();
 
         Self {
@@ -118,7 +124,11 @@ impl RagRecord {
             doc: n.doc.clone(),
             signature: n.signature.clone(),
             owner_path: n.owner_path.clone(),
-            chunk: None,
+            chunk: Some(ChunkMeta {
+                index: 1,
+                total: 1,
+                parent_id: n.symbol_id.clone(),
+            }),
             neighbors: Vec::new(),
             tags: Vec::new(),
             metrics: Metrics {
