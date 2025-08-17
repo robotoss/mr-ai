@@ -17,7 +17,7 @@ use crate::{
     model::{
         ast::AstNode,
         graph::GraphEdgeLabel,
-        payload::{ChunkMeta, Metrics, RagRecord},
+        payload::{ChunkMeta, RagRecord},
     },
 };
 use anyhow::Result;
@@ -59,7 +59,7 @@ pub fn chunk_ast_nodes(
                     "chunking: empty snippet for node '{}' ({:?}) in {}",
                     n.name, n.kind, n.file
                 );
-                out.push(make_record(
+                out.push(RagRecord::from_ast(
                     n,
                     String::new(),
                     ChunkMeta {
@@ -78,7 +78,7 @@ pub fn chunk_ast_nodes(
         // 3) Build records (no neighbor links here).
         let total = chunks.len().max(1);
         for (i, body) in chunks.into_iter().enumerate() {
-            out.push(make_record(
+            out.push(RagRecord::from_ast(
                 n,
                 body,
                 ChunkMeta {
@@ -174,31 +174,4 @@ fn trim_to_char_cap(mut s: String, max_chars: usize) -> String {
     }
     s.truncate(cut);
     s
-}
-
-/// Build a [`RagRecord`] from an [`AstNode`] and a specific chunk body.
-///
-/// - `id` is stable per chunk: `{node.symbol_id}#c{index}`
-/// - `metrics.loc` equals `snippet.lines().count()`.
-fn make_record(n: &AstNode, snippet: String, chunk: ChunkMeta) -> RagRecord {
-    RagRecord {
-        id: format!("{}#c{}", n.symbol_id, chunk.index),
-        path: n.file.clone(),
-        language: n.language.to_string(),
-        kind: format!("{:?}", n.kind),
-        name: n.name.clone(),
-        fqn: n.fqn.clone(),
-        snippet: snippet.clone(),
-        doc: n.doc.clone(),
-        signature: n.signature.clone(),
-        owner_path: n.owner_path.clone(),
-        chunk: Some(chunk),
-        neighbors: Vec::new(), // graph relations are added elsewhere
-        tags: Vec::new(),
-        metrics: Metrics {
-            loc: snippet.lines().count(),
-            params: 0,
-        },
-        hash_content: None,
-    }
 }

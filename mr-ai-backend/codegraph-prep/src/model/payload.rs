@@ -6,8 +6,9 @@
 //! - `neighbors` — lightweight graph context
 //! - `metrics` — helpful ranking signals
 
-use crate::model::ast::AstNode;
 use serde::{Deserialize, Serialize};
+
+use crate::model::ast::AstNode;
 
 /// Reference to a neighboring symbol, used to keep minimal graph context within payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,22 +97,28 @@ pub struct RagRecord {
 }
 
 impl RagRecord {
-    /// Minimal conversion helper from an `AstNode` to a stub record.
-    ///
-    /// Uses `AstNode.snippet` if available. Falls back to `signature`,
-    /// and finally empty string.
-    pub fn from_ast_stub(n: &AstNode) -> Self {
-        let snippet = n
-            .snippet
-            .clone()
-            .or_else(|| {
-                std::fs::read_to_string(&n.file).ok().and_then(|code| {
-                    let s = n.span.start_byte.min(code.len());
-                    let e = n.span.end_byte.min(code.len());
-                    code.get(s..e).map(|t| t.to_string())
-                })
-            })
-            .unwrap_or_default();
+    /// Build a record from an AST node with explicit snippet and chunk info.
+    pub fn from_ast(n: &AstNode, snippet: String, chunk: ChunkMeta) -> Self {
+        // --- auto-tags generation ---
+        let mut tags = Vec::new();
+
+        use crate::model::ast::AstKind;
+        match n.kind {
+            AstKind::Class => tags.push("class".into()),
+            AstKind::Function | AstKind::Method => tags.push("function".into()),
+            AstKind::Variable => tags.push("variable".into()),
+            AstKind::Import => tags.push("import".into()),
+            AstKind::Export => tags.push("export".into()),
+            AstKind::File => tags.push("file".into()),
+            _ => {}
+        }
+
+        if n.file.contains("/test/") {
+            tags.push("test".into());
+        }
+        if n.file.contains("widget") {
+            tags.push("widget".into());
+        }
 
         Self {
             id: n.symbol_id.clone(),
@@ -124,32 +131,14 @@ impl RagRecord {
             doc: n.doc.clone(),
             signature: n.signature.clone(),
             owner_path: n.owner_path.clone(),
-            chunk: Some(ChunkMeta {
-                index: 1,
-                total: 1,
-                parent_id: n.symbol_id.clone(),
-            }),
+            chunk: Some(chunk),
             neighbors: Vec::new(),
-            tags: Vec::new(),
+            tags,
             metrics: Metrics {
                 loc: n.loc(),
                 params: 0,
             },
             hash_content: None,
         }
-    }
-
-    /// Append a neighbor reference to this payload.
-    pub fn add_neighbor(
-        &mut self,
-        id: impl Into<String>,
-        edge: impl Into<String>,
-        fqn: Option<String>,
-    ) {
-        self.neighbors.push(NeighborRef {
-            id: id.into(),
-            edge: edge.into(),
-            fqn,
-        });
     }
 }
