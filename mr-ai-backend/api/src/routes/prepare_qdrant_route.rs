@@ -30,9 +30,7 @@ pub async fn prepare_qdrant() -> &'static str {
 
     // 2) Ingest only `rag_records.jsonl` from the latest timestamp directory
     //    under: code_data/project_x/graphs_data/<YYYYMMDD_HHMMSS>/rag_records.jsonl
-    let count = store
-        .ingest_latest_from("code_data", EmbeddingPolicy::PrecomputedOr(&ollama))
-        .await;
+    let count = store.ingest_latest_all_embedded("code_data", &ollama).await;
 
     let count = match count {
         Ok(count) => count,

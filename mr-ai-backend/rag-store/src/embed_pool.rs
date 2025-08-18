@@ -1,7 +1,5 @@
 //! Embedding executor with concurrency and dimension checks.
 
-use std::sync::Arc;
-
 use crate::{embed::EmbeddingsProvider, errors::RagError, record::RagRecord};
 use futures::stream::{self, StreamExt};
 use tracing::{debug, info};

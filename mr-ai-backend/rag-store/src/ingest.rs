@@ -1,8 +1,8 @@
 //! End-to-end ingestion pipeline: read JSONL → normalize → resolve vectors → upsert into Qdrant.
 //!
-//! Supports both strict and flexible parsing of `rag_records.jsonl`, and also
-//! ingestion from AST/graph JSONL files with compact mappers.
-//! Embeddings are resolved via policy or computed within this module.
+//! Sources: `rag_records.jsonl`, `ast_nodes.jsonl`, `graph_nodes.jsonl`, `graph_edges.jsonl`.
+//! Embeddings are resolved via policy or computed dynamically.
+//! Final structure stored in Qdrant is a vector + compact payload (text + metadata).
 
 use crate::config::{RagConfig, VectorSpace};
 use crate::discovery::{latest_dump_dir, rag_records_path, read_dump_summary};
@@ -13,20 +13,20 @@ use crate::io_jsonl::{read_all_jsonl, read_all_records};
 use crate::mappers::{map_ast_node, map_graph_edge, map_graph_node};
 use crate::normalize::normalize_code_light;
 use crate::qdrant_facade::QdrantFacade;
-use crate::record::RagRecord;
+use crate::record::{RagRecord, clamp_snippet};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use qdrant_client::qdrant::{
-    PointId, PointStruct, Value as QValue, Vector, Vectors, point_id, value, vectors,
+    ListValue, PointId, PointStruct, Struct, Value as QValue, Vector, Vectors, value, vectors,
 };
 use serde_json::Value;
+use services::uuid::stable_uuid;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use tracing::{debug, info, warn};
 
-/// Ingests the latest JSONL dump under `<root>/project_x/graphs_data/<timestamp>`.
-///
-/// Uses [`ingest_file`] under the hood.
+/// Ingest the latest dump under `<root>/project_x/graphs_data/<timestamp>`.
+/// Uses [`ingest_file`] internally.
 pub async fn ingest_latest_from(
     cfg: &RagConfig,
     root: impl AsRef<std::path::Path>,
@@ -38,11 +38,11 @@ pub async fn ingest_latest_from(
     ingest_file(cfg, jsonl, policy, client).await
 }
 
-/// Ingests records from a specific JSONL path (strict reader with a flexible fallback).
+/// Ingests records from `rag_records.jsonl`.
 ///
-/// 1. Tries `read_all_records` (strict schema).
-/// 2. On failure, falls back to `read_all_jsonl` + [`map_any_rag_line`].
-/// 3. Normalizes text, ensures collection exists, upserts in batches.
+/// 1. Try strict schema (`read_all_records`).
+/// 2. Fallback to loose JSONL parsing + [`map_any_rag_line`].
+/// 3. Normalize text, ensure collection exists, upsert in batches.
 pub async fn ingest_file(
     cfg: &RagConfig,
     jsonl_path: impl AsRef<std::path::Path>,
@@ -52,19 +52,17 @@ pub async fn ingest_file(
     info!("Ingesting file {:?}", jsonl_path.as_ref());
 
     let mut records = read_strict_or_fallback(&jsonl_path)?;
-
     if records.is_empty() {
         debug!("No records found in file");
         return Ok(0);
     }
 
-    // Normalize texts for compact embeddings
+    // Normalize text for compact embeddings
     let max_chars = chunk_max_chars();
     for r in &mut records {
         r.text = normalize_code_light(&r.text, max_chars);
     }
 
-    // Vector dimensionality
     let vector_size = determine_vector_size(&records, &policy, cfg.embedding_dim).await?;
     debug!("Vector size determined: {}", vector_size);
 
@@ -75,7 +73,7 @@ pub async fn ingest_file(
         })
         .await?;
 
-    // Upsert in batches
+    // Upsert points in batches
     let mut total: u64 = 0;
     let batch_size = cfg.upsert_batch.max(1);
     for chunk in records.chunks(batch_size) {
@@ -87,17 +85,14 @@ pub async fn ingest_file(
     Ok(total)
 }
 
-/// Ingests **all** supported files from the latest dump and computes embeddings on the fly.
+/// Ingests **all files** from the latest dump and computes embeddings for everything.
 ///
-/// Sources:
-/// - `rag_records.jsonl` (strict → fallback)
+/// - `rag_records.jsonl`
 /// - `ast_nodes.jsonl`
 /// - `graph_nodes.jsonl`
 /// - `graph_edges.jsonl`
-/// Ingests the latest JSONL dump under `<root>/project_x/graphs_data/<timestamp>`,
-/// embedding all records (ignores precomputed vectors if provider-only).
 ///
-/// Uses `embed_missing` to fill vectors and then upserts into Qdrant.
+/// Uses [`embed_missing`] to fill vectors, then upserts into Qdrant with progress bar.
 pub async fn ingest_latest_all_embedded(
     cfg: &RagConfig,
     root: impl AsRef<std::path::Path>,
@@ -105,7 +100,7 @@ pub async fn ingest_latest_all_embedded(
     client: &QdrantFacade,
 ) -> Result<u64, RagError> {
     info!(
-        "Ingesting latest dump with embedding from {:?}",
+        "Ingesting latest dump with embeddings from {:?}",
         root.as_ref()
     );
 
@@ -170,7 +165,7 @@ pub async fn ingest_latest_all_embedded(
         })
         .await?;
 
-    // --- NEW: progress bar ---
+    // Progress bar for batch uploads
     let total_chunks = (records.len() + cfg.upsert_batch - 1) / cfg.upsert_batch;
     let pb = ProgressBar::new(total_chunks as u64);
     pb.set_style(
@@ -195,14 +190,14 @@ pub async fn ingest_latest_all_embedded(
     }
 
     pb.finish_with_message("Ingestion complete ✔");
-
     info!("Ingested {} records total", total);
+
     Ok(total)
 }
 
 // ---------- helpers ----------
 
-/// Pick strict records, fallback to flexible mapper.
+/// Try parsing with strict schema, fallback to flexible JSONL mapper.
 fn read_strict_or_fallback(
     jsonl_path: impl AsRef<std::path::Path>,
 ) -> Result<Vec<RagRecord>, RagError> {
@@ -224,7 +219,8 @@ fn chunk_max_chars() -> usize {
         .unwrap_or(4000)
 }
 
-/// Determines the embedding dimensionality.
+/// Determine the embedding dimensionality.
+/// Uses provided config, or checks precomputed vectors, or queries provider.
 async fn determine_vector_size(
     records: &[RagRecord],
     policy: &EmbeddingPolicy<'_>,
@@ -255,6 +251,7 @@ async fn determine_vector_size(
 }
 
 /// Builds Qdrant points for a batch of records.
+/// Embedding is resolved via policy. Payload is compact and consistent.
 async fn build_points(
     chunk: &[RagRecord],
     vector_size: usize,
@@ -263,13 +260,12 @@ async fn build_points(
     let mut pts = Vec::with_capacity(chunk.len());
 
     for r in chunk {
-        // Resolve embedding
+        // --- resolve embedding ---
         let vector = match (&r.embedding, policy) {
             (Some(v), _) => v.clone(),
             (None, EmbeddingPolicy::PrecomputedOr(p)) => p.embed(&r.text).await?,
             (None, EmbeddingPolicy::ProviderOnly(p)) => p.embed(&r.text).await?,
         };
-
         if vector.len() != vector_size {
             return Err(RagError::VectorSizeMismatch {
                 got: vector.len(),
@@ -277,38 +273,92 @@ async fn build_points(
             });
         }
 
-        // Payload
+        // --- payload ---
         let mut payload: HashMap<String, QValue> = HashMap::new();
-        payload.insert(
-            "text".into(),
-            QValue {
-                kind: Some(value::Kind::StringValue(r.text.clone())),
-            },
-        );
-        if let Some(src) = &r.source {
-            payload.insert(
-                "source".into(),
-                QValue {
-                    kind: Some(value::Kind::StringValue(src.clone())),
-                },
-            );
-        }
-        for (k, v) in &r.extra {
-            payload.insert(k.clone(), json_to_qvalue(v.clone()));
+
+        // canon: text (for embeddings)
+        payload.insert("text".into(), qstring(&r.text));
+
+        // canon: source (prefer record.source; fallback to path in extra)
+        if let Some(src) = r.source.clone().or_else(|| {
+            r.extra
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }) {
+            payload.insert("source".into(), qstring(&src));
         }
 
-        // ID
-        let id = if let Ok(n) = r.id.parse::<u64>() {
-            PointId {
-                point_id_options: Some(point_id::PointIdOptions::Num(n)),
-            }
-        } else {
-            PointId {
-                point_id_options: Some(point_id::PointIdOptions::Uuid(r.id.clone())),
-            }
-        };
+        // canon: eid (original id for graph-fanout later)
+        payload.insert("eid".into(), qstring(&r.id));
 
-        // Vector wrapper
+        // canon: language/kind/fqn
+        if let Some(lang) = r.extra.get("language").and_then(|v| v.as_str()) {
+            payload.insert("language".into(), qstring(lang));
+        }
+        if let Some(kind) = r.extra.get("kind").and_then(|v| v.as_str()) {
+            payload.insert("kind".into(), qstring(kind));
+        }
+        if let Some(fqn) = r.extra.get("fqn").and_then(|v| v.as_str()) {
+            payload.insert("fqn".into(), qstring(fqn));
+        }
+
+        // canon: snippet (trimmed)
+        if let Some(raw_snippet) = r
+            .extra
+            .get("snippet")
+            .and_then(|v| v.as_str())
+            .or_else(|| r.extra.get("body").and_then(|v| v.as_str()))
+            .or_else(|| r.extra.get("code").and_then(|v| v.as_str()))
+        {
+            let max_chars = std::env::var("SNIPPET_MAX_CHARS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2000);
+            let max_lines = std::env::var("SNIPPET_MAX_LINES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120);
+            let sn = clamp_snippet(raw_snippet, max_chars, max_lines);
+            if !sn.is_empty() {
+                payload.insert("snippet".into(), qstring(&sn));
+            }
+        }
+
+        // canon: tags
+        if let Some(tags) = r.extra.get("tags").and_then(|v| v.as_array()) {
+            let arr: Vec<QValue> = tags
+                .iter()
+                .filter_map(|x| x.as_str())
+                .map(qstring)
+                .collect();
+            if !arr.is_empty() {
+                payload.insert(
+                    "tags".into(),
+                    QValue {
+                        kind: Some(value::Kind::ListValue(qdrant_client::qdrant::ListValue {
+                            values: arr,
+                        })),
+                    },
+                );
+            }
+        }
+
+        // canon: neighbors, metrics, owner_path (if have)
+        if let Some(neigh) = r.extra.get("neighbors") {
+            payload.insert("neighbors".into(), json_to_qvalue(neigh.clone()));
+        }
+        if let Some(metrics) = r.extra.get("metrics") {
+            payload.insert("metrics".into(), json_to_qvalue(metrics.clone()));
+        }
+        if let Some(owner) = r.extra.get("owner_path") {
+            payload.insert("owner_path".into(), json_to_qvalue(owner.clone()));
+        }
+
+        // --- stable point id ---
+        let pid: PointId = stable_uuid(&r.id).to_string().into();
+
+        // --- vector wrapper ---
         let vectors = Vectors {
             vectors_options: Some(vectors::VectorsOptions::Vector(Vector {
                 data: vector,
@@ -319,7 +369,7 @@ async fn build_points(
         };
 
         pts.push(PointStruct {
-            id: Some(id),
+            id: Some(pid),
             payload,
             vectors: Some(vectors),
             ..Default::default()
@@ -329,14 +379,21 @@ async fn build_points(
     Ok(pts)
 }
 
-/// Converts `serde_json::Value` into Qdrant `Value`.
+/// Wraps a string into Qdrant `Value`.
+fn qstring(s: &str) -> QValue {
+    QValue {
+        kind: Some(value::Kind::StringValue(s.to_string())),
+    }
+}
+
+/// Converts `serde_json::Value` into Qdrant `Value` (handles arrays/objects).
 fn json_to_qvalue(v: serde_json::Value) -> QValue {
     use value::Kind as K;
     match v {
-        Value::String(s) => QValue {
+        serde_json::Value::String(s) => QValue {
             kind: Some(K::StringValue(s)),
         },
-        Value::Number(n) => {
+        serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 QValue {
                     kind: Some(K::IntegerValue(i)),
@@ -351,89 +408,29 @@ fn json_to_qvalue(v: serde_json::Value) -> QValue {
                 }
             }
         }
-        Value::Bool(b) => QValue {
+        serde_json::Value::Bool(b) => QValue {
             kind: Some(K::BoolValue(b)),
         },
-        other => QValue {
-            kind: Some(K::StringValue(other.to_string())),
-        },
-    }
-}
-
-/// Flexible mapper for arbitrary JSONL lines → `RagRecord`.
-fn map_any_rag_line(v: Value) -> Option<RagRecord> {
-    let obj = v.as_object()?;
-
-    // id
-    let id = pick_str(obj, &["id", "uuid", "hash", "name"])
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| stable_hash(&v));
-
-    // text
-    let mut text = pick_str(
-        obj,
-        &[
-            "text",
-            "content",
-            "chunk",
-            "code",
-            "body",
-            "doc",
-            "description",
-            "summary",
-        ],
-    )
-    .unwrap_or("")
-    .to_string();
-
-    if text.is_empty() {
-        for sub in obj.values() {
-            if let Some(m) = sub.as_object() {
-                if let Some(s) = pick_str(
-                    m,
-                    &["text", "content", "doc", "description", "code", "body"],
-                ) {
-                    text = s.to_string();
-                    break;
-                }
+        serde_json::Value::Array(arr) => {
+            let vals: Vec<QValue> = arr.into_iter().map(json_to_qvalue).collect();
+            QValue {
+                kind: Some(K::ListValue(ListValue { values: vals })),
             }
         }
-    }
-    if text.is_empty() {
-        text = v.to_string();
-    }
-
-    let source = pick_str(obj, &["source", "file", "path", "uri"]).map(|s| s.to_string());
-
-    let embedding = pick_vec_f32(obj, &["embedding", "vector", "values", "embedding_vector"])
-        .or_else(|| {
-            for sub in obj.values() {
-                if let Some(m) = sub.as_object() {
-                    if let Some(vec) =
-                        pick_vec_f32(m, &["embedding", "vector", "values", "embedding_vector"])
-                    {
-                        return Some(vec);
-                    }
-                }
+        serde_json::Value::Object(map) => {
+            let fields = map
+                .into_iter()
+                .map(|(k, v)| (k, json_to_qvalue(v)))
+                .collect();
+            QValue {
+                kind: Some(K::StructValue(Struct { fields })),
             }
-            None
-        });
-
-    let extra = obj
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect::<BTreeMap<_, _>>();
-
-    Some(RagRecord {
-        id,
-        text,
-        source,
-        embedding,
-        extra,
-    })
+        }
+        serde_json::Value::Null => QValue { kind: None },
+    }
 }
 
-/// Best-effort deduplication by `(source,text)`.
+/// Deduplicate records by `(source,text)` to avoid duplicates in Qdrant.
 fn dedup_in_place(recs: &mut Vec<RagRecord>) {
     fn key_of(r: &RagRecord) -> u64 {
         use std::collections::hash_map::DefaultHasher;
@@ -446,7 +443,111 @@ fn dedup_in_place(recs: &mut Vec<RagRecord>) {
     recs.retain(|r| seen.insert(key_of(r)));
 }
 
-/// Helper: pick string by keys.
+/// Compose embedding text from signature → snippet → doc.
+/// Deduplicates and trims.
+fn compose_text(
+    signature: Option<&str>,
+    snippet: Option<&str>,
+    doc: Option<&str>,
+) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for s in [signature, snippet, doc].into_iter().flatten() {
+        let s = s.trim();
+        if !s.is_empty() {
+            parts.push(s);
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.dedup();
+    Some(parts.join("\n"))
+}
+
+/// Quick filter to skip structural nodes like imports/exports.
+fn should_index_kind(kind: &str) -> bool {
+    matches!(kind, "Function" | "Method" | "Class" | "File")
+}
+
+/// Flexible JSONL mapper into `RagRecord` for fallback ingestion.
+/// Tries to preserve `snippet` (code) in `extra["snippet"]`, and builds
+/// a compact `text` (signature + doc OR kind+name+file) for embeddings.
+fn map_any_rag_line(v: serde_json::Value) -> Option<RagRecord> {
+    let obj = v.as_object()?;
+
+    // id
+    let id = pick_str(obj, &["id", "uuid", "hash"])
+        .map(|s| s.to_string())
+        .or_else(|| pick_str(obj, &["name"]).map(|s| s.to_string()))
+        .unwrap_or_else(|| stable_hash(&v));
+
+    // kind filter (skip imports/exports)
+    let kind = pick_str(obj, &["kind"]).unwrap_or("");
+    if matches!(kind, "Import" | "Export") {
+        return None;
+    }
+
+    // primary fields
+    let signature = pick_str(obj, &["signature"]);
+    let snippet = pick_str(obj, &["snippet"])
+        .or_else(|| pick_str(obj, &["body"]))
+        .or_else(|| pick_str(obj, &["code"]));
+    let doc = pick_str(obj, &["doc", "comment", "documentation"]);
+    let name_fqn = pick_str(obj, &["name", "fqn"]);
+    let path = pick_str(obj, &["path", "file", "source", "uri"]);
+
+    // text for embeddings: signature + doc, otherwise kind+name(+file)
+    let text = if signature.is_some() || doc.is_some() {
+        [signature, doc]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else if let Some(name) = name_fqn {
+        if !kind.is_empty() && path.is_some() {
+            format!("{kind} {name} (file: {})", path.unwrap())
+        } else if !kind.is_empty() {
+            format!("{kind} {name}")
+        } else {
+            name.to_string()
+        }
+    } else {
+        // last chance
+        v.to_string()
+    };
+
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    // source
+    let source = path.map(|s| s.to_string());
+
+    // embedding (if there is suddenly)
+    let embedding = pick_vec_f32(obj, &["embedding", "vector", "values", "embedding_vector"]);
+
+    // extra: take everything + put the found snippet in explicit form
+    let mut extra: BTreeMap<String, serde_json::Value> =
+        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    if let Some(sn) = snippet {
+        extra.insert(
+            "snippet".to_string(),
+            serde_json::Value::String(sn.to_string()),
+        );
+    }
+
+    Some(RagRecord {
+        id,
+        text,
+        source,
+        embedding,
+        extra,
+    })
+}
+
+/// Pick string by keys from JSON map.
 fn pick_str<'a>(obj: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     for k in keys {
         if let Some(s) = obj.get(*k).and_then(|v| v.as_str()) {
@@ -456,7 +557,7 @@ fn pick_str<'a>(obj: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Optio
     None
 }
 
-/// Helper: pick vector<f32> by keys (no deep recursion).
+/// Pick vector<f32> by keys from JSON map.
 fn pick_vec_f32(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<Vec<f32>> {
     for k in keys {
         if let Some(a) = obj.get(*k).and_then(|v| v.as_array()) {
@@ -466,8 +567,6 @@ fn pick_vec_f32(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<V
                     out.push(f as f32);
                 } else if let Some(i) = x.as_i64() {
                     out.push(i as f32);
-                } else {
-                    return None;
                 }
             }
             return Some(out);
@@ -476,7 +575,7 @@ fn pick_vec_f32(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<V
     None
 }
 
-/// Stable hash used when no `id` present.
+/// Fallback stable hash when no `id` present.
 fn stable_hash(v: &Value) -> String {
     use std::collections::hash_map::DefaultHasher;
     let mut h = DefaultHasher::new();

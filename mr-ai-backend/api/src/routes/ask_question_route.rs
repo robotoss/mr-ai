@@ -27,19 +27,19 @@ pub async fn ask_question() -> &'static str {
         dim: std::env::var("EMBEDDING_DIM").unwrap().parse().unwrap(),
     });
 
-    let count = store
-        .ingest_latest_from("code_data", EmbeddingPolicy::PrecomputedOr(&ollama))
-        .await;
+    // let count = store
+    //     .ingest_latest_from("code_data", EmbeddingPolicy::PrecomputedOr(&ollama))
+    //     .await;
 
-    let count = match count {
-        Ok(count) => count,
-        Err(ex) => {
-            println!("FAILED count: {}", ex);
-            return "Hello, World!";
-        }
-    };
+    // let count = match count {
+    //     Ok(count) => count,
+    //     Err(ex) => {
+    //         println!("FAILED count: {}", ex);
+    //         return "Hello, World!";
+    //     }
+    // };
 
-    println!("Ingested points: {count}");
+    // println!("Ingested points: {count}");
 
     let query = RagQuery {
         text: "Where change gamesIcon",
@@ -55,11 +55,8 @@ pub async fn ask_question() -> &'static str {
         }
     };
 
-    for hit in hits {
-        println!(
-            "- score={:.3}, source={:?}, text={}",
-            hit.score, hit.source, hit.text
-        );
+    for hit in &hits {
+        println!("{}", hit);
     }
 
     "Hello world"
