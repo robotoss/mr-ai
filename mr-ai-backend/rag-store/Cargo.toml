@@ -1,0 +1,27 @@
+[package]
+name = "rag-store"
+version = "0.1.0"
+edition = "2024"
+description = "RAG ingestion and retrieval library for Qdrant using JSONL dumps"
+keywords = ["rag", "qdrant", "vector", "retrieval", "jsonl"]
+categories = ["database", "science", "data-structures"]
+
+[dependencies]
+# ---- Shared via workspace (keep using the workspace pins) ----
+serde = { workspace = true, features = ["derive"] }     # data models (Serialize/Deserialize)
+serde_json = { workspace = true }                       # JSON (parsing JSONL rows & payload)
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# ^ we don't need "fs" here; std::fs is used in readers. "rt" is implied by "rt-multi-thread".
+
+# ---- External crates required by the library itself ----
+futures = "0.3"                                         # buffer_unordered for parallel embedding
+qdrant-client = "1.15"                                  # Qdrant client (builder API)
+tracing = "0.1"                                         # logging (trace/debug/info/warn/error)
+thiserror = "1.0"                                       # structured error type (RagError)
+
+# HTTP client for embedding providers (Ollama).
+# We use blocking client + spawn_blocking; Rustls to avoid OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+
+indicatif = "0.18"
+services = { path = "../services" }

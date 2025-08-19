@@ -7,8 +7,10 @@ edition = "2024"
 tokio = { workspace = true }
 
 axum = "0.8"
+
 services = { path = "../services" }
-graph-prepare = { path = "../graph-prepare" }
+codegraph-prep = { path = "../codegraph-prep" }
+rag-store = { path = "../rag-store" }
 
 serde = { workspace = true }
 anyhow = { workspace = true }

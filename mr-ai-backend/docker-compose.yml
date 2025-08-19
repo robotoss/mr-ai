@@ -1,0 +1,48 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.14.0
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT}:6333"
+      - "${QDRANT_GRPC_PORT}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__LOG_LEVEL: "INFO"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:6333/readyz >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - app_net
+
+  ollama:
+    image: docker.io/ollama/ollama:latest
+    container_name: ollama
+    pull_policy: always
+    tty: true
+    restart: always
+    ports:
+      - "7869:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+      # - .:/code
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - app_net
+
+networks:
+  app_net:
+    driver: bridge
+
+volumes:
+  qdrant_data:
+  ollama_data:
