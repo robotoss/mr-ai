@@ -16,12 +16,12 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # ---- External crates required by the library itself ----
 futures = "0.3"                                         # buffer_unordered for parallel embedding
 qdrant-client = "1.15"                                  # Qdrant client (builder API)
-tracing = "0.1"                                         # logging (trace/debug/info/warn/error)
-thiserror = "1.0"                                       # structured error type (RagError)
+tracing = { workspace = true }                                         # logging (trace/debug/info/warn/error)
+thiserror = { workspace = true }                        # structured error type (RagError)
 
 # HTTP client for embedding providers (Ollama).
 # We use blocking client + spawn_blocking; Rustls to avoid OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls", "blocking"] }
 
 indicatif = "0.18"
 services = { path = "../services" }

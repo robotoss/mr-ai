@@ -8,13 +8,13 @@
 
 mod config;
 mod discovery;
-mod embed;
+pub mod embed;
 mod errors;
 mod filters;
 mod ingest;
 mod io_jsonl;
-mod qdrant_facade;
-mod record;
+pub mod qdrant_facade;
+pub mod record;
 mod retrieve;
 
 // Optional helpers (compaction & embedding pool)

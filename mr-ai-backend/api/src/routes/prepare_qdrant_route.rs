@@ -1,4 +1,4 @@
-use rag_store::{EmbeddingPolicy, OllamaConfig, OllamaEmbedder, RagConfig, RagStore};
+use rag_store::{OllamaConfig, OllamaEmbedder, RagConfig, RagStore};
 
 pub async fn prepare_qdrant() -> &'static str {
     // 1) Configure store
