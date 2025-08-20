@@ -5,7 +5,7 @@ edition = "2024"
 
 
 [workspace]
-members = [".", "api", "codegraph-prep",  "rag-store", "services"]
+members = [".", "api", "codegraph-prep", "contextor",  "rag-store", "services"]
 
 [dependencies]
 api = { path = "api" }
@@ -24,3 +24,5 @@ anyhow = "1.0"
 chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+reqwest = { version = "0.12"}
+thiserror = "1.0"

@@ -1,225 +1,332 @@
-Got it ✅
-Here’s a fully polished, best-practices **README.md** with consistent English, emojis, and improved formatting for clarity and developer friendliness.
-
----
-
 # 🤖 MR-AI Backend
 
-A **self-hosted AI-powered backend** for **automated Merge Request (MR) reviews** using custom AI models.
-Supports integration with **GitHub**, **GitLab**, and other Git providers via **SSH**.
+A **self-hosted backend** for automated Merge Request (MR) reviews using local/custom AI models.
+Works with **GitHub**, **GitLab**, and other Git providers over **SSH**.
+Default models: embeddings — `dengcao/Qwen3-Embedding-0.6B:Q8_0`, generation — `qwen3:32b` (you can change them in settings).
 
 ---
 
-## 📂 Project Structure
+## 🧭 Table of Contents
+
+* [Capabilities](#-capabilities)
+* [Architecture & Directories](#-architecture--directories)
+* [Requirements](#-requirements)
+* [Quick Start (Docker)](#-quick-start-docker)
+* [Local Install (Rust)](#-local-install-rust)
+* [Environment Setup (.env)](#-environment-setup-env)
+* [SSH Access to Git](#-ssh-access-to-git)
+* [Step-by-Step Workflow](#-step-by-step-workflow)
+* [API (cURL Examples)](#-api-curl-examples)
+* [AST/Graph Generation](#-astgraph-generation)
+* [Practices & Recommendations](#-practices--recommendations)
+* [.gitignore](#-gitignore)
+* [Switch / Validate Models](#-switch--validate-models)
+* [Qdrant GPU Images](#-qdrant-gpu-images)
+* [Contributing & License](#-contributing--license)
+
+---
+
+## ✨ Capabilities
+
+* 🔍 Clones code over SSH and prepares a RAG context
+* 🌳 Builds syntax trees and code graphs (Tree-sitter)
+* 🧠 Indexes code into a vector DB (Qdrant)
+* 💬 Answers code questions (LLM via Ollama)
+* 🔗 Supports GitHub/GitLab and others via SSH
+
+---
+
+## 🗂️ Architecture & Directories
 
 ```bash
-├── api/                # API server logic
-├── code_data/          # Cloned repository data and processing artifacts
-├── vector-lib/         # Use to work with vector data
-├── graph-prepare/      # Syntax tree and graph generation
-├── services/           # Service logic and helpers
-├── ssh_keys/           # SSH keys for Git access
-├── .env                # Environment configuration
+├── api/                 # HTTP API server
+├── services/            # Services & utilities
+├── contextor/           # Answer orchestration: query RAG → LLM response
+├── code_data/           # Project data: clones, artifacts, indexes
+├── codegraph-prep/      # Build syntax trees and code graph (primary module)
+├── graph-prepare/       # Historical module; use codegraph-prep instead
+├── vector-lib/          # Vector data helpers
+├── rag-store/           # Convert code graph into vector DB format
+├── ssh_keys/            # SSH keys for repo access
+├── .env                 # Project environment variables
+├── docker-compose.yml   # Ollama + Qdrant services
+├── bootstrap_ollama.sh  # Helper to spin up dependencies via docker-compose
 ```
+
+> ℹ️ **Inconsistencies fixed:** unified ports/URLs, single graph module (`codegraph-prep`), consistent env names.
 
 ---
 
-## ⚙️ Environment Configuration
+## 🧩 Requirements
 
-Configuration is done via a `.env` file or environment variables:
+* 🐳 Docker / Docker Compose — easiest way to start
+* 🦀 Rust (stable) — if running the API without Docker
+* 📦 \~8–30 GB free disk space (models + indexes)
+* 🔐 SSH access to your Git repositories
+
+---
+
+## 🚀 Quick Start (Docker)
+
+1. **Create and adjust `.env`** (see template below).
+2. **Start dependencies** (Ollama + Qdrant):
+
+   ```bash
+   chmod +x ./bootstrap_ollama.sh
+   ./bootstrap_ollama.sh
+   # custom names/files:
+   ./bootstrap_ollama.sh -f docker-compose.yml -n ollama
+   ```
+3. **Check Qdrant:**
+
+   * UI/HTTP: [http://localhost:6333](http://localhost:6333)
+   * Health check:
+
+     ```bash
+     curl -s http://localhost:6333/readyz
+     ```
+4. **Run the API (if not containerized):**
+
+   ```bash
+   cargo run --release
+   ```
+
+---
+
+## 🛠 Local Install (Rust)
+
+1. Install Rust and system deps (cmake, build tools, etc.).
+2. Configure `.env`.
+3. Run:
+
+   ```bash
+   cargo run --release
+   ```
+
+---
+
+## ⚙️ Environment Setup (.env)
 
 ```env
-######## General ########
-PROJECT_NAME=test_project      # Unique folder name per project
-API_ADDRESS=0.0.0.0:3000       # API server binding address
+############################
+# 🔹 General
+############################
+PROJECT_NAME=project_x
+API_ADDRESS=0.0.0.0:3000
 
-######## Qdrant ########
-QDRANT_HTTP_PORT=6333          # Qdrant HTTP API port
-QDRANT_GRPC_PORT=6334          # Qdrant gRPC API port
-QDRANT_URL=http://localhost:6333
+############################
+# 🔹 Ollama / LLM
+############################
+# Default Ollama port: 11434
+OLLAMA_HOST=http://localhost
+OLLAMA_PORT=11434
+OLLAMA_URL=${OLLAMA_HOST}:${OLLAMA_PORT}
+OLLAMA_MODEL=qwen3:32b
+
+############################
+# 🔹 Embeddings
+############################
+EMBEDDING_MODEL=dengcao/Qwen3-Embedding-0.6B:Q8_0
+EMBEDDING_DIM=1024            # Verify this matches the model (see below)
+EMBEDDING_CONCURRENCY=4
+
+############################
+# 🔹 Qdrant (Vector DB)
+############################
+QDRANT_HTTP_PORT=6333
+QDRANT_GRPC_PORT=6334
+QDRANT_URL=http://localhost:${QDRANT_HTTP_PORT}
 QDRANT_COLLECTION=mr_ai_code
 QDRANT_DISTANCE=Cosine
 QDRANT_BATCH_SIZE=256
 
-######## Graph / Export ########
+############################
+# 🔹 Chunking
+############################
+CHUNK_MAX_CHARS=4000
+CHUNK_MIN_CHARS=16
+
+############################
+# 🔹 Graph Export
+############################
 GRAPH_EXPORT_DIR_NAME=graphs_data
 GRAPH_EXCLUDE_GENERATED=true
 GRAPH_GENERATED_GLOBS=**/*.g.dart,**/*.freezed.dart
 
-######## Embeddings ########
-OLLAMA_URL=http://localhost:7869
-EMBEDDING_MODEL=dengcao/Qwen3-Embedding-0.6B:Q8_0
-EMBEDDING_DIM=1024 # Verify via curl API (see below)
-
-######## Chunking ########
-CHUNK_MAX_CHARS=4000
-CHUNK_MIN_CHARS=16
-
-######## Concurrency ########
-EMBEDDING_CONCURRENCY=4
+############################
+# 🔹 Debug
+############################
+# RUST_BACKTRACE=1
+# AST_TARGET_SUFFIX=packages/home_feature/lib/src/presentation/ui/base_home_page.dart
 ```
 
-> 💡 You can run **multiple projects** by changing `PROJECT_NAME`.
+> 💡 You can run **multiple projects** by changing `PROJECT_NAME`; each gets its own directory under `code_data/`.
 
 ---
 
-## 🔐 SSH Setup for Git Access
+## 🔐 SSH Access to Git
 
-The service uses **SSH keys** for secure access to private repositories.
-
-### 1️⃣ Generate SSH Key
+### 1) Generate a key
 
 ```bash
 ssh-keygen -t ed25519 -C "bot@mr-ai.com" -f ./ssh_keys/bot_key
 ```
 
-This will create:
+Creates:
 
-* **Private key:** `ssh_keys/bot_key`
-* **Public key:** `ssh_keys/bot_key.pub`
+* private: `ssh_keys/bot_key`
+* public:  `ssh_keys/bot_key.pub`
 
-⚠️ **Never commit** your private key to version control.
+> ⚠️ Never commit private keys.
 
----
+### 2) Add the public key to your provider
 
-### 2️⃣ Add Public Key to Your Git Provider
+* **GitHub:** Settings → *SSH and GPG Keys* → *New SSH Key*
+* **GitLab:** User Settings → *SSH Keys*
+  Paste the contents of `ssh_keys/bot_key.pub`.
 
-**GitHub**
-
-1. Go to **Settings → SSH and GPG Keys → New SSH Key**
-2. Paste the contents of `ssh_keys/bot_key.pub`
-
-**GitLab**
-
-1. Go to **User Settings → SSH Keys**
-2. Paste the contents of `ssh_keys/bot_key.pub`
-
----
-
-### 3️⃣ Accept SSH Host Fingerprint (Required for `libgit2`)
+### 3) Accept host fingerprints (for `libgit2`)
 
 ```bash
 ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
+# add others as needed (github.com, bitbucket.org, etc.)
 ```
 
 ---
 
-## 🚀 Running the Service
+## 🧪 Step-by-Step Workflow
 
-1. Set up `.env`
-2. Configure SSH access
-3. Start the service:
+1. **Start dependencies** (Ollama + Qdrant) → `./bootstrap_ollama.sh`
+2. **Run the API** → `cargo run --release`
+3. **Attach repository** → `POST /upload_project_data` with SSH URL(s)
+4. **Learn code** → `POST /learn_code`
+5. **Prepare code graph** → `POST /prepare_graph`
+6. **Initialize Qdrant** → `POST /prepare_qdrant`
+7. **Ask questions about the code** → `POST /ask_question`
+
+---
+
+## 🛰️ API (cURL Examples)
+
+> Base URL comes from `API_ADDRESS` (default `0.0.0.0:3000`).
+
+**Ask a question about the code**
 
 ```bash
-cargo run --release
+curl --location 'http://0.0.0.0:3000/ask_question' \
+--header 'Content-Type: application/json' \
+--data '{
+  "question": "How can I replace the icon in the navigation bar for the Games section in AppHomePage?"
+}'
+```
+
+**Attach repository(ies)**
+
+```bash
+curl --location 'http://0.0.0.0:3000/upload_project_data' \
+--header 'Content-Type: application/json' \
+--data-raw '{
+  "urls": ["git@gitlab.com:kulllgar/testprojectmain.git"]
+}'
+```
+
+**Learn code**
+
+```bash
+curl --location 'http://0.0.0.0:3000/learn_code'
+```
+
+**Prepare graph**
+
+```bash
+curl --location 'http://0.0.0.0:3000/prepare_graph'
+```
+
+**Initialize Qdrant**
+
+```bash
+curl --location 'http://0.0.0.0:3000/prepare_qdrant'
 ```
 
 ---
 
-## 📁 .gitignore Best Practices
+## 🌳 AST/Graph Generation
 
-```gitignore
-# Dynamic repo data
-code_data/*
-!code_data/.gitkeep
+Uses [Tree-sitter](https://tree-sitter.github.io/tree-sitter) to parse code and build the graph.
 
-# Private SSH keys
-ssh_keys/*
-!ssh_keys/.gitkeep
-```
+**Supported languages:**
 
----
+* ✅ Dart (ready)
+* 🚧 Rust, Python, JavaScript, TypeScript (in progress)
 
-## 🌳 Syntax Tree & Graph Generation
-
-Uses [Tree-sitter](https://tree-sitter.github.io/tree-sitter) to parse code into syntax trees and build graphs.
-
-**Languages:**
-
-* ✅ Dart *(ready)*
-* 🚧 Rust *(in progress)*
-* 🚧 Python *(in progress)*
-* 🚧 JavaScript *(in progress)*
-* 🚧 TypeScript *(in progress)*
-
----
-
-## 📦 Saved Artifacts
-
-Stored at:
+**Artifacts location:**
 
 ```
-code_data/<project_name>/graphs_data/<timestamp>/
+code_data/<PROJECT_NAME>/graphs_data/<timestamp>/
 ```
 
-Includes:
+Contents:
 
-* `graph.graphml` → Import into [Gephi](https://gephi.org/)
-* `ast_nodes.jsonl` → Abstract syntax tree nodes
-* `graph_nodes.jsonl` → Graph node data
-* `graph_edges.jsonl` → Graph edge data
-* `summary.json` → Summary metadata
-
----
+* `graph.graphml` — open in [Gephi](https://gephi.org/)
+* `ast_nodes.jsonl`, `graph_nodes.jsonl`, `graph_edges.jsonl`
+* `summary.json` — metadata
 
 ### Dart AST Debugging
 
-This project includes a helper to inspect the Dart AST of a specific file.
+**Env vars**
 
-#### Environment variables
-- `PROJECT_NAME` (required): project name, e.g. `project_x`.
-  Source root is always assumed to be `code_data/{PROJECT_NAME}`.
-- `AST_TARGET_SUFFIX` (optional): path suffix of the Dart file.
-  Example: `splash_state.dart` or `presentation/state/splash_state.dart`.
-  If not set, the tool does nothing.
+* `PROJECT_NAME` — required; code root is `code_data/{PROJECT_NAME}`
+* `AST_TARGET_SUFFIX` — path suffix to the Dart file, e.g.
+  `lib/features/splash/presentation/state/splash_state.dart`
 
-#### Usage
+**Run**
+
 ```bash
-# Run AST dump for a Dart file
-PROJECT_NAME=project_x AST_TARGET_SUFFIX=lib/features/splash/presentation/state/splash_state.dart \
+PROJECT_NAME=project_x \
+AST_TARGET_SUFFIX=lib/features/splash/presentation/state/splash_state.dart \
 cargo run --bin dart-ast-dump
-
-## 🛠 API Endpoints
-
-1. **Upload Project Data**
-   `POST /upload_project_data` — Send repository data.
-2. **Learn Code & Generate Graphs**
-   `POST /learn_code` — Build graph representation of code.
-
----
-
-## 🐳 Quick Start with Docker Compose
-
-```bash
-docker compose up -d
-# Open UI / test API:
-open http://localhost:6333
-# Health check:
-curl -s localhost:6333/readyz
 ```
 
 ---
 
-## ⚡ GPU Builds (Linux Only)
+## ✅ Practices & Recommendations
 
-GPU builds available for:
-
-* **NVIDIA** — `qdrant/qdrant:gpu-nvidia-latest`
-* **AMD ROCm** — `qdrant/qdrant:gpu-amd-latest`
-
-> For full Docker Compose GPU configuration, see the Qdrant docs:
-> [Qdrant GPU Guide](https://qdrant.tech/documentation/gpu/)
+* 🔒 **Secrets:** keep keys in `ssh_keys/`; **never commit** private ones.
+* 🧹 **Clean diffs:** ignore artifact folders (`code_data/`, `ssh_keys/`).
+* 📏 **Chunking:** tune `CHUNK_MAX_CHARS` / `CHUNK_MIN_CHARS` per language/size.
+* 🧪 **Embedding size:** ensure `EMBEDDING_DIM` matches the embedding model (see below).
+* 🧩 **Module duplication:** prefer `codegraph-prep` (over `graph-prepare`).
 
 ---
 
-## 🧪 Testing Embedding Model
+## 📝 .gitignore
+
+```gitignore
+# Project data & artifacts
+code_data/*
+!code_data/.gitkeep
+
+# SSH keys
+ssh_keys/*
+!ssh_keys/.gitkeep
+
+# Local env & build
+.env
+target/
+```
+
+---
+
+## 🔄 Switch / Validate Models
+
+**Install or switch models in Ollama:**
 
 ```bash
 docker exec -it ollama ollama pull dengcao/Qwen3-Embedding-0.6B:Q8_0
 docker exec -it ollama ollama pull qwen3:32b
 ```
 
-Check model dimension (`EMBEDDING_DIM`):
+**Validate embedding dimensionality (`EMBEDDING_DIM`):**
 
 ```bash
 curl --location 'http://localhost:11434/api/embed' \
@@ -228,21 +335,27 @@ curl --location 'http://localhost:11434/api/embed' \
     "model": "dengcao/Qwen3-Embedding-0.6B:Q8_0",
     "input": "hello"
   }'
+# response contains "embedding": [...] — check the vector length
 ```
 
 ---
 
-## 🤝 Contributing
+## ⚡ Qdrant GPU Images
 
-Contributions for additional language support, performance improvements, and bug fixes are welcome!
-Please open an issue or PR.
+Available images:
 
----
+* **NVIDIA** — `qdrant/qdrant:gpu-nvidia-latest`
+* **AMD ROCm** — `qdrant/qdrant:gpu-amd-latest`
 
-## 📜 License
-
-MIT — Free to use and modify.
+> See Qdrant docs for full GPU configuration details.
 
 ---
 
-Do you want me to also **add a badges section** (build status, Docker pulls, version, etc.) so it looks even more professional? That would make this README really pop.
+## 🤝 Contributing & License
+
+PRs welcome: new language support, performance improvements, bug fixes.
+Open an issue/PR describing your changes.
+
+**License:** FSL-1.1.
+
+---

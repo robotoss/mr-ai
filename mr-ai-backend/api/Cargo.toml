@@ -11,6 +11,7 @@ axum = "0.8"
 services = { path = "../services" }
 codegraph-prep = { path = "../codegraph-prep" }
 rag-store = { path = "../rag-store" }
+contextor = {path = "../contextor"}
 
 serde = { workspace = true }
 anyhow = { workspace = true }
