@@ -23,7 +23,7 @@ services:
       - app_net
 
   ollama:
-    image: docker.io/ollama/ollama:latest
+    image: docker.io/ollama/ollama:0.11.5
     container_name: ollama
     pull_policy: always
     tty: true
