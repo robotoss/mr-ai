@@ -6,6 +6,10 @@ description = "RAG ingestion and retrieval library for Qdrant using JSONL dumps"
 keywords = ["rag", "qdrant", "vector", "retrieval", "jsonl"]
 categories = ["database", "science", "data-structures"]
 
+[lib]
+name = "rag_store"
+path = "src/lib.rs"
+
 [dependencies]
 # ---- Shared via workspace (keep using the workspace pins) ----
 serde = { workspace = true, features = ["derive"] }     # data models (Serialize/Deserialize)

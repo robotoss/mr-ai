@@ -1,0 +1,18 @@
+[package]
+name = "mr-reviewer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["json", "gzip", "rustls-tls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+
+# crate-local deps
+sha2 = "0.10"
+urlencoding = "2.1"

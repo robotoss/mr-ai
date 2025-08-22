@@ -3,6 +3,10 @@ name = "api"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "api"
+path = "src/lib.rs"
+
 [dependencies]
 tokio = { workspace = true }
 
@@ -12,6 +16,9 @@ services = { path = "../services" }
 codegraph-prep = { path = "../codegraph-prep" }
 rag-store = { path = "../rag-store" }
 contextor = {path = "../contextor"}
+mr-reviewer = {path = "../mr-reviewer"}
+
 
 serde = { workspace = true }
 anyhow = { workspace = true }
+tracing = { workspace = true }

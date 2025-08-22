@@ -3,6 +3,10 @@ name = "codegraph-prep"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "codegraph_prep"
+path = "src/lib.rs"
+
 [dependencies]
 # AST core
 tree-sitter = "0.22.6"
