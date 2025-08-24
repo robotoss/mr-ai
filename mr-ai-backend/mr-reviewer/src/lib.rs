@@ -5,6 +5,10 @@
 //! 2) Delta AST & Symbol Index (changed files only)
 //! 3) Target Mapping
 //! 4) Context Builder & Prompt Orchestrator (dual-model routing)
+//! 5) **Step 5 — Publisher**
+//!    - Post draft comments to the provider (GitLab supported)
+//!    - Idempotency via hidden markers; dry-run for testing
+//!    - Concurrency-limited posting, friendly to rate limits
 //!
 //! This crate exposes a single high-level entry `run_review` that executes
 //! steps 1–4 and returns both the plan and draft comments.
@@ -16,6 +20,8 @@ pub mod lang; // step 2
 pub mod map; // step 3
 pub mod parser; // step 1 helpers
 pub mod review; // step 4
+
+pub mod publish; // step 5
 
 use std::time::Instant;
 use tracing::debug;
@@ -41,6 +47,7 @@ pub async fn run_review(
     cfg: ProviderConfig,
     id: ChangeRequestId,
     llm_cfg: review::llm::LlmConfig,
+    pub_cfg: publish::PublishConfig,
 ) -> MrResult<(ReviewPlan, Vec<review::DraftComment>)> {
     // --- Step 1: bundle fetch with cache ------------------------------------
     let t0 = Instant::now();
@@ -143,14 +150,22 @@ pub async fn run_review(
         t4.elapsed().as_millis()
     );
 
-    Ok((plan, drafts))
-}
+    let t5 = Instant::now();
+    let results = publish::publish(&cfg, &id, &plan, &drafts, pub_cfg).await?;
+    let created = results
+        .iter()
+        .filter(|r| r.performed && r.created_new)
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|r| r.skipped_reason.is_some())
+        .count();
+    debug!(
+        "step5: published created={} skipped={} in {} ms",
+        created,
+        skipped,
+        t5.elapsed().as_millis()
+    );
 
-/// Convenience: run with ENV-driven LLM config (kept for CLI/tests).
-pub async fn run_review_from_env(
-    provider_cfg: git_providers::ProviderConfig,
-    id: git_providers::ChangeRequestId,
-) -> MrResult<(ReviewPlan, Vec<review::DraftComment>)> {
-    let llm_cfg = review::llm::LlmConfig::from_env();
-    run_review(provider_cfg, id, llm_cfg).await
+    Ok((plan, drafts))
 }

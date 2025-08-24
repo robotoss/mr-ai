@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+regex = "1.11"
 tokio = { workspace = true }
 reqwest = { workspace = true, features = ["json", "gzip", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::{Json, extract::State, http::StatusCode};
 use mr_reviewer::{
     git_providers::{ChangeRequestId, ProviderConfig, ProviderKind},
+    publish::PublishConfig,
     run_review,
 };
 
@@ -28,12 +29,14 @@ pub async fn trigger_gitlab_mr(
         base_api: state.gitlab_api_base.clone(),
         token: state.gitlab_token.clone(),
     };
+
+    let pub_cfg = PublishConfig::default();
     let id = ChangeRequestId {
         project: p.project_id,
         iid: p.mr_iid,
     };
 
-    match run_review(cfg, id, state.llm_config.clone()).await {
+    match run_review(cfg, id, state.llm_config.clone(), pub_cfg).await {
         Ok(_bundle) => {
             // TODO: pass bundle to your queue/store; or keep it in cache only.
             Ok(StatusCode::ACCEPTED)
