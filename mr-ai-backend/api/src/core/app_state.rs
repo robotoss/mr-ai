@@ -1,4 +1,4 @@
-use mr_reviewer::review::llm::{LlmConfig, LlmKind};
+use mr_reviewer::review::llm::LlmConfig;
 
 /// Shared state for all HTTP handlers.
 #[derive(Clone)]
@@ -23,16 +23,7 @@ impl AppState {
             trigger_secret: std::env::var("TRIGGER_SECRET")
                 .unwrap_or_else(|_| "super-secret".into()),
 
-            llm_config: LlmConfig {
-                kind: LlmKind::Ollama,
-                model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3:32b".into()),
-                // Prefer explicit OLLAMA_URL, fallback to localhost:OLLAMA_PORT
-                endpoint: std::env::var("OLLAMA_URL").unwrap_or_else(|_| {
-                    let port = std::env::var("OLLAMA_PORT").unwrap_or_else(|_| "11434".into());
-                    format!("http://localhost:{port}")
-                }),
-                max_tokens: None,
-            },
+            llm_config: LlmConfig::from_env(),
         }
     }
 }

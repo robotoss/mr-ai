@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
 use mr_reviewer::{
-    ReviewerLlmConfig,
     git_providers::{ChangeRequestId, ProviderConfig, ProviderKind},
     run_review,
 };

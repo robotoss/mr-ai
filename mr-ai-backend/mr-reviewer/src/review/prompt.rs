@@ -1,86 +1,52 @@
-//! Prompt builder for step 4.
+//! Prompt builders for step 4 (fast + refine).
 //!
-//! Builds a compact, type-specific prompt from target + primary + related
-//! contexts. Keeps the code in a fenced block with language hints, and uses
-//! explicit instructions optimized for review comments.
+//! Keep prompts compact; include code blocks for model grounding.
 
-use super::context::{PrimaryContext, RelatedItem};
-use crate::map::{MappedTarget, TargetRef};
+use crate::map::MappedTarget;
 
-/// Final prompt we send to the LLM provider.
-#[derive(Debug, Clone)]
-pub struct Prompt {
-    pub system: String,
-    pub user: String,
-}
-
-/// Assemble a concise, review-oriented prompt tailored to target type.
-/// Produces a system (style) + user (task) message pair.
-pub fn build_prompt_for_target(
-    target: &MappedTarget,
-    primary: &PrimaryContext,
-    related: &[RelatedItem],
-) -> Prompt {
-    let kind = match &target.target {
-        TargetRef::Symbol { .. } => "symbol",
-        TargetRef::Range { .. } => "range",
-        TargetRef::Line { .. } => "line",
-        TargetRef::File { .. } => "file",
-        TargetRef::Global => "global",
-    };
-
-    // System: concise rules to get short, actionable review notes.
-    let system = r#"You are a senior code reviewer.
-- Be concise and actionable. Avoid generic advice.
-- Prefer specific suggestions and minimal diffs when proposing fixes.
-- Respect the project's style; do not reformat unrelated code.
-- If the change looks correct, acknowledge briefly and do not invent issues."#
-        .to_string();
-
-    // Related context listing (optional).
-    let related_text = if related.is_empty() {
-        String::new()
-    } else {
-        let mut r = String::from("\n\n# Related Context\n");
-        for it in related.iter().take(5) {
-            r.push_str(&format!(
-                "* [{}] (score {:.2}): {}\n",
-                it.path,
-                it.score,
-                truncate(&it.snippet, 220)
-            ));
-        }
-        r
-    };
-
-    // Primary code context fenced by language hint.
-    let code_block = format!("```{}\n{}\n```", primary.language_hint, primary.code);
-
-    // User message tailored to target kind.
-    let user = format!(
-        "# Review Target ({kind})\n\
-         Path: {}\nLines: {}-{}\n{}\
-         \n\n# Code\n{}\n\
-         \n# Task\n\
-         - Explain any risks/bugs directly related to the edited region.\n\
-         - If a fix is needed, propose a minimal code patch.\n\
-         - If everything is fine, say so briefly.\n",
-        primary.path,
-        primary.start_line,
-        primary.end_line,
-        match &primary.owner {
-            Some(o) => format!("Owner: {:?} {}\n", o.kind, o.name),
-            None => String::new(),
-        },
-        code_block
-    ) + &related_text;
-
-    Prompt { system, user }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
+/// Build primary prompt for the FAST model.
+pub fn build_prompt_for_target(tgt: &MappedTarget, primary: &str, related: &str) -> String {
+    let mut s = String::new();
+    s.push_str("You are a code review assistant. Provide actionable review feedback.\n");
+    s.push_str(
+        "Focus on correctness, potential bugs, performance, readability, and architecture.\n",
+    );
+    s.push_str("\n# Target\n");
+    s.push_str(&format!("{:?}\n", tgt.target));
+    s.push_str("\n# Primary context (head_sha materialized)\n```code\n");
+    s.push_str(primary);
+    s.push_str("\n```\n");
+    if !related.is_empty() {
+        s.push_str("\n# Related context (RAG)\n```code\n");
+        s.push_str(related);
+        s.push_str("\n```\n");
     }
-    s.chars().take(max).collect::<String>() + "…"
+    s.push_str("\n# Instructions\n- Be specific, reference lines/symbols when possible.\n- Suggest concrete fixes.\n");
+    s
+}
+
+/// Build refine prompt for the SLOW model (improve fast reply).
+pub fn build_refine_prompt(
+    fast_reply: &str,
+    tgt: &MappedTarget,
+    primary: &str,
+    related: &str,
+) -> String {
+    let mut s = String::new();
+    s.push_str("You are a senior reviewer. Improve the initial review below: make it precise and correct.\n");
+    s.push_str("\n# Target\n");
+    s.push_str(&format!("{:?}\n", tgt.target));
+    s.push_str("\n# Initial review (to refine)\n```\n");
+    s.push_str(fast_reply);
+    s.push_str("\n```\n");
+    s.push_str("\n# Primary context (head_sha)\n```code\n");
+    s.push_str(primary);
+    s.push_str("\n```\n");
+    if !related.is_empty() {
+        s.push_str("\n# Related context (RAG)\n```code\n");
+        s.push_str(related);
+        s.push_str("\n```\n");
+    }
+    s.push_str("\n# Instructions\n- Keep concise but precise; reference symbols/lines.\n- Correct any mistakes in the initial review.\n");
+    s
 }
