@@ -104,4 +104,20 @@ impl ProviderClient {
             changes,
         })
     }
+
+    /// Fetch raw file bytes at a specific git ref (e.g., MR head SHA).
+    ///
+    /// Returns `Ok(Some(bytes))` on success, `Ok(None)` if 404 (not found at ref).
+    pub async fn fetch_file_raw_at_ref(
+        &self,
+        id: &types::ChangeRequestId,
+        repo_relative_path: &str,
+        git_ref: &str,
+    ) -> MrResult<Option<Vec<u8>>> {
+        match self {
+            Self::GitLab(c) => c.get_file_raw(id, repo_relative_path, git_ref).await,
+            Self::GitHub(c) => c.get_file_raw(id, repo_relative_path, git_ref).await,
+            Self::Bitbucket(c) => c.get_file_raw(id, repo_relative_path, git_ref).await,
+        }
+    }
 }

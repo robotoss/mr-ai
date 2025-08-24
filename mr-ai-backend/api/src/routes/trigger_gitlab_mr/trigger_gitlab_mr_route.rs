@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
 use mr_reviewer::{
-    fetch_change_request_full,
+    ReviewerLlmConfig,
     git_providers::{ChangeRequestId, ProviderConfig, ProviderKind},
+    run_review,
 };
-use tracing::debug;
 
 use crate::{
     core::app_state::AppState,
@@ -34,7 +34,7 @@ pub async fn trigger_gitlab_mr(
         iid: p.mr_iid,
     };
 
-    match fetch_change_request_full(cfg, id).await {
+    match run_review(cfg, id, state.llm_config.clone()).await {
         Ok(_bundle) => {
             // TODO: pass bundle to your queue/store; or keep it in cache only.
             Ok(StatusCode::ACCEPTED)

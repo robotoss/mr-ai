@@ -44,4 +44,14 @@ impl BitbucketClient {
         // Optional enrichment via /patch
         Err(ProviderError::Unsupported.into())
     }
+
+    pub async fn get_file_raw(
+        &self,
+        _id: &ChangeRequestId,
+        _repo_relative_path: &str,
+        _git_ref: &str,
+    ) -> MrResult<Option<Vec<u8>>> {
+        // TODO: implement via "Get repository content" with media type raw.
+        Err(ProviderError::Unsupported.into())
+    }
 }

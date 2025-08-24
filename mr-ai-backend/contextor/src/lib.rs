@@ -5,19 +5,17 @@
 //! neighbors from the same source/FQN, builds a compact prompt, calls Ollama,
 //! and returns the model answer.
 
+mod api_types;
 mod cfg;
 mod error;
 mod llm;
 mod progress;
 mod prompt;
+mod retrieve;
 mod select;
 
-mod api_types;
-
 pub use api_types::{AskOptions, QaAnswer, UsedChunk};
-
 pub use error::ContextorError;
-
 pub use progress::{IndicatifProgress, NoopProgress, Progress};
 
 use cfg::ContextorConfig;
@@ -25,6 +23,8 @@ use rag_store::{
     RagQuery, RagStore,
     embed::ollama::{OllamaConfig, OllamaEmbedder},
 };
+
+pub use retrieve::{RetrieveOptions, retrieve_with_opts};
 
 /// Ask the LLM with RAG augmentation and get a final answer as plain text.
 ///

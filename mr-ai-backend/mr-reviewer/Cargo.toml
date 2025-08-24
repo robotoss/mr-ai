@@ -12,6 +12,9 @@ chrono = { workspace = true, features = ["serde"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+codegraph-prep = { path = "../codegraph-prep" }
+contextor = { path = "../contextor" }
+
 
 # crate-local deps
 sha2 = "0.10"

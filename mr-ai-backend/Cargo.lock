@@ -1381,6 +1381,8 @@ name = "mr-reviewer"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "codegraph-prep",
+ "contextor",
  "reqwest",
  "serde",
  "serde_json",

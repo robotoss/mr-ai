@@ -256,6 +256,38 @@ impl GitLabClient {
             is_truncated: false,
         }))
     }
+
+    /// GET /projects/:id/repository/files/:path/raw?ref=:ref
+    /// Returns `None` on 404; otherwise raw bytes of the file at the given ref.
+    pub async fn get_file_raw(
+        &self,
+        id: &ChangeRequestId,
+        repo_relative_path: &str,
+        git_ref: &str,
+    ) -> MrResult<Option<Vec<u8>>> {
+        let url = format!(
+            "{}/projects/{}/repository/files/{}/raw",
+            self.base_api,
+            urlencoding::encode(&id.project),
+            urlencoding::encode(repo_relative_path),
+        );
+
+        let resp = self
+            .http
+            .get(url)
+            .query(&[("ref", git_ref)])
+            .header("PRIVATE-TOKEN", &self.token)
+            .send()
+            .await?;
+
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+
+        let resp = resp.error_for_status()?;
+        let bytes = resp.bytes().await?;
+        Ok(Some(bytes.to_vec()))
+    }
 }
 
 /// --- GitLab response shapes (subset of fields we actually use) ---

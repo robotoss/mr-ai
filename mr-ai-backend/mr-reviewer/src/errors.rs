@@ -32,6 +32,10 @@ pub enum Error {
     /// Input validation errors (bad IDs, unsupported flavors, etc.).
     #[error("validation error: {0}")]
     Validation(String),
+
+    /// Generic catch-all error when nothing else fits.
+    #[error("other error: {0}")]
+    Other(String),
 }
 
 /// Detailed provider-specific error used inside the Provider layer.

@@ -23,11 +23,7 @@ use crate::{
 pub async fn start() -> Result<(), Box<dyn Error>> {
     let host_url = env::var("API_ADDRESS").expect("API_ADDRESS must be set in environment");
 
-    let shared_state = Arc::new(AppState {
-        gitlab_api_base: "https://gitlab.com/api/v4".to_string(),
-        gitlab_token: "glpat-cGG6Kh08jcPkm3qJJRCXXG86MQp1Omhrbml6Cw.01.120oarvy5".to_string(),
-        trigger_secret: "".to_string(),
-    });
+    let shared_state = Arc::new(AppState::from_env());
 
     let app = Router::new()
         .route("/prepare_graph", get(prepare_graph))
