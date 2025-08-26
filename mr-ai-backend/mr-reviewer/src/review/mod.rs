@@ -1,39 +1,32 @@
-//! Step 4: Context builder & prompt orchestrator (dual-model routing).
+//! Step 4 Orchestrator: context → prompt → LLM (Fast/Slow) → policy → drafts.
 //!
-//! Flow:
-//!   1) Primary context from materialized head file (windowed);
-//!   2) Related context via global RAG (memoized per file);
-//!   3) FAST model drafting for all targets (14B by default);
-//!   4) Confidence + severity + prompt length → selective escalation;
-//!   5) SLOW model refine only for selected subset (32B);
-//!   6) Shaping & dedup, final drafts.
+//! Produces validated, noise-free comments restricted to changed lines only.
 //!
-//! Logs:
-//! - `INFO`: final summary (#targets, #drafts, #fast_only, #escalated, timing)
-//! - `DEBUG`: per-target decisions and timings.
-//! - plus: JSON report with per-target details at
-//!         code_data/mr_tmp/<head12>/step4_report.json
+//! Public surface kept compatible with lib.rs / publish.rs:
+//! - `pub async fn build_draft_comments(plan, llm_cfg)`
+//! - `pub struct DraftComment { target: TargetRef, snippet_hash: String, ... }`
 
 pub mod context;
 pub mod llm;
 pub mod policy;
 pub mod prompt;
 
+use serde::Serialize;
 use std::{fs, path::PathBuf, time::Instant};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use crate::ReviewPlan;
 use crate::errors::MrResult;
 use crate::map::TargetRef;
-use llm::{LlmConfig, LlmRouter};
-use policy::{Severity, apply_policy, dedup_in_place, score_confidence};
-use prompt::{build_prompt_for_target, build_refine_prompt};
+use context::PrimaryCtx;
+use llm::LlmConfig;
+use policy::{ReviewItem, ReviewReport, Severity, sanitize_validate_and_format};
+use prompt::{PromptLimits, StrictStyle, build_prompt, build_refine_prompt};
 
 /// Final product of step 4: drafts ready to be published on step 5.
 #[derive(Debug, Clone)]
 pub struct DraftComment {
     /// Target location (Symbol / Range / Line / File / Global).
-    pub target: crate::map::TargetRef,
+    pub target: TargetRef,
     /// Stable re-anchoring hash computed in step 3.
     pub snippet_hash: String,
     /// Suggested Markdown body.
@@ -44,14 +37,11 @@ pub struct DraftComment {
     pub preview: String,
 }
 
-// ---------- Reporting (JSON dump) ----------
-
-use serde::Serialize;
-
 /// Per-target diagnostic row written to step4_report.json.
 #[derive(Serialize)]
 struct Step4ItemReport {
     idx: usize,
+
     // target
     target_kind: String,
     path: Option<String>,
@@ -72,7 +62,7 @@ struct Step4ItemReport {
     slow_ms: Option<u128>,
 
     // context
-    related_count: usize,
+    related_present: bool,
 
     // outputs
     body_len: usize,
@@ -92,17 +82,14 @@ struct Step4Report {
     items: Vec<Step4ItemReport>,
 }
 
-// ---------- Main logic ----------
-
 /// Build draft comments for the given review plan (step 4).
 ///
 /// Uses a dual-model router: FAST for mass drafting, SLOW for selective refine.
-/// Also memoizes related context per-file.
 pub async fn build_draft_comments(
-    plan: &ReviewPlan,
+    plan: &crate::ReviewPlan,
     llm_cfg: LlmConfig,
 ) -> MrResult<Vec<DraftComment>> {
-    let router = LlmRouter::from_config(llm_cfg);
+    let router = llm::LlmRouter::from_config(llm_cfg);
 
     let t0 = Instant::now();
     debug!("step4: build draft comments (context → prompt → llm → policy)");
@@ -123,119 +110,120 @@ pub async fn build_draft_comments(
     for (idx, tgt) in plan.targets.iter().enumerate() {
         let t_one = Instant::now();
 
-        // 1) Primary + Related (memoized per-file)
-        let primary = context::build_primary_context(
-            &plan.bundle.meta.diff_refs.head_sha,
-            tgt,
-            &plan.symbols,
-        )?;
-        let related = context::fetch_related_context(&plan.symbols, tgt).await?;
-        let related_count = related.len();
+        // 1) Primary context for the target (only changed lines + anchors).
+        let primary: PrimaryCtx = context::build_primary_context(&head_sha, tgt, &plan.symbols)?;
 
-        // 2) FAST prompt + generate (14B by default)
-        let prompt = build_prompt_for_target(tgt, &primary, &related);
-        let prompt_len = prompt.chars().count(); // rough proxy for tokens
+        // 2) Read-only related context (RAG); memoized inside the helper.
+        let related_text = context::fetch_related_context(&plan.symbols, tgt).await?;
+        let related_present = !related_text.is_empty();
+
+        // 3) Build strict prompt and run FAST model.
+        let limits = PromptLimits::default();
+        let prompt = build_prompt(&primary, &related_text, limits, StrictStyle::GitLab);
+        let prompt_len = prompt.chars().count();
+
         let t_fast = Instant::now();
         let fast_raw = router.generate_fast(&prompt).await?;
         let fast_ms = t_fast.elapsed().as_millis();
 
-        // Policy shaping
-        let shaped = match apply_policy(&fast_raw, tgt, &primary, &related) {
-            Some(s) => s,
-            None => {
-                debug!("step4: draft dropped by policy (empty/trivial) idx={}", idx);
-                // всё равно добавим строку в отчёт для прозрачности
-                rows.push(make_report_row(
-                    idx,
-                    &tgt.target,
-                    &tgt.snippet_hash,
-                    /*severity*/ "Dropped",
-                    /*confidence*/ 0.0,
-                    prompt_len,
-                    /*escalated*/ false,
-                    fast_ms,
-                    None,
-                    related_count,
-                    0,
-                    String::new(),
-                    &tgt.preview,
-                ));
-                continue;
-            }
-        };
+        // 4) Policy: sanitize + validate (drop out-of-bounds / think traces / trivial).
+        let fast_report: ReviewReport =
+            sanitize_validate_and_format(&fast_raw, &primary.allowed_anchors, &primary.path);
 
-        // Confidence for routing decision
-        let confidence = score_confidence(&shaped.body_markdown, &prompt);
-        let sev_str = severity_str(shaped.severity);
+        if fast_report.items.is_empty() {
+            debug!(
+                "step4: {} produced no valid findings (dropped={})",
+                primary.path, fast_report.dropped
+            );
+            rows.push(make_report_row(
+                idx,
+                &tgt.target,
+                &tgt.snippet_hash,
+                "Dropped",
+                0.0,
+                prompt_len,
+                false,
+                fast_ms,
+                None,
+                related_present,
+                0,
+                String::new(),
+                &tgt.preview,
+            ));
+            continue;
+        }
 
-        debug!(
-            "step4: FAST idx={} severity={} conf={:.2} prompt_len={} took={}ms",
-            idx,
-            sev_str,
-            confidence,
-            prompt_len,
-            t_one.elapsed().as_millis()
-        );
+        // 5) Optional SLOW refine per finding.
+        for item in fast_report.items.iter() {
+            let conf = heuristic_confidence(item, prompt_len);
+            let sev_str = severity_str(item.severity);
 
-        let mut final_shaped = shaped.clone();
-        let mut slow_ms: Option<u128> = None;
-        let mut escalated = false;
+            let mut final_item = item.clone();
+            let mut escalated = false;
+            let mut slow_ms: Option<u128> = None;
 
-        // 3) Selective escalation (32B) if needed and budget allows
-        if router.should_escalate(sev_str, confidence, prompt_len, used_escalations) {
-            let t_ref = Instant::now();
-            let refine_prompt = build_refine_prompt(&shaped.body_markdown, tgt, &primary, &related);
-            let slow_raw = router.generate_slow(&refine_prompt).await?;
-            slow_ms = Some(t_ref.elapsed().as_millis());
+            if router.should_escalate(sev_str, conf, prompt_len, used_escalations) {
+                let block = finding_block(&final_item);
+                let refine_prompt = build_refine_prompt(&primary, &related_text, &block);
 
-            if let Some(r2) = apply_policy(&slow_raw, tgt, &primary, &related) {
-                // Pick the more informative body (simple heuristic)
-                if r2.body_markdown.len() > final_shaped.body_markdown.len() {
-                    final_shaped = r2;
+                let t_slow = Instant::now();
+                let slow_raw = router.generate_slow(&refine_prompt).await?;
+                slow_ms = Some(t_slow.elapsed().as_millis());
+
+                let slow_rep = sanitize_validate_and_format(
+                    &slow_raw,
+                    &primary.allowed_anchors,
+                    &primary.path,
+                );
+
+                if let Some(better) = pick_same_anchor_better(&final_item, &slow_rep.items) {
+                    final_item = better.clone();
                 }
                 used_escalations += 1;
                 escalated = true;
-                debug!(
-                    "step4: ESCALATED idx={} used={} refine_ms={}",
-                    idx,
-                    used_escalations,
-                    slow_ms.unwrap()
-                );
             }
+
+            // 6) Shape to Markdown draft.
+            let body_markdown = to_markdown(&final_item);
+            let preview = truncate(&body_markdown, 160);
+
+            rows.push(make_report_row(
+                idx,
+                &tgt.target,
+                &tgt.snippet_hash,
+                sev_str,
+                conf,
+                prompt_len,
+                escalated,
+                fast_ms,
+                slow_ms,
+                related_present,
+                body_markdown.len(),
+                body_markdown.clone(),
+                &preview,
+            ));
+
+            drafts.push(DraftComment {
+                target: tgt.target.clone(),
+                snippet_hash: tgt.snippet_hash.clone(),
+                body_markdown,
+                severity: final_item.severity,
+                preview,
+            });
         }
 
-        // 4) Store final draft
-        let final_body_len = final_shaped.body_markdown.len();
-        drafts.push(DraftComment {
-            target: tgt.target.clone(),
-            snippet_hash: tgt.snippet_hash.clone(),
-            body_markdown: final_shaped.body_markdown.clone(),
-            severity: final_shaped.severity,
-            preview: tgt.preview.clone(),
-        });
-
-        // 5) Add row to report
-        rows.push(make_report_row(
+        debug!(
+            "step4: target#{} {} processed in {} ms",
             idx,
-            &tgt.target,
-            &tgt.snippet_hash,
-            severity_str(final_shaped.severity),
-            confidence,
-            prompt_len,
-            escalated,
-            fast_ms,
-            slow_ms,
-            related_count,
-            final_body_len,
-            final_shaped.body_markdown,
-            &tgt.preview,
-        ));
+            primary.path,
+            t_one.elapsed().as_millis()
+        );
     }
 
-    // Remove duplicates (same target + same body).
+    // 7) Deduplicate drafts (same target + same title).
     dedup_in_place(&mut drafts);
 
-    // INFO summary for operators
+    // 8) Summary + JSON report
     let total = plan.targets.len();
     let escalated = used_escalations;
     let fast_only = drafts.len().saturating_sub(escalated);
@@ -249,7 +237,6 @@ pub async fn build_draft_comments(
         elapsed
     );
 
-    // Show a couple of examples for sanity in INFO logs
     for (i, d) in drafts.iter().take(2).enumerate() {
         info!(
             "step4: sample#{} severity={:?} preview={}",
@@ -259,9 +246,8 @@ pub async fn build_draft_comments(
         );
     }
 
-    // Write JSON report (full per-target breakdown).
     let report = Step4Report {
-        head_sha: head_sha.clone(),
+        head_sha,
         targets_total: total,
         drafts_total: drafts.len(),
         escalated_total: escalated,
@@ -269,22 +255,14 @@ pub async fn build_draft_comments(
         elapsed_ms: elapsed,
         items: rows,
     };
-    if let Err(e) = write_report(&head_sha, &report) {
-        // не ломаем пайплайн — только логируем
-        debug!("step4: failed to write report: {}", e);
+    if let Err(e) = write_report(&plan.bundle.meta.diff_refs.head_sha, &report) {
+        warn!("step4: failed to write report: {}", e);
     }
 
     Ok(drafts)
 }
 
-// ---------- Helpers ----------
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return s.to_string();
-    }
-    s.chars().take(n).collect::<String>() + "…"
-}
+// --------------------------- helpers --------------------------------------
 
 fn severity_str(s: Severity) -> &'static str {
     match s {
@@ -293,6 +271,149 @@ fn severity_str(s: Severity) -> &'static str {
         Severity::Low => "Low",
     }
 }
+
+/// Heuristic confidence in [0..1].
+fn heuristic_confidence(item: &ReviewItem, prompt_len: usize) -> f32 {
+    let mut score = 0.55f32;
+    if item.patch.is_some() {
+        score += 0.18;
+    }
+    let body = item.body.to_ascii_lowercase();
+    let has_code =
+        body.contains("```") || body.contains("::") || body.contains("()") || body.contains('[');
+    let has_digits = body.chars().any(|c| c.is_ascii_digit());
+    if has_code {
+        score += 0.1;
+    }
+    if has_digits {
+        score += 0.05;
+    }
+    let vague = ["maybe", "might", "perhaps", "seems", "i think", "could be"];
+    if vague.iter().any(|w| body.contains(w)) {
+        score -= 0.12;
+    }
+    if prompt_len > 20_000 {
+        score -= 0.05;
+    }
+    score.clamp(0.0, 1.0)
+}
+
+/// Build a single finding block from an already validated item.
+/// The block matches the strict format used by `prompt::build_refine_prompt`.
+fn finding_block(item: &ReviewItem) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "ANCHOR: {}-{}\n",
+        item.anchor.start, item.anchor.end
+    ));
+    s.push_str(&format!("SEVERITY: {}\n", severity_str(item.severity)));
+    s.push_str(&format!("TITLE: {}\n", item.title));
+    s.push_str("BODY: ");
+    s.push_str(item.body.trim());
+    s.push('\n');
+    if let Some(p) = &item.patch {
+        s.push_str("PATCH:\n```diff\n");
+        s.push_str(p.trim());
+        s.push_str("\n```\n");
+    }
+    s
+}
+
+/// Convert a validated item into publishable Markdown.
+fn to_markdown(item: &ReviewItem) -> String {
+    let mut md = String::new();
+    md.push_str(&format!("**{}**\n\n", item.title.trim()));
+    md.push_str(item.body.trim());
+    md.push('\n');
+    if let Some(patch) = &item.patch {
+        md.push_str("\n```diff\n");
+        md.push_str(patch.trim());
+        md.push_str("\n```\n");
+    }
+    md
+}
+
+/// Deduplicate drafts (same target + same first title line).
+fn dedup_in_place(drafts: &mut Vec<DraftComment>) {
+    drafts.sort_by(|a, b| {
+        (
+            idempotency_key_for(&a.target, &a.snippet_hash),
+            first_title(&a.body_markdown).to_ascii_lowercase(),
+        )
+            .cmp(&(
+                idempotency_key_for(&b.target, &b.snippet_hash),
+                first_title(&b.body_markdown).to_ascii_lowercase(),
+            ))
+    });
+
+    let mut out: Vec<DraftComment> = Vec::new();
+    for d in drafts.drain(..) {
+        if let Some(last) = out.last_mut() {
+            let same_key = idempotency_key_for(&last.target, &last.snippet_hash)
+                == idempotency_key_for(&d.target, &d.snippet_hash);
+            let same_title = first_title(&last.body_markdown)
+                .eq_ignore_ascii_case(&first_title(&d.body_markdown));
+            if same_key && same_title {
+                let rank = |s: Severity| match s {
+                    Severity::High => 0,
+                    Severity::Medium => 1,
+                    Severity::Low => 2,
+                };
+                let better = rank(d.severity) < rank(last.severity)
+                    || (d.severity == last.severity
+                        && d.body_markdown.len() > last.body_markdown.len());
+                if better {
+                    *last = d;
+                }
+                continue;
+            }
+        }
+        out.push(d);
+    }
+    *drafts = out;
+}
+
+fn first_title(md: &str) -> String {
+    md.lines()
+        .next()
+        .unwrap_or("")
+        .trim_matches('*')
+        .trim()
+        .to_string()
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    s.chars().take(n).collect::<String>() + "…"
+}
+
+/// Choose a better item from `candidates` that has the same anchor as `baseline`.
+/// Preference order: stricter severity → longer body → having a patch.
+fn pick_same_anchor_better<'a>(
+    baseline: &ReviewItem,
+    candidates: &'a [ReviewItem],
+) -> Option<&'a ReviewItem> {
+    let rank = |s: Severity| match s {
+        Severity::High => 0,
+        Severity::Medium => 1,
+        Severity::Low => 2,
+    };
+    candidates
+        .iter()
+        .filter(|c| c.anchor == baseline.anchor)
+        .max_by(|a, b| {
+            let ra = rank(a.severity);
+            let rb = rank(b.severity);
+            ra.cmp(&rb)
+                .reverse() // lower rank is better
+                .then(a.body.len().cmp(&b.body.len()))
+                .then(a.patch.is_some().cmp(&b.patch.is_some()))
+        })
+}
+
+/// Reporting helpers
 
 fn short_sha12(head_sha: &str) -> &str {
     if head_sha.len() >= 12 {
@@ -320,6 +441,27 @@ fn write_report(head_sha: &str, rep: &Step4Report) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Same format as in step 5 (without HTML marker wrapper).
+/// key = "<path>:<line_or_decl_or_start>|<kind>#<snippet_hash>"
+fn idempotency_key_for(target: &TargetRef, snippet_hash: &str) -> String {
+    let (path, line_opt, kind) = match target {
+        TargetRef::Line { path, line } => (path.clone(), Some(*line), "line"),
+        TargetRef::Range {
+            path, start_line, ..
+        } => (path.clone(), Some(*start_line), "range"),
+        TargetRef::Symbol {
+            path, decl_line, ..
+        } => (path.clone(), Some(*decl_line), "symbol"),
+        TargetRef::File { path } => (path.clone(), None, "file"),
+        TargetRef::Global => ("".to_string(), None, "global"),
+    };
+
+    let line_key = line_opt
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| "-".into());
+    format!("{}:{}|{}#{}", path, line_key, kind, snippet_hash)
+}
+
 /// Build a JSON row for the report, including idempotency key.
 fn make_report_row(
     idx: usize,
@@ -331,7 +473,7 @@ fn make_report_row(
     escalated: bool,
     fast_ms: u128,
     slow_ms: Option<u128>,
-    related_count: usize,
+    related_present: bool,
     body_len: usize,
     body_markdown: String,
     preview: &str,
@@ -380,7 +522,7 @@ fn make_report_row(
         TargetRef::Global => ("global".to_string(), None, None, None, None, None),
     };
 
-    let idempotency_key = make_idempotency_key(target, snippet_hash);
+    let idempotency_key = idempotency_key_for(target, snippet_hash);
 
     Step4ItemReport {
         idx,
@@ -398,30 +540,9 @@ fn make_report_row(
         escalated,
         fast_ms,
         slow_ms,
-        related_count,
+        related_present,
         body_len,
         body_markdown,
         preview: preview.to_string(),
     }
-}
-
-/// Same format as in step 5 (without HTML marker wrapper).
-/// key = "<path>:<line_or_decl_or_start>|<kind>#<snippet_hash>"
-fn make_idempotency_key(target: &TargetRef, snippet_hash: &str) -> String {
-    let (path, line_opt, kind) = match target {
-        TargetRef::Line { path, line } => (path.clone(), Some(*line), "line"),
-        TargetRef::Range {
-            path, start_line, ..
-        } => (path.clone(), Some(*start_line), "range"),
-        TargetRef::Symbol {
-            path, decl_line, ..
-        } => (path.clone(), Some(*decl_line), "symbol"),
-        TargetRef::File { path } => (path.clone(), None, "file"),
-        TargetRef::Global => ("".to_string(), None, "global"),
-    };
-
-    let line_key = line_opt
-        .map(|l| l.to_string())
-        .unwrap_or_else(|| "-".into());
-    format!("{}:{}|{}#{}", path, line_key, kind, snippet_hash)
 }

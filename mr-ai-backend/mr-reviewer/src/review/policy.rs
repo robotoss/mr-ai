@@ -1,122 +1,160 @@
-//! Policy utilities: severity normalization, shaping, confidence scoring, dedup.
+//! Policy utilities: strict sanitization, anchor validation, shaping.
 
-use crate::map::MappedTarget;
+use regex::Regex;
+use tracing::debug;
 
+use crate::review::context::AnchorRange;
+
+/// Normalized severity (High > Medium > Low).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
-    Low,
-    Medium,
     High,
+    Medium,
+    Low,
 }
 
-/// Result of policy shaping a raw LLM output.
-#[derive(Debug, Clone)]
-pub struct ShapedDraft {
-    pub body_markdown: String,
+/// One validated finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewItem {
+    pub anchor: AnchorRange,
     pub severity: Severity,
+    pub title: String,
+    pub body: String,
+    pub patch: Option<String>,
 }
 
-/// Apply policy on raw model text and contexts.
-/// Returns `None` when the draft should be dropped.
-pub fn apply_policy(
+/// Aggregated result with stats.
+#[derive(Debug, Clone)]
+pub struct ReviewReport {
+    pub items: Vec<ReviewItem>,
+    pub dropped: usize,
+}
+
+/// Sanitize LLM output and extract only valid anchored findings.
+/// - Strips `<think>...</think>` and similar traces.
+/// - Accepts blocks starting with `ANCHOR: start-end` (1-based).
+/// - Ensures anchor is within `allowed`.
+pub fn sanitize_validate_and_format(
     llm_raw: &str,
-    _tgt: &MappedTarget,
-    _primary: &str,
-    _related: &str,
-) -> Option<ShapedDraft> {
-    let trimmed = llm_raw.trim();
-    if trimmed.is_empty() {
-        return None;
+    allowed: &[AnchorRange],
+    _path: &str,
+) -> ReviewReport {
+    let mut dropped = 0usize;
+
+    let clean = strip_hidden(llm_raw);
+
+    let re_anchor = Regex::new(r#"(?mi)^ANCHOR:\s*(\d+)\s*-\s*(\d+)\s*$"#).unwrap();
+    let re_sev = Regex::new(r#"(?mi)^SEVERITY:\s*(High|Medium|Low)\s*$"#).unwrap();
+    let re_title = Regex::new(r#"(?mi)^TITLE:\s*(.+)$"#).unwrap();
+    let re_body = Regex::new(r#"(?mi)^BODY:\s*(.+?)(?:\n(?:PATCH:|ANCHOR:)|\z)"#).unwrap();
+    let re_patch_block = Regex::new(r#"(?ms)^PATCH:\s*```diff\s*(.+?)\s*```"#).unwrap();
+
+    // Split into pseudo-blocks by each ANCHOR line.
+    let mut items: Vec<ReviewItem> = Vec::new();
+    for cap in re_anchor.captures_iter(&clean) {
+        let full_anchor = cap.get(0).unwrap();
+        let start_idx = full_anchor.start();
+
+        // Slice from current anchor to next anchor or end
+        let rest = &clean[start_idx..];
+        let next_anchor_pos = re_anchor
+            .find_iter(rest)
+            .nth(1)
+            .map(|m| m.start())
+            .unwrap_or(rest.len());
+        let block = &rest[..next_anchor_pos];
+
+        // Parse anchor
+        let start: usize = cap[1].parse().unwrap_or(0);
+        let end: usize = cap[2].parse().unwrap_or(0);
+        if start == 0 || end == 0 || end < start {
+            dropped += 1;
+            continue;
+        }
+        let anchor = AnchorRange { start, end };
+
+        // Validate anchor against allowed
+        if !allowed.is_empty() && !anchor_allowed(anchor, allowed) {
+            dropped += 1;
+            continue;
+        }
+
+        // Parse other fields within block
+        let sev = re_sev
+            .captures(block)
+            .and_then(|c| c.get(1).map(|m| m.as_str()))
+            .map(parse_sev)
+            .unwrap_or(Severity::Medium);
+
+        let title = re_title
+            .captures(block)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .unwrap_or_default();
+
+        let body = re_body
+            .captures(block)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .unwrap_or_default();
+
+        let patch = re_patch_block
+            .captures(block)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()));
+
+        // Basic anti-noise rules
+        if title.is_empty() || body.is_empty() || is_trivial(&title, &body) {
+            dropped += 1;
+            continue;
+        }
+
+        items.push(ReviewItem {
+            anchor,
+            severity: sev,
+            title,
+            body,
+            patch,
+        });
     }
 
-    let severity = infer_severity(trimmed);
-    Some(ShapedDraft {
-        body_markdown: trimmed.to_string(),
-        severity,
-    })
+    debug!("policy: shaped items={} dropped={}", items.len(), dropped);
+
+    ReviewReport { items, dropped }
 }
 
-/// Naive severity inference based on cues (replace with your rules if needed).
-fn infer_severity(text: &str) -> Severity {
-    let lower = text.to_lowercase();
-    if lower.contains("security")
-        || lower.contains("race")
-        || lower.contains("deadlock")
-        || lower.contains("sql injection")
-        || lower.contains("xss")
-    {
-        Severity::High
-    } else if lower.contains("performance")
-        || lower.contains("memory")
-        || lower.contains("leak")
-        || lower.contains("latency")
-    {
-        Severity::Medium
-    } else {
-        Severity::Low
+fn parse_sev(s: &str) -> Severity {
+    match s {
+        "High" | "high" => Severity::High,
+        "Low" | "low" => Severity::Low,
+        _ => Severity::Medium,
     }
 }
 
-/// Rough 0..1 confidence score: penalize hedging and overly generic phrases.
-pub fn score_confidence(body: &str, prompt: &str) -> f32 {
-    let b = body.to_lowercase();
-    let mut score = 0.8_f32;
-    let hedges = [
-        "maybe", "might", "perhaps", "i think", "it seems", "possibly",
-    ];
+fn strip_hidden(s: &str) -> String {
+    // remove <think>...</think> and any xml-ish blocks we don't want
+    let re_think = Regex::new(r#"(?is)<\s*/?\s*think\s*>.*?<\s*/\s*think\s*>"#).unwrap();
+    let out = re_think.replace_all(s, "");
+    out.lines()
+        .filter(|l| {
+            let ll = l.trim().to_ascii_lowercase();
+            !(ll.starts_with("note:") || ll.starts_with("thought") || ll.starts_with("system:"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn anchor_allowed(a: AnchorRange, allowed: &[AnchorRange]) -> bool {
+    allowed.iter().any(|r| a.start >= r.start && a.end <= r.end)
+}
+
+fn is_trivial(title: &str, body: &str) -> bool {
+    let t = format!("{} {}", title, body).to_ascii_lowercase();
     let generic = [
         "looks good",
         "nice work",
         "consider refactor",
         "improve code quality",
+        "nit:",
+        "style:",
+        "typo", // let nitpicks go
     ];
-    let mut penalties = 0.0_f32;
-
-    for h in hedges.iter() {
-        if b.contains(h) {
-            penalties += 0.05;
-        }
-    }
-    for g in generic.iter() {
-        if b.contains(g) {
-            penalties += 0.15;
-        }
-    }
-
-    // Penalize poor lexical overlap with prompt (very rough).
-    let overlap_tokens = overlap_count(&b, &prompt.to_lowercase());
-    if overlap_tokens < 5 {
-        penalties += 0.2;
-    }
-
-    score = (score - penalties).clamp(0.0, 1.0);
-    score
-}
-
-fn overlap_count(a: &str, b: &str) -> usize {
-    use std::collections::HashSet;
-    let toks_a: HashSet<&str> = a
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let toks_b: HashSet<&str> = b
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .collect();
-    toks_a.intersection(&toks_b).count()
-}
-
-/// In-place dedup (hash by target+body).
-pub fn dedup_in_place(drafts: &mut Vec<crate::review::DraftComment>) {
-    use std::collections::HashSet;
-    let mut seen = HashSet::new();
-    drafts.retain(|d| {
-        let key = format!("{:?}::{}", d.target, d.body_markdown);
-        if seen.contains(&key) {
-            false
-        } else {
-            seen.insert(key);
-            true
-        }
-    });
+    generic.iter().any(|g| t.contains(g))
 }

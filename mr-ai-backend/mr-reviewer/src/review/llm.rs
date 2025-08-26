@@ -2,13 +2,6 @@
 //!
 //! - `LlmClient` provides minimal Ollama /api/generate wrapper.
 //! - `LlmRouter` decides whether to keep fast draft or escalate to slow model.
-//! - `LlmConfig::from_env()` reads both legacy keys (OLLAMA_MODEL/URL)
-//!   and the optional fast model key OLLAMA_MODEL_FAST_MODEL.
-//!
-//! Design goals:
-//! - No async-trait, no boxed trait objects.
-//! - Keep-alive client to avoid reconnect churn.
-//! - Best-effort warmup to reduce first-token latency.
 
 use std::time::Duration;
 
@@ -39,8 +32,7 @@ pub struct EscalationPolicy {
     pub max_escalations: usize,
     pub min_severity: String, // "Low" | "Medium" | "High"
     pub min_confidence: f32,  // 0..1
-    pub long_prompt_tokens: usize,
-    pub group_simple_targets: bool,
+    pub long_prompt_chars: usize,
 }
 
 impl EscalationPolicy {
@@ -57,21 +49,17 @@ impl EscalationPolicy {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.55);
-        let long_prompt_tokens = std::env::var("REVIEW_ESCALATE_LONG_PROMPT_TOK")
+        let long_prompt_chars = std::env::var("REVIEW_ESCALATE_LONG_PROMPT_CHARS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2500);
-        let group_simple_targets = std::env::var("REVIEW_GROUP_SIMPLE_TARGETS")
-            .unwrap_or_else(|_| "true".into())
-            == "true";
+            .unwrap_or(20_000);
 
         Self {
             enabled,
             max_escalations,
             min_severity,
             min_confidence,
-            long_prompt_tokens,
-            group_simple_targets,
+            long_prompt_chars,
         }
     }
 }
@@ -205,7 +193,7 @@ impl LlmRouter {
         &self,
         severity: &str,
         confidence: f32,
-        prompt_tokens_approx: usize,
+        prompt_chars: usize,
         used_escalations: usize,
     ) -> bool {
         if !self.policy.enabled {
@@ -216,7 +204,7 @@ impl LlmRouter {
         }
         let sev_ok = severity_ge(severity, &self.policy.min_severity);
         let conf_low = confidence < self.policy.min_confidence;
-        let too_long = prompt_tokens_approx > self.policy.long_prompt_tokens;
+        let too_long = prompt_chars > self.policy.long_prompt_chars;
         sev_ok || conf_low || too_long
     }
 
