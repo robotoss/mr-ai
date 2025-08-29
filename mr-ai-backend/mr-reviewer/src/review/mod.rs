@@ -13,9 +13,9 @@ pub mod llm;
 pub mod policy;
 pub mod prompt;
 
-use crate::ReviewPlan;
 use crate::errors::MrResult;
 use crate::map::TargetRef;
+use crate::{ReviewPlan, telemetry::prompt_dump::dump_prompt_for_target};
 
 use context::{
     AnchorRange, PrimaryCtx, collect_added_lines, infer_anchor_by_signature,
@@ -111,6 +111,9 @@ pub async fn build_draft_comments(
         let prompt_chars = prompt.chars().count();
         let prompt_tokens_approx = prompt_chars / 4;
 
+        // Dump FAST prompt (safe + configurable)
+        dump_prompt_for_target(&head_sha, idx, "fast", tgt, &prompt, prompt_tokens_approx);
+
         let t_fast = Instant::now();
         let fast_raw = router.generate_fast(&prompt).await?;
         let fast_ms = t_fast.elapsed().as_millis();
@@ -136,6 +139,12 @@ pub async fn build_draft_comments(
 
         if best.is_none() || should_escalate() {
             let refine = build_refine_prompt(best.as_ref(), tgt, &ctx, &related);
+
+            // Dump SLOW prompt as well
+            let refine_chars = refine.chars().count();
+            let refine_tokens_approx = refine_chars / 4;
+            dump_prompt_for_target(&head_sha, idx, "slow", tgt, &refine, refine_tokens_approx);
+
             let t_slow = Instant::now();
             let slow_raw = router.generate_slow(&refine).await?;
             slow_ms = Some(t_slow.elapsed().as_millis());

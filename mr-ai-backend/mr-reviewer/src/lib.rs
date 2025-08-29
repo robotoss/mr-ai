@@ -23,6 +23,8 @@ pub mod review; // step 4
 
 pub mod publish; // step 5
 
+mod telemetry;
+
 use std::time::Instant;
 use tracing::debug;
 
