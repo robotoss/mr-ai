@@ -1,27 +1,20 @@
-//! LLM layer with dual-model routing (fast + slow) for step 4.
-//!
-//! - `LlmClient` provides minimal Ollama /api/generate wrapper.
-//! - `LlmRouter` decides whether to keep fast draft or escalate to slow model.
+//! LLM layer with dual-model routing (fast + slow).
 
 use std::time::Duration;
-
-use reqwest::Client;
 use tracing::debug;
+
+use crate::errors::Error;
 
 #[derive(Debug, Clone, Copy)]
 pub enum LlmKind {
-    /// Only Ollama is implemented.
     Ollama,
 }
 
 /// Model configuration (per endpoint).
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
-    /// Model name (e.g., "qwen3:14b", "qwen3:32b").
     pub model: String,
-    /// HTTP endpoint (e.g., "http://127.0.0.1:11434").
     pub endpoint: String,
-    /// Optional max tokens (reserved for future).
     pub max_tokens: Option<u32>,
 }
 
@@ -30,9 +23,9 @@ pub struct ModelConfig {
 pub struct EscalationPolicy {
     pub enabled: bool,
     pub max_escalations: usize,
-    pub min_severity: String, // "Low" | "Medium" | "High"
-    pub min_confidence: f32,  // 0..1
-    pub long_prompt_chars: usize,
+    pub min_severity: crate::review::policy::Severity,
+    pub min_confidence: f32,
+    pub long_prompt_tokens: usize,
 }
 
 impl EscalationPolicy {
@@ -43,23 +36,29 @@ impl EscalationPolicy {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(5);
-        let min_severity =
-            std::env::var("REVIEW_ESCALATE_SEVERITY").unwrap_or_else(|_| "High".into());
+        let min_severity = match std::env::var("REVIEW_ESCALATE_SEVERITY")
+            .unwrap_or_else(|_| "High".into())
+            .as_str()
+        {
+            "High" => crate::review::policy::Severity::High,
+            "Medium" => crate::review::policy::Severity::Medium,
+            _ => crate::review::policy::Severity::Low,
+        };
         let min_confidence = std::env::var("REVIEW_ESCALATE_MIN_CONF")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.55);
-        let long_prompt_chars = std::env::var("REVIEW_ESCALATE_LONG_PROMPT_CHARS")
+        let long_prompt_tokens = std::env::var("REVIEW_ESCALATE_LONG_PROMPT_TOK")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(20_000);
+            .unwrap_or(2500);
 
         Self {
             enabled,
             max_escalations,
             min_severity,
             min_confidence,
-            long_prompt_chars,
+            long_prompt_tokens,
         }
     }
 }
@@ -68,22 +67,12 @@ impl EscalationPolicy {
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
     pub kind: LlmKind,
-    /// Fast model for mass drafting (speed).
     pub fast: ModelConfig,
-    /// Slow model for selective refine (quality).
     pub slow: ModelConfig,
-    /// Escalation knobs.
     pub routing: EscalationPolicy,
 }
 
 impl LlmConfig {
-    /// Build config from environment without breaking legacy keys.
-    ///
-    /// Env:
-    /// - OLLAMA_URL (required)
-    /// - OLLAMA_MODEL (slow/default, required)
-    /// - OLLAMA_MODEL_FAST_MODEL (optional → fast==slow if missing)
-    /// - REVIEW_* (optional)
     pub fn from_env() -> Self {
         let endpoint =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
@@ -113,13 +102,13 @@ impl LlmConfig {
 /// Thin Ollama client reused by router.
 #[derive(Debug, Clone)]
 pub struct LlmClient {
-    http: Client,
+    http: reqwest::Client,
     cfg: ModelConfig,
 }
 
 impl LlmClient {
     pub fn new(cfg: ModelConfig) -> Self {
-        let http = Client::builder()
+        let http = reqwest::Client::builder()
             .http2_keep_alive_interval(Some(Duration::from_secs(20)))
             .pool_idle_timeout(Some(Duration::from_secs(90)))
             .tcp_keepalive(Some(Duration::from_secs(30)))
@@ -134,7 +123,7 @@ impl LlmClient {
     }
 
     /// Minimal `/api/generate` wrapper, returns plain text.
-    pub async fn generate_raw(&self, prompt: &str) -> Result<String, crate::errors::Error> {
+    pub async fn generate_raw(&self, prompt: &str) -> Result<String, Error> {
         #[derive(serde::Serialize)]
         struct Req<'a> {
             model: &'a str,
@@ -188,12 +177,19 @@ impl LlmRouter {
         }
     }
 
-    /// Decide whether to escalate to SLOW model based on severity/confidence/length/budget.
+    pub async fn generate_fast(&self, prompt: &str) -> Result<String, Error> {
+        self.fast.generate_raw(prompt).await
+    }
+    pub async fn generate_slow(&self, prompt: &str) -> Result<String, Error> {
+        self.slow.generate_raw(prompt).await
+    }
+
+    /// Decide whether to escalate to SLOW model.
     pub fn should_escalate(
         &self,
-        severity: &str,
+        sev: crate::review::policy::Severity,
         confidence: f32,
-        prompt_chars: usize,
+        prompt_tokens_approx: usize,
         used_escalations: usize,
     ) -> bool {
         if !self.policy.enabled {
@@ -202,29 +198,17 @@ impl LlmRouter {
         if used_escalations >= self.policy.max_escalations {
             return false;
         }
-        let sev_ok = severity_ge(severity, &self.policy.min_severity);
+        let sev_ok = rank(sev) >= rank(self.policy.min_severity);
         let conf_low = confidence < self.policy.min_confidence;
-        let too_long = prompt_chars > self.policy.long_prompt_chars;
+        let too_long = prompt_tokens_approx > self.policy.long_prompt_tokens;
         sev_ok || conf_low || too_long
-    }
-
-    pub async fn generate_fast(&self, prompt: &str) -> Result<String, crate::errors::Error> {
-        self.fast.generate_raw(prompt).await
-    }
-    pub async fn generate_slow(&self, prompt: &str) -> Result<String, crate::errors::Error> {
-        self.slow.generate_raw(prompt).await
     }
 }
 
-/// Compare severities ("Low" < "Medium" < "High").
-fn severity_ge(a: &str, b: &str) -> bool {
-    fn rank(s: &str) -> u8 {
-        match s {
-            "High" => 3,
-            "Medium" => 2,
-            "Low" => 1,
-            _ => 0,
-        }
+fn rank(s: crate::review::policy::Severity) -> u8 {
+    match s {
+        crate::review::policy::Severity::High => 3,
+        crate::review::policy::Severity::Medium => 2,
+        crate::review::policy::Severity::Low => 1,
     }
-    rank(a) >= rank(b)
 }

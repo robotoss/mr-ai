@@ -1,11 +1,17 @@
-//! Policy utilities: strict sanitization, anchor validation, shaping.
+//! Policy layer: parse, sanitize, and validate LLM output.
+//!
+//! Key features:
+//! - Robust block parsing (ANCHOR/SEVERITY/TITLE/BODY/PATCH).
+//! - Anchor validation against allowed ranges.
+//! - BODY sanitizer replaces inconsistent "lines X[-Y]" mentions with neutral wording.
+//! - Lightweight deduplication by (title, anchor).
 
 use regex::Regex;
 use tracing::debug;
 
-use crate::review::context::AnchorRange;
+use super::context::AnchorRange;
 
-/// Normalized severity (High > Medium > Low).
+/// Normalized severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     High,
@@ -13,148 +19,174 @@ pub enum Severity {
     Low,
 }
 
-/// One validated finding.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewItem {
-    pub anchor: AnchorRange,
+/// One validated/parsed finding.
+#[derive(Debug, Clone)]
+pub struct ParsedFinding {
+    pub anchor: Option<AnchorRange>,
     pub severity: Severity,
     pub title: String,
-    pub body: String,
+    pub body_markdown: String,
     pub patch: Option<String>,
+    /// Raw original block (for refine chaining).
+    pub raw_block: String,
 }
 
-/// Aggregated result with stats.
-#[derive(Debug, Clone)]
-pub struct ReviewReport {
-    pub items: Vec<ReviewItem>,
-    pub dropped: usize,
-}
+/// Parse raw model text into validated findings. Invalid blocks are dropped.
+pub fn parse_and_validate(raw: &str, allowed: &[AnchorRange]) -> Vec<ParsedFinding> {
+    let cleaned = strip_think(raw);
+    let blocks = split_blocks(cleaned.trim());
+    let mut out = Vec::new();
 
-/// Sanitize LLM output and extract only valid anchored findings.
-/// - Strips `<think>...</think>` and similar traces.
-/// - Accepts blocks starting with `ANCHOR: start-end` (1-based).
-/// - Ensures anchor is within `allowed`.
-pub fn sanitize_validate_and_format(
-    llm_raw: &str,
-    allowed: &[AnchorRange],
-    _path: &str,
-) -> ReviewReport {
-    let mut dropped = 0usize;
-
-    let clean = strip_hidden(llm_raw);
-
-    let re_anchor = Regex::new(r#"(?mi)^ANCHOR:\s*(\d+)\s*-\s*(\d+)\s*$"#).unwrap();
-    let re_sev = Regex::new(r#"(?mi)^SEVERITY:\s*(High|Medium|Low)\s*$"#).unwrap();
-    let re_title = Regex::new(r#"(?mi)^TITLE:\s*(.+)$"#).unwrap();
-    let re_body = Regex::new(r#"(?mi)^BODY:\s*(.+?)(?:\n(?:PATCH:|ANCHOR:)|\z)"#).unwrap();
-    let re_patch_block = Regex::new(r#"(?ms)^PATCH:\s*```diff\s*(.+?)\s*```"#).unwrap();
-
-    // Split into pseudo-blocks by each ANCHOR line.
-    let mut items: Vec<ReviewItem> = Vec::new();
-    for cap in re_anchor.captures_iter(&clean) {
-        let full_anchor = cap.get(0).unwrap();
-        let start_idx = full_anchor.start();
-
-        // Slice from current anchor to next anchor or end
-        let rest = &clean[start_idx..];
-        let next_anchor_pos = re_anchor
-            .find_iter(rest)
-            .nth(1)
-            .map(|m| m.start())
-            .unwrap_or(rest.len());
-        let block = &rest[..next_anchor_pos];
-
-        // Parse anchor
-        let start: usize = cap[1].parse().unwrap_or(0);
-        let end: usize = cap[2].parse().unwrap_or(0);
-        if start == 0 || end == 0 || end < start {
-            dropped += 1;
-            continue;
+    for b in blocks {
+        if let Some(mut f) = parse_block(&b, allowed) {
+            f.body_markdown = sanitize_line_mentions(&f.body_markdown, f.anchor);
+            out.push(f);
         }
-        let anchor = AnchorRange { start, end };
-
-        // Validate anchor against allowed
-        if !allowed.is_empty() && !anchor_allowed(anchor, allowed) {
-            dropped += 1;
-            continue;
-        }
-
-        // Parse other fields within block
-        let sev = re_sev
-            .captures(block)
-            .and_then(|c| c.get(1).map(|m| m.as_str()))
-            .map(parse_sev)
-            .unwrap_or(Severity::Medium);
-
-        let title = re_title
-            .captures(block)
-            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
-            .unwrap_or_default();
-
-        let body = re_body
-            .captures(block)
-            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
-            .unwrap_or_default();
-
-        let patch = re_patch_block
-            .captures(block)
-            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()));
-
-        // Basic anti-noise rules
-        if title.is_empty() || body.is_empty() || is_trivial(&title, &body) {
-            dropped += 1;
-            continue;
-        }
-
-        items.push(ReviewItem {
-            anchor,
-            severity: sev,
-            title,
-            body,
-            patch,
-        });
     }
 
-    debug!("policy: shaped items={} dropped={}", items.len(), dropped);
+    out.sort_by(|a, b| {
+        (
+            a.title.to_ascii_lowercase(),
+            a.anchor.map(|x| (x.start, x.end)),
+        )
+            .cmp(&(
+                b.title.to_ascii_lowercase(),
+                b.anchor.map(|x| (x.start, x.end)),
+            ))
+    });
+    out.dedup_by(|a, b| a.title.eq_ignore_ascii_case(&b.title) && a.anchor == b.anchor);
 
-    ReviewReport { items, dropped }
+    out
 }
 
-fn parse_sev(s: &str) -> Severity {
+fn split_blocks(s: &str) -> Vec<String> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in s.lines() {
+        if line.trim_start().starts_with("ANCHOR:") && !cur.trim().is_empty() {
+            out.push(cur);
+            cur = String::new();
+        }
+        cur.push_str(line);
+        cur.push('\n');
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn parse_block(block: &str, allowed: &[AnchorRange]) -> Option<ParsedFinding> {
+    let anchor_re = Regex::new(r"(?mi)^ANCHOR:\s*(\d+)\s*-\s*(\d+)\s*$").unwrap();
+    let severity_re = Regex::new(r"(?mi)^SEVERITY:\s*(High|Medium|Low)\s*$").unwrap();
+    let title_re = Regex::new(r"(?mi)^TITLE:\s*(.+)$").unwrap();
+    let body_re = Regex::new(r"(?ms)^BODY:\s*(.+?)(?:\n[A-Z]{2,}:\s*|$)").unwrap();
+    let patch_re = Regex::new(r"(?ms)^PATCH:\s*```diff\s*(.+?)\s*```\s*$").unwrap();
+
+    let anchor = anchor_re.captures(block).and_then(|c| {
+        let s: usize = c.get(1)?.as_str().parse().ok()?;
+        let e: usize = c.get(2)?.as_str().parse().ok()?;
+        if s == 0 || e == 0 || e < s {
+            return None;
+        }
+        Some(AnchorRange { start: s, end: e })
+    });
+
+    // If anchors present — enforce allowed windows.
+    if let Some(a) = anchor {
+        if !is_within_allowed(a, allowed) {
+            debug!(
+                "policy: drop block — anchor out of allowed: {:?} !∈ {:?}",
+                a, allowed
+            );
+            return None;
+        }
+    }
+
+    let sev = severity_re
+        .captures(block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())
+        .map(severity_from_str)
+        .unwrap_or(Severity::Low);
+
+    let title = title_re
+        .captures(block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .filter(|s| !s.is_empty())?;
+
+    let body = body_re
+        .captures(block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .filter(|s| !s.is_empty())?;
+
+    let patch = patch_re
+        .captures(block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string());
+
+    Some(ParsedFinding {
+        anchor,
+        severity: sev,
+        title,
+        body_markdown: body,
+        patch,
+        raw_block: block.to_string(),
+    })
+}
+
+fn is_within_allowed(a: AnchorRange, allowed: &[AnchorRange]) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    allowed.iter().any(|w| a.start >= w.start && a.end <= w.end)
+}
+
+fn severity_from_str(s: &str) -> Severity {
     match s {
         "High" | "high" => Severity::High,
-        "Low" | "low" => Severity::Low,
-        _ => Severity::Medium,
+        "Medium" | "medium" => Severity::Medium,
+        _ => Severity::Low,
     }
 }
 
-fn strip_hidden(s: &str) -> String {
-    // remove <think>...</think> and any xml-ish blocks we don't want
-    let re_think = Regex::new(r#"(?is)<\s*/?\s*think\s*>.*?<\s*/\s*think\s*>"#).unwrap();
-    let out = re_think.replace_all(s, "");
-    out.lines()
-        .filter(|l| {
-            let ll = l.trim().to_ascii_lowercase();
-            !(ll.starts_with("note:") || ll.starts_with("thought") || ll.starts_with("system:"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn strip_think(s: &str) -> String {
+    let mut out = s
+        .replace("<think>", "")
+        .replace("</think>", "")
+        .replace("```thinking", "```")
+        .replace("```think", "```");
+    let re = Regex::new(r"(?s)<think>.*?</think>").unwrap();
+    out = re.replace_all(&out, "").to_string();
+    out
 }
 
-fn anchor_allowed(a: AnchorRange, allowed: &[AnchorRange]) -> bool {
-    allowed.iter().any(|r| a.start >= r.start && a.end <= r.end)
-}
-
-fn is_trivial(title: &str, body: &str) -> bool {
-    let t = format!("{} {}", title, body).to_ascii_lowercase();
-    let generic = [
-        "looks good",
-        "nice work",
-        "consider refactor",
-        "improve code quality",
-        "nit:",
-        "style:",
-        "typo", // let nitpicks go
-    ];
-    generic.iter().any(|g| t.contains(g))
+/// Replace "lines X[-Y]" with neutral wording unless it matches ANCHOR exactly.
+fn sanitize_line_mentions(body: &str, anchor: Option<AnchorRange>) -> String {
+    let re = Regex::new(r"(?i)\blines?\s+(\d+)(?:\s*[-–]\s*(\d+))?").unwrap();
+    match anchor {
+        None => re.replace_all(body, "these lines").into_owned(),
+        Some(a) => re
+            .replace_all(body, |caps: &regex::Captures| {
+                let s: usize = caps
+                    .get(1)
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(0);
+                let e: usize = caps
+                    .get(2)
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(s);
+                if s == a.start && e == a.end {
+                    caps.get(0).unwrap().as_str().to_string()
+                } else {
+                    "these lines".to_string()
+                }
+            })
+            .into_owned(),
+    }
 }

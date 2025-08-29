@@ -6,8 +6,17 @@
 //! - POST /projects/:id/merge_requests/:iid/discussions   (inline)
 //! - POST /projects/:id/merge_requests/:iid/notes         (general)
 //! - GET  /projects/:id/merge_requests/:iid/discussions   (for idempotency)
+//! - GET  /projects/:id/merge_requests/:iid/notes         (for idempotency, fallback)
 //!
-//! Position requires `head_sha` + `base_sha` + `start_sha` from MR meta.
+//! Position requires `head_sha` + `base_sha` + (usually) `start_sha` from MR meta.
+//!
+//! Notable fixes & improvements:
+//! - **URL-encodes** `project` segments in all endpoints; non-encoded group/project
+//!   was a common cause of 404/400 and “not posted” issues.
+//! - Posts the **full** markdown body (not just the title) and appends a hidden marker,
+//!   so patches and details are preserved.
+//! - Loads existing markers from both **discussions** and **notes** for robust idempotency.
+//! - Omits `start_sha` field if it is missing, improving compatibility.
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
@@ -17,21 +26,22 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info};
 
 use crate::errors::{Error, MrResult};
-use crate::git_providers::{ChangeRequestId, ProviderConfig};
+use crate::git_providers::ChangeRequestId;
 use crate::map::TargetRef;
 use crate::review::DraftComment;
 use crate::{
     ReviewPlan,
     publish::{ProviderIds, PublishConfig, PublishedComment},
 };
+use urlencoding::encode;
 
 /// Hidden marker we embed into comment body to detect duplicates.
-/// Example: `<!-- mrai:key=packages/a.dart:42;hash=abcdef;ver=1 -->`
-const _MARKER_PREFIX: &str = "<!-- mrai:key="; // kept for clarity, currently not used directly
+/// Example: `<!-- mrai:key=packages/a.dart:42|line;hash=abcdef;ver=1 -->`
+const _MARKER_PREFIX: &str = "<!-- mrai:key="; // kept for clarity
 
 /// Publish all drafts to GitLab.
 pub async fn publish_gitlab(
-    cfg: &ProviderConfig,
+    cfg: &crate::git_providers::ProviderConfig,
     id: &ChangeRequestId,
     plan: &ReviewPlan,
     drafts: &[DraftComment],
@@ -42,20 +52,24 @@ pub async fn publish_gitlab(
     let headers = build_gitlab_headers(&cfg.token)?;
     let base = cfg.base_api.trim_end_matches('/');
 
-    // Load existing markers to enforce idempotency
-    let existing = load_existing_markers(&http, &headers, base, id).await?;
-    info!("step5: existing markers={}", existing.len());
+    // Load existing markers to enforce idempotency (from discussions and notes)
+    let existing_disc = load_existing_markers_from_discussions(&http, &headers, base, id).await?;
+    let existing_notes = load_existing_markers_from_notes(&http, &headers, base, id).await?;
+    let existing = existing_disc
+        .union(&existing_notes)
+        .cloned()
+        .collect::<HashSet<_>>();
+    info!(
+        "step5: existing markers discussions={} notes={} union={}",
+        existing_disc.len(),
+        existing_notes.len(),
+        existing.len()
+    );
 
     // Extract SHAs for inline comment positions
     let head = plan.bundle.meta.diff_refs.head_sha.clone();
     let base_sha = plan.bundle.meta.diff_refs.base_sha.clone();
-    let start_sha = plan
-        .bundle
-        .meta
-        .diff_refs
-        .start_sha
-        .clone()
-        .unwrap_or_default();
+    let start_sha_opt = plan.bundle.meta.diff_refs.start_sha.clone();
 
     // Concurrency guard
     let sem = Arc::new(Semaphore::new(pcfg.max_concurrency.max(1)));
@@ -69,19 +83,27 @@ pub async fn publish_gitlab(
         let id = id.clone();
         let head = head.clone();
         let base_sha = base_sha.clone();
-        let start_sha = start_sha.clone();
+        let start_sha_opt = start_sha_opt.clone();
         let dry_run = pcfg.dry_run;
-        let allow_edit = pcfg.allow_edit; // reserved for future "edit" support
+        let allow_edit = pcfg.allow_edit;
         let existing = existing.clone();
         let sem_cloned = sem.clone();
-        let draft = d.clone(); // <- FIX: avoid &draft in spawned task
+        let draft = d.clone();
 
         futs.push(tokio::spawn(async move {
-            // use owned permit to satisfy 'static
             let _permit = sem_cloned.acquire_owned().await.unwrap();
             publish_one(
-                &http, &headers, &base, &id, &draft, &head, &base_sha, &start_sha, dry_run,
-                allow_edit, &existing,
+                &http,
+                &headers,
+                &base,
+                &id,
+                &draft,
+                &head,
+                &base_sha,
+                start_sha_opt.as_deref(),
+                dry_run,
+                allow_edit,
+                &existing,
             )
             .await
         }));
@@ -106,13 +128,19 @@ async fn publish_one(
     draft: &DraftComment,
     head_sha: &str,
     base_sha: &str,
-    start_sha: &str,
+    start_sha_opt: Option<&str>,
     dry_run: bool,
     _allow_edit: bool,
     existing: &HashSet<String>,
 ) -> MrResult<PublishedComment> {
     let (marker, key, _line_opt) = make_marker_and_key(draft);
-    let body = format!("{}\n\n{}", render_title(draft), marker);
+
+    // Use the full body markdown and append our hidden marker.
+    let body = if draft.body_markdown.trim().is_empty() {
+        format!("Review note\n\n{}", marker)
+    } else {
+        format!("{}\n\n{}", draft.body_markdown.trim(), marker)
+    };
 
     // Idempotency: skip if key is present
     if existing.contains(&key) {
@@ -130,7 +158,16 @@ async fn publish_one(
     let res = match &draft.target {
         TargetRef::Line { path, line } => {
             publish_inline(
-                http, headers, base_api, id, path, *line, body, head_sha, base_sha, start_sha,
+                http,
+                headers,
+                base_api,
+                id,
+                path,
+                *line,
+                body,
+                head_sha,
+                base_sha,
+                start_sha_opt,
                 dry_run,
             )
             .await
@@ -149,7 +186,7 @@ async fn publish_one(
                 body,
                 head_sha,
                 base_sha,
-                start_sha,
+                start_sha_opt,
                 dry_run,
             )
             .await
@@ -158,7 +195,16 @@ async fn publish_one(
             path, decl_line, ..
         } => {
             publish_inline(
-                http, headers, base_api, id, path, *decl_line, body, head_sha, base_sha, start_sha,
+                http,
+                headers,
+                base_api,
+                id,
+                path,
+                *decl_line,
+                body,
+                head_sha,
+                base_sha,
+                start_sha_opt,
                 dry_run,
             )
             .await
@@ -169,17 +215,6 @@ async fn publish_one(
     }?;
 
     Ok(res)
-}
-
-/// Build a short human-friendly title for the comment (first line).
-fn render_title(d: &DraftComment) -> String {
-    // Take first non-empty line of the markdown body as a short title.
-    let title = d
-        .body_markdown
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("Review note");
-    title.to_string()
 }
 
 /// Construct inline discussion body and POST to GitLab.
@@ -193,15 +228,17 @@ async fn publish_inline(
     body: String,
     head_sha: &str,
     base_sha: &str,
-    start_sha: &str,
+    start_sha_opt: Option<&str>,
     dry_run: bool,
 ) -> MrResult<PublishedComment> {
     let url = format!(
         "{}/projects/{}/merge_requests/{}/discussions",
-        base_api, id.project, id.iid
+        base_api,
+        encode(&id.project),
+        id.iid
     );
 
-    // GitLab "text" position needs new_path + new_line + shas.
+    /// GitLab "text" position payload.
     #[derive(serde::Serialize)]
     struct Position<'a> {
         position_type: &'a str,
@@ -209,7 +246,8 @@ async fn publish_inline(
         new_line: usize,
         head_sha: &'a str,
         base_sha: &'a str,
-        start_sha: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        start_sha: Option<&'a str>,
     }
     #[derive(serde::Serialize)]
     struct Req<'a> {
@@ -225,7 +263,7 @@ async fn publish_inline(
             new_line: line,
             head_sha,
             base_sha,
-            start_sha,
+            start_sha: start_sha_opt,
         },
     };
 
@@ -254,14 +292,14 @@ async fn publish_inline(
         .await?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.ok();
         return Err(Error::Validation(format!(
             "gitlab inline post failed: status={} body={:?}",
-            resp.status(),
-            resp.text().await.ok()
+            status, text
         )));
     }
 
-    // Extract minimal identifiers
     #[derive(serde::Deserialize)]
     struct DiscussionResp {
         id: String,
@@ -297,7 +335,9 @@ async fn publish_general(
 ) -> MrResult<PublishedComment> {
     let url = format!(
         "{}/projects/{}/merge_requests/{}/notes",
-        base_api, id.project, id.iid
+        base_api,
+        encode(&id.project),
+        id.iid
     );
 
     #[derive(serde::Serialize)]
@@ -324,10 +364,11 @@ async fn publish_general(
         .await?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.ok();
         return Err(Error::Validation(format!(
             "gitlab note post failed: status={} body={:?}",
-            resp.status(),
-            resp.text().await.ok()
+            status, text
         )));
     }
 
@@ -349,20 +390,19 @@ async fn publish_general(
     })
 }
 
-/// Load existing discussion/note bodies and extract mrai markers for idempotency.
-async fn load_existing_markers(
+/// Load existing discussion bodies and extract mrai markers for idempotency.
+async fn load_existing_markers_from_discussions(
     http: &reqwest::Client,
     headers: &HeaderMap,
     base_api: &str,
     id: &ChangeRequestId,
 ) -> MrResult<HashSet<String>> {
-    // We read only discussions; notes also come as discussions of type "Individual note".
-    // If needed, you can also call /notes to be explicit.
     let url = format!(
         "{}/projects/{}/merge_requests/{}/discussions?per_page=100",
-        base_api, id.project, id.iid
+        base_api,
+        encode(&id.project),
+        id.iid
     );
-
     #[derive(serde::Deserialize)]
     struct Note {
         body: Option<String>,
@@ -374,29 +414,69 @@ async fn load_existing_markers(
 
     let resp = http.get(&url).headers(headers.clone()).send().await?;
     if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.ok();
         return Err(Error::Validation(format!(
             "gitlab list discussions failed: status={} body={:?}",
-            resp.status(),
-            resp.text().await.ok()
+            status, text
         )));
     }
 
     let discussions: Vec<Discussion> = resp.json().await.unwrap_or_default();
+    Ok(extract_markers_from_bodies(
+        discussions
+            .into_iter()
+            .flat_map(|d| d.notes.into_iter().filter_map(|n| n.body))
+            .collect(),
+    ))
+}
+
+/// Load existing MR notes and extract mrai markers (complements discussions).
+async fn load_existing_markers_from_notes(
+    http: &reqwest::Client,
+    headers: &HeaderMap,
+    base_api: &str,
+    id: &ChangeRequestId,
+) -> MrResult<HashSet<String>> {
+    let url = format!(
+        "{}/projects/{}/merge_requests/{}/notes?per_page=100",
+        base_api,
+        encode(&id.project),
+        id.iid
+    );
+    #[derive(serde::Deserialize)]
+    struct Note {
+        body: Option<String>,
+    }
+
+    let resp = http.get(&url).headers(headers.clone()).send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.ok();
+        return Err(Error::Validation(format!(
+            "gitlab list notes failed: status={} body={:?}",
+            status, text
+        )));
+    }
+
+    let notes: Vec<Note> = resp.json().await.unwrap_or_default();
+    Ok(extract_markers_from_bodies(
+        notes.into_iter().filter_map(|n| n.body).collect(),
+    ))
+}
+
+/// Extracts idempotency markers from a list of HTML/Markdown bodies.
+fn extract_markers_from_bodies(bodies: Vec<String>) -> HashSet<String> {
     let mut set = HashSet::new();
     let re = Regex::new(r"<!--\s*mrai:key=([^;>]+);hash=([0-9a-f]+);ver=\d+\s*-->").unwrap();
-
-    for d in discussions {
-        for n in d.notes {
-            if let Some(b) = n.body {
-                if let Some(caps) = re.captures(&b) {
-                    let key = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
-                    let hash = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
-                    set.insert(format!("{}#{}", key, hash));
-                }
-            }
+    for b in bodies {
+        if let Some(caps) = re.captures(&b) {
+            let key = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+            let hash = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
+            set.insert(format!("{}#{}", key, hash));
         }
     }
-    Ok(set)
+    set
 }
 
 /// A single place to build the *idempotency key* + marker string.

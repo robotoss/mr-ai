@@ -6,6 +6,11 @@
 //! - Idempotency: embeds a hidden marker in the body and skips duplicates.
 //! - Dry-run: compute and log actions without actually calling the API.
 //! - No async-trait, no Box<dyn ...>; uses plain async fn + enum dispatch.
+//!
+//! Notable improvements:
+//! - `dry_run` now defaults to **false** (previously true), which was a common
+//!   reason nothing was posted.
+//! - Richer docs and small quality-of-life logging.
 
 pub mod gitlab;
 
@@ -15,7 +20,7 @@ use crate::errors::{Error, MrResult};
 use crate::git_providers::{ChangeRequestId, ProviderConfig, ProviderKind};
 use crate::map::TargetRef;
 use crate::review::DraftComment;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Configuration for publishing step.
 #[derive(Debug, Clone)]
@@ -30,9 +35,15 @@ pub struct PublishConfig {
 }
 
 impl Default for PublishConfig {
+    /// Builds `PublishConfig` from environment with production-friendly defaults.
+    ///
+    /// Environment variables:
+    /// - `MR_REVIEWER_PUBLISH_DRY_RUN` (default: **false**)
+    /// - `MR_REVIEWER_PUBLISH_EDIT` (default: false)
+    /// - `MR_REVIEWER_PUBLISH_CONCURRENCY` (default: 2)
     fn default() -> Self {
         Self {
-            dry_run: env_bool("MR_REVIEWER_PUBLISH_DRY_RUN", true),
+            dry_run: env_bool("MR_REVIEWER_PUBLISH_DRY_RUN", false),
             allow_edit: env_bool("MR_REVIEWER_PUBLISH_EDIT", false),
             max_concurrency: env_usize("MR_REVIEWER_PUBLISH_CONCURRENCY", 2),
         }
@@ -67,6 +78,7 @@ pub struct PublishedComment {
     pub provider_ids: Option<ProviderIds>,
 }
 
+/// Provider-specific identifiers for traceability.
 #[derive(Debug, Clone)]
 pub struct ProviderIds {
     pub discussion_id: Option<String>,
@@ -85,9 +97,10 @@ pub async fn publish(
 ) -> MrResult<Vec<PublishedComment>> {
     let t0 = Instant::now();
     info!(
-        "step5: publish start provider={:?} drafts={}",
+        "step5: publish start provider={:?} drafts={} dry_run={}",
         provider_cfg.kind,
-        drafts.len()
+        drafts.len(),
+        cfg.dry_run
     );
 
     let results = match provider_cfg.kind {
@@ -122,6 +135,11 @@ pub async fn publish(
         edited,
         skipped,
         t0.elapsed().as_millis()
+    );
+
+    debug!(
+        "step5: publish results sample={:?}",
+        results.iter().take(2).collect::<Vec<_>>()
     );
 
     Ok(results)
