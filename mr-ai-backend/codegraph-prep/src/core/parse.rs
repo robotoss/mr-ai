@@ -73,20 +73,14 @@ pub fn parse_and_extract(
 
 fn set_language(parser: &mut Parser, lang: LanguageKind) -> Result<()> {
     match lang {
-        LanguageKind::Dart => {
-            parser.set_language(&tree_sitter_dart::language())?;
-        }
-        LanguageKind::Rust => {
-            parser.set_language(&tree_sitter_rust::language())?;
-        }
-        LanguageKind::Python => {
-            parser.set_language(&tree_sitter_python::language())?;
-        }
+        LanguageKind::Dart => parser.set_language(&tree_sitter_dart_orchard::LANGUAGE.into())?,
+        LanguageKind::Rust => parser.set_language(&tree_sitter_rust::LANGUAGE.into())?,
+        LanguageKind::Python => parser.set_language(&tree_sitter_python::LANGUAGE.into())?,
         LanguageKind::JavaScript => {
-            parser.set_language(&tree_sitter_javascript::language())?;
+            parser.set_language(&tree_sitter_javascript::LANGUAGE.into())?
         }
         LanguageKind::TypeScript => {
-            parser.set_language(&tree_sitter_typescript::language_typescript())?;
+            parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())?
         }
     }
     Ok(())
