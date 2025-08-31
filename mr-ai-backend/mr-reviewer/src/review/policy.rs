@@ -34,6 +34,7 @@ pub struct ParsedFinding {
 /// Parse raw model text into validated findings. Invalid blocks are dropped.
 pub fn parse_and_validate(raw: &str, allowed: &[AnchorRange]) -> Vec<ParsedFinding> {
     let cleaned = strip_think(raw);
+    let cleaned = extract_strict_segment(&cleaned);
     let blocks = split_blocks(cleaned.trim());
     let mut out = Vec::new();
 
@@ -57,6 +58,17 @@ pub fn parse_and_validate(raw: &str, allowed: &[AnchorRange]) -> Vec<ParsedFindi
     out.dedup_by(|a, b| a.title.eq_ignore_ascii_case(&b.title) && a.anchor == b.anchor);
 
     out
+}
+
+fn extract_strict_segment(s: &str) -> String {
+    let start = "<<<BEGIN_STRICT>>>";
+    let end = "<<<END_STRICT>>>";
+    if let (Some(i), Some(j)) = (s.find(start), s.find(end)) {
+        let seg = &s[i + start.len()..j];
+        seg.trim().to_string()
+    } else {
+        s.trim().to_string()
+    }
 }
 
 fn split_blocks(s: &str) -> Vec<String> {

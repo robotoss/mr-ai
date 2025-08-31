@@ -30,13 +30,6 @@ use crate::errors::MrResult;
 use crate::git_providers::types::{CrBundle, DiffLine};
 use crate::git_providers::{ChangeRequestId, ProviderClient};
 
-// use codegraph_prep::config::model::GraphConfig;
-// use codegraph_prep::core::fs_scan::ScannedFile;
-// use codegraph_prep::core::normalize::detect_language;
-// use codegraph_prep::core::parse;
-// use codegraph_prep::model::ast::{AstKind, AstNode};
-// use codegraph_prep::model::language::LanguageKind;
-
 /// Linear byte span inside a file. Always available as a fallback.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ByteSpan {

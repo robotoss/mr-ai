@@ -8,6 +8,7 @@ use crate::map::{MappedTarget, TargetRef};
 use super::fs::read_materialized;
 use super::imports::contains_import_like;
 use super::types::{AnchorRange, PrimaryCtx};
+use regex::Regex;
 
 const PRIMARY_PAD_LINES: i32 = 20;
 
@@ -57,11 +58,25 @@ pub fn build_primary_ctx(
         None
     };
 
+    // Build compact, language-agnostic facts near the first allowed anchor.
+    // This is independent from any specific language/framework.
+    let code_facts = if !path.is_empty() {
+        Some(build_code_facts_for_anchor(
+            &code,
+            &path,
+            &allowed_anchors,
+            _symbols,
+        ))
+    } else {
+        None
+    };
+
     Ok(PrimaryCtx {
         path,
         numbered_snippet,
         allowed_anchors,
         full_file_readonly,
+        code_facts,
     })
 }
 
@@ -119,4 +134,162 @@ fn target_line_window(tgt: &MappedTarget) -> (u32, u32) {
         TargetRef::Symbol { decl_line, .. } => (*decl_line as u32, *decl_line as u32),
         TargetRef::File { .. } | TargetRef::Global => (1, 1),
     }
+}
+
+/// Build compact, language-agnostic facts around the first allowed anchor.
+fn build_code_facts_for_anchor(
+    code: &str,
+    path: &str,
+    allowed: &[AnchorRange],
+    symbols: &SymbolIndex,
+) -> String {
+    // Choose the first allowed anchor; fall back to line 1 if empty.
+    let anchor = allowed
+        .get(0)
+        .cloned()
+        .unwrap_or(AnchorRange { start: 1, end: 1 });
+
+    // Try to locate the nearest enclosing symbol by line using the symbol index.
+    let enclosing = symbols.find_enclosing_by_line(path, anchor.start as u32);
+
+    // Select scope: use the enclosing symbol body if available; otherwise a window around anchor.
+    let (scope_from, scope_to) = enclosing
+        .and_then(|s| {
+            s.body_span
+                .lines
+                .map(|ls| (ls.start_line as usize, ls.end_line as usize))
+        })
+        .unwrap_or_else(|| {
+            let (sf, st) = window_bounds(
+                anchor.start as i32,
+                anchor.end as i32,
+                code.lines().count() as i32,
+                80, // wider than PRIMARY window to get more local evidence
+            );
+            (sf as usize, st as usize)
+        });
+    let scope_text = slice_by_lines(code, scope_from, scope_to);
+
+    // Derive language-agnostic signals.
+    let calls = top_calls(&scope_text, 6);
+    let writes = writes_in_scope(&scope_text, 6);
+    let returns = returns_outline(&scope_text, 6);
+    let cleanup = cleanup_like_present(&scope_text);
+
+    // Render a compact facts block.
+    let mut out = String::new();
+    out.push_str("CODE FACTS\n");
+    out.push_str(&format!("file: {}\n", path));
+    out.push_str(&format!("anchor: {}..{}\n", anchor.start, anchor.end));
+    if let Some(enc) = enclosing {
+        if let Some(ls) = enc.body_span.lines {
+            out.push_str(&format!(
+                "enclosing: {:?} {} [{}..{}]\n",
+                enc.kind, enc.name, ls.start_line, ls.end_line
+            ));
+        } else {
+            out.push_str(&format!("enclosing: {:?} {}\n", enc.kind, enc.name));
+        }
+    }
+    out.push_str(&format!("scope_lines: {}..{}\n", scope_from, scope_to));
+    if !returns.is_empty() {
+        out.push_str("control_flow:\n");
+        for r in returns {
+            out.push_str(&format!("  - {}\n", r));
+        }
+    }
+    if !calls.is_empty() {
+        out.push_str(&format!("calls_top: [{}]\n", calls.join(", ")));
+    }
+    if !writes.is_empty() {
+        out.push_str(&format!("writes: [{}]\n", writes.join(", ")));
+    }
+    if !cleanup.is_empty() {
+        out.push_str(&format!("cleanup_like_present: [{}]\n", cleanup.join(", ")));
+    }
+    out
+}
+
+/// Return a string containing lines `from..=to` (1-based, inclusive).
+fn slice_by_lines(code: &str, from: usize, to: usize) -> String {
+    let mut out = String::new();
+    for (i, l) in code.lines().enumerate() {
+        let ln = i + 1;
+        if ln >= from && ln <= to {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Extract top-K call identifiers via a simple regex.
+fn top_calls(s: &str, k: usize) -> Vec<String> {
+    let re = Regex::new(r"(?m)\b([A-Za-z_][A-Za-z0-9_]*)\s*\(").unwrap();
+    use std::collections::BTreeMap;
+    let mut freq: BTreeMap<String, usize> = BTreeMap::new();
+    for c in re.captures_iter(s) {
+        if let Some(m) = c.get(1) {
+            *freq.entry(m.as_str().to_string()).or_default() += 1;
+        }
+    }
+    let mut v: Vec<(String, usize)> = freq.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v.into_iter().take(k).map(|x| x.0).collect()
+}
+
+/// Extract top-K write targets via a simple assignment regex (language-agnostic heuristic).
+fn writes_in_scope(s: &str, k: usize) -> Vec<String> {
+    let re = Regex::new(r"(?m)\b([A-Za-z_][A-Za-z0-9_]*)\s*[\+\-\*/%]?=").unwrap();
+    use std::collections::BTreeMap;
+    let mut freq: BTreeMap<String, usize> = BTreeMap::new();
+    for c in re.captures_iter(s) {
+        if let Some(m) = c.get(1) {
+            *freq.entry(m.as_str().to_string()).or_default() += 1;
+        }
+    }
+    let mut v: Vec<(String, usize)> = freq.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v.into_iter().take(k).map(|x| x.0).collect()
+}
+
+/// Outline of returns discovered in the scope.
+fn returns_outline(s: &str, k: usize) -> Vec<String> {
+    let re = Regex::new(r"(?mi)\breturn\b([^\n;]*)").unwrap();
+    let mut out = Vec::new();
+    for c in re.captures_iter(s) {
+        let tail = c.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        out.push(if tail.is_empty() {
+            "return".to_string()
+        } else {
+            format!("return {}", tail)
+        });
+        if out.len() >= k {
+            break;
+        }
+    }
+    out
+}
+
+/// Detect common cleanup-like function names within the scope.
+fn cleanup_like_present(s: &str) -> Vec<String> {
+    let names = [
+        "dispose",
+        "close",
+        "finalize",
+        "deinit",
+        "__del__",
+        "Drop",
+        "free",
+        "cancel",
+        "unsubscribe",
+    ];
+    let mut found = Vec::new();
+    for n in names {
+        let pat = format!(r"(?m)\b{}\b", regex::escape(n));
+        if Regex::new(&pat).unwrap().is_match(s) {
+            found.push(n.to_string());
+        }
+    }
+    found
 }

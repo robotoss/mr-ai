@@ -613,14 +613,6 @@ fn dedup_in_place(drafts: &mut Vec<DraftComment>) {
     *drafts = out;
 }
 
-fn strip_patch(md: &str) -> String {
-    if let Some(i) = md.find("```diff") {
-        md[..i].to_string()
-    } else {
-        md.to_string()
-    }
-}
-
 fn first_title(md: &str) -> String {
     md.lines()
         .next()

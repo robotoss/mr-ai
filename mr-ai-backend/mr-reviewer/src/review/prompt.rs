@@ -20,7 +20,7 @@ pub fn build_strict_prompt(tgt: &MappedTarget, ctx: &PrimaryCtx, related: &str) 
 
     s.push_str("You are a senior code reviewer.\n");
     s.push_str("Only comment on the DIFFED region. Be specific and concise.\n");
-    s.push_str("If you need global context (e.g., imports/headers), use the read-only blocks.\n\n");
+    s.push_str("You MUST consult read-only blocks before any global claim (imports/symbols/cross-file invariants).\n\n");
 
     // Review policy (rules/)
     let path_for_rules = target_path_for_rules(tgt);
@@ -31,20 +31,31 @@ pub fn build_strict_prompt(tgt: &MappedTarget, ctx: &PrimaryCtx, related: &str) 
         s.push_str("\n\n");
     }
 
+    fn sanitize_fence(x: &str) -> String {
+        x.replace("```", "``\u{200B}`")
+    }
     s.push_str("PRIMARY (numbered HEAD lines):\n```code\n");
-    s.push_str(&ctx.numbered_snippet);
+    s.push_str(&sanitize_fence(&ctx.numbered_snippet));
     s.push_str("```\n");
 
     if !related.is_empty() {
         s.push_str("\nRELATED (read-only):\n```code\n");
-        s.push_str(related);
+        s.push_str(&sanitize_fence(related));
         s.push_str("\n```\n");
     }
     if let Some(full) = &ctx.full_file_readonly {
         s.push_str(
-            "\nFULL FILE (read-only; use ONLY to verify imports/symbol presence or cross-line invariants):\n```code\n",
-        );
-        s.push_str(full);
+                    "\nFULL FILE (read-only; use ONLY to verify imports/symbol presence or cross-line invariants):\n```code\n",
+                );
+        s.push_str(&sanitize_fence(full));
+        s.push_str("\n```\n");
+    }
+
+    // Optional compact, language-agnostic reasoning hints near the anchor.
+    // These are generated in build_primary_ctx() and are read-only for the model.
+    if let Some(cf) = &ctx.code_facts {
+        s.push_str("\nCODE FACTS (read-only):\n```text\n");
+        s.push_str(&sanitize_fence(cf));
         s.push_str("\n```\n");
     }
 
@@ -54,7 +65,8 @@ pub fn build_strict_prompt(tgt: &MappedTarget, ctx: &PrimaryCtx, related: &str) 
     }
 
     s.push_str(
-        r#"
+            r#"
+    <<<BEGIN_STRICT>>>
 ### Output format (STRICT)
 For each valid issue return one block:
 
@@ -65,6 +77,21 @@ BODY: <concise rationale; reference code/symbols clearly>
 PATCH:
 ```diff
 <minimal applicable patch for the anchored lines; NO file headers>
+QUESTION mode (when key context is missing or uncertainty is high):
+- Use the SAME block format but omit PATCH.
+- TITLE must start with: "NEEDS CONTEXT: "
+- In BODY, ask up to 3 focused questions. For each, include: "Why needed" and "Exact artifact/path needed".
+
+Examples:
+ANCHOR: 12-12
+SEVERITY: Low
+TITLE: NEEDS CONTEXT: import usage
+BODY: Evidence in PRIMARY shows `import x`, but no clear symbol usage in the snippet.
+Questions:
+1) Which symbol from `x` is expected to be used here? (Why: avoid false "unused import"; Need: usage example or reference line)
+2) Is there a side-effect import expected? (Why: tree-shaking exceptions; Need: build/config hint)
+PATCH:
+`diff +`
 ```
 
 
@@ -79,12 +106,12 @@ Rules:
 - Prefer minimal, safe changes; avoid speculative or non-applicable diffs.
 
 - If you cannot propose a correct patch, omit PATCH and just explain the issue.
+
+Hard constraints:
+- Output ONLY between these markers. If there are no valid issues, output exactly: NO_ISSUES
+<<<END_STRICT>>>
     "#,
     );
-
-    s.push_str("\nTARGET PREVIEW:\n`\n");
-    s.push_str(&tgt.preview);
-    s.push_str("\n`\n");
 
     s
 }

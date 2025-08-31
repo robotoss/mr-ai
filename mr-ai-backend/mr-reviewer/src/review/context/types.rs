@@ -18,4 +18,6 @@ pub struct PrimaryCtx {
     pub allowed_anchors: Vec<AnchorRange>,
     /// Optional full-file read-only body for side checks (imports, symbol presence).
     pub full_file_readonly: Option<String>,
+    /// Optional compact, language-agnostic code facts near the anchor.
+    pub code_facts: Option<String>,
 }
