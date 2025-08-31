@@ -2,9 +2,15 @@
 //!
 //! The prompts are **language-agnostic** and include:
 //! - Numbered primary snippet (HEAD) with absolute line numbers,
-//! - Optional related RAG context (read-only),
+//! - Optional related RAG context (read-only, BASE/external),
 //! - Optional full-file content (read-only) to verify global claims (imports/symbols),
-//! - **Review policy** assembled from Markdown files in `rules/`.
+//! - **Review policy** assembled from Markdown files in `rules/`,
+//! - **CodeFacts**: enclosing FULL snippet + a single CHUNK snippet with {index/total}.
+//!
+//! Grounding & precedence constraints:
+//! - PRIMARY and FULL FILE represent **HEAD** (authoritative).
+//! - RELATED is **BASE/external** (non-authoritative).
+//! - On conflicts, trust **HEAD**.
 //!
 //! Output format is strict for reliable downstream parsing.
 
@@ -12,15 +18,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::context::PrimaryCtx;
+use super::context::types::CodeFacts;
 use crate::map::MappedTarget;
+use crate::review::context::types::STRICT_OUTPUT_SPEC;
 
-/// Build strict prompt for the FAST model.
+/// Build a strict prompt for the FAST model (single-pass).
+///
+/// The prompt enforces:
+/// - Grounding in HEAD (PRIMARY/FULL FILE),
+/// - RELATED as read-only extra context (BASE/external),
+/// - Deterministic, machine-parseable output format,
+/// - Display of CodeFacts with enclosing + one chunk {index/total}.
 pub fn build_strict_prompt(tgt: &MappedTarget, ctx: &PrimaryCtx, related: &str) -> String {
     let mut s = String::new();
 
+    // Role & guardrails
     s.push_str("You are a senior code reviewer.\n");
     s.push_str("Only comment on the DIFFED region. Be specific and concise.\n");
-    s.push_str("You MUST consult read-only blocks before any global claim (imports/symbols/cross-file invariants).\n\n");
+    s.push_str(
+        "You MUST consult read-only blocks before any global claim (imports/symbols/cross-file invariants).\n",
+    );
+    s.push_str("PRIMARY and FULL FILE are HEAD (authoritative). RELATED is BASE/external.\n");
+    s.push_str("On conflicts, trust HEAD.\n");
+    s.push_str("CodeFacts provide: FULL enclosing snippet and a single CHUNK {index/total}.\n\n");
 
     // Review policy (rules/)
     let path_for_rules = target_path_for_rules(tgt);
@@ -31,42 +51,76 @@ pub fn build_strict_prompt(tgt: &MappedTarget, ctx: &PrimaryCtx, related: &str) 
         s.push_str("\n\n");
     }
 
+    // Helper to avoid accidental code-fence termination inside model-rendered text.
     fn sanitize_fence(x: &str) -> String {
         x.replace("```", "``\u{200B}`")
     }
+
+    // PRIMARY (HEAD, numbered)
     s.push_str("PRIMARY (numbered HEAD lines):\n```code\n");
     s.push_str(&sanitize_fence(&ctx.numbered_snippet));
     s.push_str("```\n");
 
+    // CODE FACTS (enclosing + one chunk)
+    if let Some(cf) = &ctx.code_facts {
+        s.push_str("\nCODE FACTS (read-only):\n```text\n");
+        s.push_str(&sanitize_fence(&render_code_facts(cf)));
+        s.push_str("\n```\n");
+    }
+
+    // RELATED (BASE/external; optional)
     if !related.is_empty() {
-        s.push_str("\nRELATED (read-only):\n```code\n");
+        s.push_str("\nRELATED (read-only; BASE/external):\n```code\n");
         s.push_str(&sanitize_fence(related));
         s.push_str("\n```\n");
     }
+
+    // FULL FILE (HEAD; optional)
     if let Some(full) = &ctx.full_file_readonly {
         s.push_str(
-                    "\nFULL FILE (read-only; use ONLY to verify imports/symbol presence or cross-line invariants):\n```code\n",
-                );
+            "\nFULL FILE (HEAD; read-only; use ONLY to verify imports/symbol presence or cross-line invariants):\n```code\n",
+        );
         s.push_str(&sanitize_fence(full));
         s.push_str("\n```\n");
     }
 
-    // Optional compact, language-agnostic reasoning hints near the anchor.
-    // These are generated in build_primary_ctx() and are read-only for the model.
-    if let Some(cf) = &ctx.code_facts {
-        s.push_str("\nCODE FACTS (read-only):\n```text\n");
-        s.push_str(&sanitize_fence(cf));
-        s.push_str("\n```\n");
-    }
-
+    // Allowed anchors
     s.push_str("\nALLOWED_ANCHORS (inclusive line ranges in the same file):\n");
     for a in &ctx.allowed_anchors {
         s.push_str(&format!("- {}-{}\n", a.start, a.end));
     }
 
-    s.push_str(
+    // Choose output mode:
+    // - Default: STRICT block format (human-readable with PATCH blocks)
+    // - JSON: inject STRICT_OUTPUT_SPEC and require a pure-JSON body between markers
+    let json_mode = std::env::var("MR_REVIEWER_OUTPUT_MODE")
+        .map(|v| v.trim().eq_ignore_ascii_case("JSON"))
+        .unwrap_or(false);
+
+    if json_mode {
+        s.push_str(
             r#"
     <<<BEGIN_STRICT>>>
+    ### Output format (STRICT JSON)
+    Return ONLY a single JSON object (no prose, no code fences) that follows:
+    ```text
+    "#,
+        );
+        s.push_str(STRICT_OUTPUT_SPEC);
+        s.push_str(
+                r#"
+    ```
+    Hard constraints:
+    - Output ONLY the JSON object. If there are no valid issues, return exactly: { "NoIssues": true }
+    <<<END_STRICT>>>
+    "#,
+            );
+        s
+    } else {
+        // Strict block format (default)
+        s.push_str(
+                r#"
+<<<BEGIN_STRICT>>>
 ### Output format (STRICT)
 For each valid issue return one block:
 
@@ -77,10 +131,16 @@ BODY: <concise rationale; reference code/symbols clearly>
 PATCH:
 ```diff
 <minimal applicable patch for the anchored lines; NO file headers>
+```
+
 QUESTION mode (when key context is missing or uncertainty is high):
+
 - Use the SAME block format but omit PATCH.
+
 - TITLE must start with: "NEEDS CONTEXT: "
+
 - In BODY, ask up to 3 focused questions. For each, include: "Why needed" and "Exact artifact/path needed".
+
 
 Examples:
 ANCHOR: 12-12
@@ -88,16 +148,15 @@ SEVERITY: Low
 TITLE: NEEDS CONTEXT: import usage
 BODY: Evidence in PRIMARY shows `import x`, but no clear symbol usage in the snippet.
 Questions:
-1) Which symbol from `x` is expected to be used here? (Why: avoid false "unused import"; Need: usage example or reference line)
-2) Is there a side-effect import expected? (Why: tree-shaking exceptions; Need: build/config hint)
-PATCH:
-`diff +`
-```
+
+1. Which symbol from `x` is expected to be used here? (Why: avoid false "unused import"; Need: usage example or reference line)
+
+2. Is there a side-effect import expected? (Why: tree-shaking exceptions; Need: build/config hint)
 
 
 Rules:
 
-- Anchors must be inside ALLOWED_ANCHORS. Prefer _added_ lines when possible.
+- Anchors must be inside ALLOWED_ANCHORS. Prefer added lines when possible.
 
 - Do not mention line numbers in BODY unless they match ANCHOR exactly.
 
@@ -107,16 +166,25 @@ Rules:
 
 - If you cannot propose a correct patch, omit PATCH and just explain the issue.
 
+
 Hard constraints:
+
 - Output ONLY between these markers. If there are no valid issues, output exactly: NO_ISSUES
-<<<END_STRICT>>>
+    <<<END_STRICT>>>
     "#,
     );
 
-    s
+        s
+    }
 }
 
-/// Build refine prompt for SLOW model; keeps the same strict format.
+/// Build a refine prompt for the SLOW model; keeps the same strict format.
+///
+/// The refine stage receives the previous block and must:
+/// - Improve precision and justification,
+/// - Keep anchors valid,
+/// - Remove speculation,
+/// - Preserve the STRICT output format.
 pub fn build_refine_prompt(
     maybe_prev: Option<&crate::review::policy::ParsedFinding>,
     tgt: &MappedTarget,
@@ -135,6 +203,54 @@ pub fn build_refine_prompt(
 
     s.push_str(&build_strict_prompt(tgt, ctx, related));
     s
+}
+
+/// Render `CodeFacts` into a compact, deterministic text block for the prompt.
+///
+/// The block explicitly includes:
+/// - file and anchor,
+/// - optional enclosing descriptor,
+/// - chunk meta `{index/total}` and its line bounds,
+/// - lightweight signals (calls, writes, control_flow, cleanup_like),
+/// - FULL enclosing snippet,
+/// - one CHUNK snippet.
+fn render_code_facts(cf: &CodeFacts) -> String {
+    fn list(v: &[String]) -> String {
+        if v.is_empty() {
+            "[]".into()
+        } else {
+            format!("[{}]", v.join(", "))
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("file: {}\n", cf.file));
+    out.push_str(&format!("anchor: {}..{}\n", cf.anchor.start, cf.anchor.end));
+    if let Some(enc) = &cf.enclosing {
+        out.push_str(&format!(
+            "enclosing: {} {} [{}..{}]\n",
+            enc.kind, enc.name, enc.start_line, enc.end_line
+        ));
+    } else {
+        out.push_str("enclosing: <none>\n");
+    }
+    out.push_str(&format!(
+        "chunk: {}/{} lines {}..{}\n",
+        cf.chunk.index, cf.chunk.total, cf.chunk.from, cf.chunk.to
+    ));
+    out.push_str(&format!("calls_top: {}\n", list(&cf.calls_top)));
+    out.push_str(&format!("writes: {}\n", list(&cf.writes)));
+    out.push_str(&format!("control_flow: {}\n", list(&cf.control_flow)));
+    out.push_str(&format!("cleanup_like: {}\n", list(&cf.cleanup_like)));
+    out.push_str("--- ENCLOSING ---\n");
+    out.push_str(&cf.enclosing_snippet);
+    out.push('\n');
+    out.push_str(&format!(
+        "--- CHUNK ({}/{}) ---\n",
+        cf.chunk.index, cf.chunk.total
+    ));
+    out.push_str(&cf.chunk.snippet);
+    out
 }
 
 // -------- rule-pack loader (no language filters, just prompt guidance) --------

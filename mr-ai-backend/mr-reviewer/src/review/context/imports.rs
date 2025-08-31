@@ -1,5 +1,5 @@
 //! Language-agnostic heuristics for import/include/using/use detection and
-//! verification that "unused import" — не ложная тревога.
+//! verification that "unused import" — don't main panic.
 
 use regex::Regex;
 

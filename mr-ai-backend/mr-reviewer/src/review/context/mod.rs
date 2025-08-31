@@ -8,6 +8,7 @@
 
 pub mod added;
 pub mod build;
+pub mod chunk;
 pub mod fs;
 pub mod imports;
 pub mod rag;

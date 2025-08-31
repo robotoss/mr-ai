@@ -158,6 +158,45 @@ impl LlmClient {
     }
 }
 
+/// Target kind hint for routing.
+/// Keep this local (duplicated) to avoid depending on mapping module here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKindHint {
+    Line,
+    Range,
+    Symbol,
+    File,
+    Global,
+}
+
+/// Routing hint supplied by the caller (step4 orchestrator).
+#[derive(Debug, Clone)]
+pub struct RouteHint {
+    pub target_kind: TargetKindHint,
+    /// Approx prompt tokens (4 chars ≈ 1 token heuristic).
+    pub prompt_tokens_approx: usize,
+    /// Severity estimated/parsed from FAST (or expected).
+    pub severity: crate::review::policy::Severity,
+    /// Confidence estimated by heuristics (0..1).
+    pub confidence: f32,
+    /// Already used slow escalations in this run.
+    pub used_escalations: usize,
+    /// Optional: range span in lines (helps detect "big range").
+    pub range_span_lines: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteDecision {
+    Fast,
+    Slow,
+}
+
+impl RouteDecision {
+    pub fn is_slow(self) -> bool {
+        matches!(self, RouteDecision::Slow)
+    }
+}
+
 /// Router holding both fast and slow clients + policy.
 #[derive(Debug, Clone)]
 pub struct LlmRouter {
@@ -184,7 +223,8 @@ impl LlmRouter {
         self.slow.generate_raw(prompt).await
     }
 
-    /// Decide whether to escalate to SLOW model.
+    /// Decide whether to escalate *after* FAST (legacy path).
+    /// Kept for compatibility; used when we already ran FAST.
     pub fn should_escalate(
         &self,
         sev: crate::review::policy::Severity,
@@ -198,10 +238,57 @@ impl LlmRouter {
         if used_escalations >= self.policy.max_escalations {
             return false;
         }
-        let sev_ok = rank(sev) >= rank(self.policy.min_severity);
+
+        // Severity is a gate: if finding is below gate, we never escalate.
+        let sev_gate = rank(sev) >= rank(self.policy.min_severity);
+
+        // Signals
         let conf_low = confidence < self.policy.min_confidence;
         let too_long = prompt_tokens_approx > self.policy.long_prompt_tokens;
-        sev_ok || conf_low || too_long
+
+        sev_gate && (conf_low || too_long)
+    }
+
+    /// Decide whether to route directly to SLOW *before* running FAST.
+    /// This prevents wasteful double-inference on obviously heavy targets.
+    pub fn route_for(&self, hint: &RouteHint) -> RouteDecision {
+        if !self.policy.enabled {
+            return RouteDecision::Fast;
+        }
+        if hint.used_escalations >= self.policy.max_escalations {
+            return RouteDecision::Fast;
+        }
+
+        // Severity gate first.
+        let sev_gate = rank(hint.severity) >= rank(self.policy.min_severity);
+        if !sev_gate {
+            return RouteDecision::Fast;
+        }
+
+        // Heuristics: what is "clearly heavy" upfront?
+        let is_symbol = matches!(hint.target_kind, TargetKindHint::Symbol);
+        let is_big_range = matches!(hint.target_kind, TargetKindHint::Range)
+            && hint.range_span_lines.unwrap_or(0) >= 40; // tune as needed
+        let too_long = hint.prompt_tokens_approx > self.policy.long_prompt_tokens;
+        let conf_low = hint.confidence < self.policy.min_confidence;
+
+        // Direct-to-slow when:
+        //  - Symbol or big range (harder reasoning), AND
+        //  - either long context or low confidence.
+        if (is_symbol || is_big_range) && (too_long || conf_low) {
+            return RouteDecision::Slow;
+        }
+
+        // Additional "near-threshold" guard:
+        // If tokens are close to threshold and confidence only slightly below,
+        // prefer SLOW to avoid double pass.
+        let near_long = hint.prompt_tokens_approx > (self.policy.long_prompt_tokens * 9 / 10);
+        let slightly_low_conf = hint.confidence < (self.policy.min_confidence + 0.05);
+        if (is_symbol || is_big_range) && near_long && slightly_low_conf {
+            return RouteDecision::Slow;
+        }
+
+        RouteDecision::Fast
     }
 }
 

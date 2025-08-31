@@ -4,6 +4,7 @@
 use crate::errors::Error;
 use crate::lang::SymbolIndex;
 use crate::map::{MappedTarget, TargetRef};
+use crate::review::context::types::{ChunkInfo, CodeFacts, EnclosingInfo};
 
 use super::fs::read_materialized;
 use super::imports::contains_import_like;
@@ -21,7 +22,7 @@ const PRIMARY_PAD_LINES: i32 = 20;
 pub fn build_primary_ctx(
     head_sha: &str,
     tgt: &MappedTarget,
-    _symbols: &SymbolIndex,
+    symbols: &SymbolIndex,
 ) -> Result<PrimaryCtx, Error> {
     let path = match &tgt.target {
         TargetRef::Line { path, .. }
@@ -47,7 +48,10 @@ pub fn build_primary_ctx(
     );
 
     let numbered_snippet = render_numbered(&code, s as usize, e as usize);
-    let allowed_anchors = coarse_allowed_from_target(tgt);
+    // Derive coarse allowed anchors. For Line/Symbol targets we expand to the
+    // enclosing symbol body when available so the model can fix issues that lie
+    // a few lines away from the exact mapped line (e.g., resource creation in initState).
+    let allowed_anchors = coarse_allowed_from_target(tgt, &path, symbols, &code);
 
     let near_top = allowed_anchors.iter().any(|a| a.start <= 30);
     let mentions_import_like = contains_import_like(&numbered_snippet);
@@ -59,13 +63,17 @@ pub fn build_primary_ctx(
     };
 
     // Build compact, language-agnostic facts near the first allowed anchor.
+    // The facts block now includes:
+    // - ENCLOSING (full) snippet of code (HEAD, authoritative),
+    // - one CHUNK (index/total) chosen to contain the first allowed anchor,
+    // - lightweight evidence (calls/writes/returns/cleanup).
     // This is independent from any specific language/framework.
     let code_facts = if !path.is_empty() {
         Some(build_code_facts_for_anchor(
             &code,
             &path,
             &allowed_anchors,
-            _symbols,
+            symbols,
         ))
     } else {
         None
@@ -99,13 +107,25 @@ fn render_numbered(code: &str, from: usize, to: usize) -> String {
     out
 }
 
-/// Coarse allowed-anchors derived from original mapping.
-fn coarse_allowed_from_target(tgt: &MappedTarget) -> Vec<AnchorRange> {
+/// Derive coarse allowed anchors based on the mapped target.
+/// For Line/Symbol targets we expand to the enclosing symbol body when possible.
+/// This ensures that edits inside the body (e.g., Timer in initState) can be
+/// legally patched within ALLOWED_ANCHORS.
+fn coarse_allowed_from_target(
+    tgt: &MappedTarget,
+    path: &str,
+    symbols: &SymbolIndex,
+    code: &str,
+) -> Vec<AnchorRange> {
     match &tgt.target {
-        TargetRef::Line { line, .. } => vec![AnchorRange {
-            start: *line,
-            end: *line,
-        }],
+        // Single line anchor: try to expand to enclosing body.
+        TargetRef::Line { line, .. } => enclosing_body_range(path, *line as u32, symbols, code)
+            .unwrap_or(AnchorRange {
+                start: *line,
+                end: *line,
+            })
+            .into_vec(),
+        // Range anchor: keep as-is, since it comes from DIFF hunk directly.
         TargetRef::Range {
             start_line,
             end_line,
@@ -114,11 +134,92 @@ fn coarse_allowed_from_target(tgt: &MappedTarget) -> Vec<AnchorRange> {
             start: *start_line,
             end: *end_line,
         }],
-        TargetRef::Symbol { decl_line, .. } => vec![AnchorRange {
-            start: *decl_line,
-            end: *decl_line,
-        }],
+        // Symbol anchor: prefer body span; fallback to decl line.
+        TargetRef::Symbol { decl_line, .. } => {
+            enclosing_body_range(path, *decl_line as u32, symbols, code)
+                .unwrap_or(AnchorRange {
+                    start: *decl_line,
+                    end: *decl_line,
+                })
+                .into_vec()
+        }
         TargetRef::File { .. } | TargetRef::Global => Vec::new(),
+    }
+}
+
+/// Try to resolve enclosing body [start..end] lines for a given file/line.
+/// First attempts SymbolIndex span; if not available, fallback to brace matching
+/// in the source code. Returns 1-based inclusive line numbers.
+fn enclosing_body_range(
+    path: &str,
+    line_1based: u32,
+    symbols: &SymbolIndex,
+    code: &str,
+) -> Option<AnchorRange> {
+    if let Some(rec) = symbols.find_enclosing_by_line(path, line_1based) {
+        if let Some(ls) = rec.body_span.lines {
+            let start = ls.start_line as usize;
+            let end = ls.end_line as usize;
+            if end >= start {
+                return Some(AnchorRange { start, end });
+            }
+        }
+    }
+    guess_body_by_braces(code, line_1based as usize).map(|(start, end)| AnchorRange { start, end })
+}
+
+/// Naive brace-based fallback: scan forward from declaration line to find '{'
+/// and then match until the corresponding '}' within a safe limit.
+fn guess_body_by_braces(code: &str, decl_line_1b: usize) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = code.lines().collect();
+    if decl_line_1b == 0 || decl_line_1b > lines.len() {
+        return None;
+    }
+
+    // Find the first '{' starting at or just after the declaration.
+    let mut i = decl_line_1b - 1;
+    let mut open_line = None;
+    while i < lines.len() {
+        if let Some(pos) = lines[i].find('{') {
+            open_line = Some(i + 1);
+            // Handle "{}" on the same line.
+            if lines[i][pos + 1..].contains('}') && lines[i].matches('{').count() == 1 {
+                return Some((i + 1, i + 1));
+            }
+            break;
+        }
+        if i >= decl_line_1b - 1 + 4 {
+            break; // stop after a few lines to avoid runaway search
+        }
+        i += 1;
+    }
+    let start = open_line?;
+
+    // Match closing '}' by tracking nesting depth.
+    let mut depth: i32 = 0;
+    for (idx, &line) in lines.iter().enumerate().skip(start - 1) {
+        for ch in line.chars() {
+            if ch == '{' {
+                depth += 1;
+            }
+            if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((start, idx + 1));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Small helper to keep call sites tidy.
+trait IntoVec {
+    fn into_vec(self) -> Vec<AnchorRange>;
+}
+impl IntoVec for AnchorRange {
+    fn into_vec(self) -> Vec<AnchorRange> {
+        vec![self]
     }
 }
 
@@ -137,77 +238,103 @@ fn target_line_window(tgt: &MappedTarget) -> (u32, u32) {
 }
 
 /// Build compact, language-agnostic facts around the first allowed anchor.
+/// Returns `CodeFacts` with:
+/// - full enclosing snippet (entire enclosing symbol body when available),
+/// - one chunk snippet with `{index/total}` metadata (centered on the anchor),
+/// - lightweight signals (top calls, writes, control-flow, cleanup-like).
 fn build_code_facts_for_anchor(
     code: &str,
     path: &str,
     allowed: &[AnchorRange],
     symbols: &SymbolIndex,
-) -> String {
-    // Choose the first allowed anchor; fall back to line 1 if empty.
+) -> CodeFacts {
+    const CHUNK_SIZE: usize = 160; // conservative token-friendly size
+    const SCOPE_FALLBACK_PAD: i32 = 80;
+
+    // Pick the first allowed anchor or fallback to 1..1.
     let anchor = allowed
         .get(0)
         .cloned()
         .unwrap_or(AnchorRange { start: 1, end: 1 });
 
-    // Try to locate the nearest enclosing symbol by line using the symbol index.
-    let enclosing = symbols.find_enclosing_by_line(path, anchor.start as u32);
+    // Try to find an enclosing symbol for the anchor line.
+    let enclosing_rec = symbols.find_enclosing_by_line(path, anchor.start as u32);
 
-    // Select scope: use the enclosing symbol body if available; otherwise a window around anchor.
-    let (scope_from, scope_to) = enclosing
+    // Determine enclosing scope [from..to] in lines.
+    let (scope_from, scope_to) = enclosing_rec
         .and_then(|s| {
             s.body_span
                 .lines
                 .map(|ls| (ls.start_line as usize, ls.end_line as usize))
         })
         .unwrap_or_else(|| {
+            // Fallback: a wide window centered around the anchor.
             let (sf, st) = window_bounds(
                 anchor.start as i32,
                 anchor.end as i32,
                 code.lines().count() as i32,
-                80, // wider than PRIMARY window to get more local evidence
+                SCOPE_FALLBACK_PAD,
             );
             (sf as usize, st as usize)
         });
-    let scope_text = slice_by_lines(code, scope_from, scope_to);
 
-    // Derive language-agnostic signals.
-    let calls = top_calls(&scope_text, 6);
-    let writes = writes_in_scope(&scope_text, 6);
-    let returns = returns_outline(&scope_text, 6);
-    let cleanup = cleanup_like_present(&scope_text);
+    let scope_from = scope_from.max(1);
+    let scope_to = scope_to.max(scope_from);
+    let scope_len = scope_to - scope_from + 1;
 
-    // Render a compact facts block.
-    let mut out = String::new();
-    out.push_str("CODE FACTS\n");
-    out.push_str(&format!("file: {}\n", path));
-    out.push_str(&format!("anchor: {}..{}\n", anchor.start, anchor.end));
-    if let Some(enc) = enclosing {
-        if let Some(ls) = enc.body_span.lines {
-            out.push_str(&format!(
-                "enclosing: {:?} {} [{}..{}]\n",
-                enc.kind, enc.name, ls.start_line, ls.end_line
-            ));
-        } else {
-            out.push_str(&format!("enclosing: {:?} {}\n", enc.kind, enc.name));
+    // Full enclosing snippet (entire body or the fallback window).
+    let enclosing_snippet = slice_by_lines(code, scope_from, scope_to);
+
+    // Chunking: split the enclosing scope into fixed-size chunks and pick the one with the anchor.
+    let total_chunks = ((scope_len + CHUNK_SIZE - 1) / CHUNK_SIZE).max(1);
+    let anchor_rel = anchor.start.saturating_sub(scope_from) + 1; // 1-based inside scope
+    let chunk_index = ((anchor_rel - 1) / CHUNK_SIZE) + 1; // 1-based index
+
+    let chunk_start_rel = (chunk_index - 1) * CHUNK_SIZE + 1;
+    let chunk_end_rel = (chunk_start_rel + CHUNK_SIZE - 1).min(scope_len);
+
+    let chunk_from = scope_from + chunk_start_rel - 1;
+    let chunk_to = scope_from + chunk_end_rel - 1;
+
+    let chunk_snippet = slice_by_lines(code, chunk_from, chunk_to);
+
+    // Lightweight signals from the enclosing scope (not just the chunk).
+    let calls = top_calls(&enclosing_snippet, 6);
+    let writes = writes_in_scope(&enclosing_snippet, 6);
+    let control_flow = returns_outline(&enclosing_snippet, 6);
+    let cleanup = cleanup_like_present(&enclosing_snippet);
+
+    let enclosing_info = enclosing_rec.map(|s| {
+        let (start_line, end_line) = s
+            .body_span
+            .lines
+            .map(|ls| (ls.start_line as usize, ls.end_line as usize))
+            .unwrap_or((scope_from, scope_to));
+        EnclosingInfo {
+            kind: format!("{:?}", s.kind),
+            name: s.name.clone(),
+            start_line,
+            end_line,
         }
+    });
+
+    CodeFacts {
+        file: path.to_string(),
+        anchor,
+        enclosing: enclosing_info,
+        enclosing_snippet,
+        chunk: ChunkInfo {
+            index: chunk_index,
+            total: total_chunks,
+            from: chunk_from,
+            to: chunk_to,
+            snippet: chunk_snippet,
+        },
+        calls_top: calls,
+        writes,
+        control_flow,
+        cleanup_like: cleanup,
     }
-    out.push_str(&format!("scope_lines: {}..{}\n", scope_from, scope_to));
-    if !returns.is_empty() {
-        out.push_str("control_flow:\n");
-        for r in returns {
-            out.push_str(&format!("  - {}\n", r));
-        }
-    }
-    if !calls.is_empty() {
-        out.push_str(&format!("calls_top: [{}]\n", calls.join(", ")));
-    }
-    if !writes.is_empty() {
-        out.push_str(&format!("writes: [{}]\n", writes.join(", ")));
-    }
-    if !cleanup.is_empty() {
-        out.push_str(&format!("cleanup_like_present: [{}]\n", cleanup.join(", ")));
-    }
-    out
 }
 
 /// Return a string containing lines `from..=to` (1-based, inclusive).

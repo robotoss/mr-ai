@@ -1,6 +1,7 @@
 //! Step 4 Orchestrator: target → context → prompt → LLM → policy → drafts.
 //!
 //! Improvements (language-agnostic):
+//! - Pre-routing: optionally go directly to the SLOW model (skips FAST) for risky targets.
 //! - Better re-anchoring using patch blocks and signature scanning.
 //! - **Prefer ADDED lines** → exact single-line anchors where possible.
 //! - Full-file read-only context for global checks (imports/symbols).
@@ -9,12 +10,14 @@
 //! - Deduplication of overlapping/duplicate issues.
 
 pub mod context;
+mod dedup_llm;
 pub mod llm;
 pub mod policy;
 pub mod prompt;
 
 use crate::errors::MrResult;
 use crate::map::TargetRef;
+use crate::review::dedup_llm::dedup_drafts_llm_async;
 use crate::{ReviewPlan, telemetry::prompt_dump::dump_prompt_for_target};
 
 use context::{
@@ -59,8 +62,11 @@ struct Step4ItemReport {
     severity: String,
     confidence: f32,
     prompt_len: usize,
+    /// true if SLOW model was involved (either direct pre-route or escalation).
     escalated: bool,
+    /// FAST latency in ms (0 when FAST was skipped).
     fast_ms: u128,
+    /// SLOW latency in ms (None when SLOW was not called).
     slow_ms: Option<u128>,
     related_present: bool,
     body_len: usize,
@@ -79,6 +85,23 @@ struct Step4Report {
     items: Vec<Step4ItemReport>,
 }
 
+/// Light hint about the target to drive pre-routing.
+#[derive(Debug, Clone, Copy)]
+enum TargetKindHint {
+    Line,
+    Range { span_lines: usize },
+    Symbol,
+    File,
+    Global,
+}
+
+/// Local router decision used by this orchestrator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteDecision {
+    Fast,
+    Slow,
+}
+
 /// Build draft comments (step 4).
 pub async fn build_draft_comments(
     plan: &ReviewPlan,
@@ -89,6 +112,7 @@ pub async fn build_draft_comments(
     let t0 = Instant::now();
     debug!("step4: build draft comments (context → prompt → llm → policy)");
 
+    // Warm both clients to avoid cold-start cliffs.
     router.fast.warmup().await;
     router.slow.warmup().await;
 
@@ -101,72 +125,113 @@ pub async fn build_draft_comments(
     for (idx, tgt) in plan.targets.iter().enumerate() {
         let t_item = Instant::now();
 
-        // 1) Context
+        // 1) Build context (HEAD/PRIMARY + RELATED/BASE).
         let ctx: PrimaryCtx = context::build_primary_ctx(&head_sha, tgt, &plan.symbols)?;
         let related = context::fetch_related_context(&plan.symbols, tgt).await?;
         let related_present = !related.is_empty() || ctx.full_file_readonly.is_some();
 
-        // 2) Prompt (FAST)
+        // 2) Build initial strict prompt (FAST flavor; reused for confidence scoring).
         let prompt = build_strict_prompt(tgt, &ctx, &related);
         let prompt_chars = prompt.chars().count();
         let prompt_tokens_approx = prompt_chars / 4;
 
-        // Dump FAST prompt (safe + configurable)
+        // Dump the "fast" prompt (even if we pre-route to SLOW, this is useful for telemetry).
         dump_prompt_for_target(&head_sha, idx, "fast", tgt, &prompt, prompt_tokens_approx);
 
-        let t_fast = Instant::now();
-        let fast_raw = router.generate_fast(&prompt).await?;
-        let fast_ms = t_fast.elapsed().as_millis();
-
-        // 3) Parse + validate
-        let mut best: Option<ParsedFinding> =
-            pick_best(parse_and_validate(&fast_raw, &ctx.allowed_anchors));
-
-        // 4) Optional refine (SLOW)
-        let mut escalated = false;
-        let mut slow_ms: Option<u128> = None;
-
-        let should_escalate = || {
-            let sev = best.as_ref().map(|f| f.severity).unwrap_or(Severity::Low);
-            let conf = score_confidence(
-                best.as_ref()
-                    .map(|f| f.body_markdown.as_str())
-                    .unwrap_or(""),
-                prompt_chars,
-            );
-            router.should_escalate(sev, conf, prompt_tokens_approx, used_slow)
+        // --- Pre-routing decision BEFORE running FAST ---
+        let tk_hint = match &tgt.target {
+            TargetRef::Line { .. } => TargetKindHint::Line,
+            TargetRef::Range {
+                start_line,
+                end_line,
+                ..
+            } => TargetKindHint::Range {
+                span_lines: end_line.saturating_sub(*start_line) + 1,
+            },
+            TargetRef::Symbol { .. } => TargetKindHint::Symbol,
+            TargetRef::File { .. } => TargetKindHint::File,
+            TargetRef::Global => TargetKindHint::Global,
         };
+        let pre_route = decide_initial_route(&router, tk_hint, prompt_tokens_approx, used_slow);
 
-        if best.is_none() || should_escalate() {
-            let refine = build_refine_prompt(best.as_ref(), tgt, &ctx, &related);
+        // 3) Run LLM(s) according to the route.
+        let mut fast_ms: u128 = 0;
+        let mut slow_ms: Option<u128> = None;
+        let mut escalated = false; // true if SLOW used either by pre-route or escalation
+        let mut best: Option<ParsedFinding> = None;
 
-            // Dump SLOW prompt as well
-            let refine_chars = refine.chars().count();
-            let refine_tokens_approx = refine_chars / 4;
-            dump_prompt_for_target(&head_sha, idx, "slow", tgt, &refine, refine_tokens_approx);
+        let mut slow_invoked_for_item = false; // true if SLOW was called in any mode
 
-            let t_slow = Instant::now();
-            let slow_raw = router.generate_slow(&refine).await?;
-            slow_ms = Some(t_slow.elapsed().as_millis());
+        match pre_route {
+            RouteDecision::Slow => {
+                slow_invoked_for_item = true;
+                used_slow += 1;
+                // Direct to SLOW: we don't have a previous draft, so pass None to refine.
+                let refine = build_refine_prompt(None, tgt, &ctx, &related);
+                let refine_tokens = refine.chars().count() / 4;
+                dump_prompt_for_target(&head_sha, idx, "slow", tgt, &refine, refine_tokens);
 
-            let refined = pick_best(parse_and_validate(&slow_raw, &ctx.allowed_anchors));
-            match (best.take(), refined) {
-                (None, Some(r)) => {
-                    best = Some(r);
+                let t_slow = Instant::now();
+                let slow_raw = router.generate_slow(&refine).await?;
+                slow_ms = Some(t_slow.elapsed().as_millis());
+
+                best = pick_best(parse_and_validate(&slow_raw, &ctx.allowed_anchors));
+                if best.is_some() {
                     escalated = true;
                     used_slow += 1;
                 }
-                (Some(a), Some(b)) => {
-                    best = Some(if better(&a, &b) { b } else { a });
-                    escalated = true;
-                    used_slow += 1;
+            }
+            RouteDecision::Fast => {
+                // Regular FAST path.
+                let t_fast = Instant::now();
+                let fast_raw = router.generate_fast(&prompt).await?;
+                fast_ms = t_fast.elapsed().as_millis();
+                best = pick_best(parse_and_validate(&fast_raw, &ctx.allowed_anchors));
+
+                // Optional SLOW refine if policy requires it.
+                let should_escalate = || {
+                    let sev = best.as_ref().map(|f| f.severity).unwrap_or(Severity::Low);
+                    let conf = score_confidence(
+                        best.as_ref()
+                            .map(|f| f.body_markdown.as_str())
+                            .unwrap_or(""),
+                        prompt_chars,
+                    );
+                    router.should_escalate(sev, conf, prompt_tokens_approx, used_slow)
+                };
+
+                if best.is_none() || should_escalate() {
+                    slow_invoked_for_item = true;
+                    used_slow += 1; // we write off the budget for the call
+
+                    let refine = build_refine_prompt(best.as_ref(), tgt, &ctx, &related);
+                    let refine_tokens = refine.chars().count() / 4;
+                    dump_prompt_for_target(&head_sha, idx, "slow", tgt, &refine, refine_tokens);
+
+                    let t_slow = Instant::now();
+                    let slow_raw = router.generate_slow(&refine).await?;
+                    slow_ms = Some(t_slow.elapsed().as_millis());
+
+                    let refined = pick_best(parse_and_validate(&slow_raw, &ctx.allowed_anchors));
+                    match (best.take(), refined) {
+                        (None, Some(r)) => {
+                            best = Some(r);
+                            escalated = true;
+                            used_slow += 1;
+                        }
+                        (Some(a), Some(b)) => {
+                            best = Some(if better(&a, &b) { b } else { a });
+                            escalated = true;
+                            used_slow += 1;
+                        }
+                        (Some(a), None) => best = Some(a),
+                        (None, None) => {}
+                    }
                 }
-                (Some(a), None) => best = Some(a),
-                (None, None) => {}
             }
         }
 
-        // 5) Nothing valid
+        // 4) Drop when nothing valid came back.
         let Some(mut finding) = best else {
             rows.push(make_report_row(
                 idx,
@@ -176,7 +241,7 @@ pub async fn build_draft_comments(
                 "Dropped",
                 0.0,
                 prompt_tokens_approx,
-                false,
+                slow_invoked_for_item,
                 fast_ms,
                 slow_ms,
                 related_present,
@@ -187,7 +252,7 @@ pub async fn build_draft_comments(
             continue;
         };
 
-        // 6) Anchoring: patch → prefer added → signature
+        // 5) Anchoring: patch → prefer added → signature.
         let path_opt = target_path(&tgt.target);
         let mut anchor: Option<AnchorRange> = finding.anchor;
 
@@ -217,7 +282,6 @@ pub async fn build_draft_comments(
             // Prefer a *single added line* if possible.
             let added = collect_added_lines(&plan.bundle.changes, path);
             if let Some(a) = anchor {
-                // If we have a range and inside it there is an ADDED line, compress to that line.
                 if a.start < a.end {
                     if let Some(&first_added) =
                         added.iter().find(|&&ln| ln >= a.start && ln <= a.end)
@@ -243,7 +307,7 @@ pub async fn build_draft_comments(
 
         finding.anchor = anchor;
 
-        // 7) Generic "unused import" false-positive guard
+        // 6) Generic "unused import" false-positive guard.
         if finding.title.to_ascii_lowercase().contains("unused import")
             || finding
                 .body_markdown
@@ -266,7 +330,7 @@ pub async fn build_draft_comments(
                         "Dropped",
                         0.0,
                         prompt_tokens_approx,
-                        escalated,
+                        slow_invoked_for_item,
                         fast_ms,
                         slow_ms,
                         related_present,
@@ -279,7 +343,7 @@ pub async fn build_draft_comments(
             }
         }
 
-        // 8) Patch sanity: if patch is not applicable — strip it and reduce confidence
+        // 7) Patch sanity: if patch is not applicable — strip it and reduce confidence.
         let mut conf = score_confidence(&finding.body_markdown, prompt_chars);
         if let (Some(path), Some(patch)) = (path_opt, finding.patch.as_ref()) {
             if !patch_applies_to_head(&head_sha, path, patch) {
@@ -289,7 +353,7 @@ pub async fn build_draft_comments(
             }
         }
 
-        // 9) Build final target ref:
+        // 8) Build final target ref:
         //    - single-line anchor → TargetRef::Line
         //    - range anchor → TargetRef::Range (publisher will post on start_line)
         let (final_target, anchor_start, anchor_end) =
@@ -325,7 +389,7 @@ pub async fn build_draft_comments(
                 (None, _) => (TargetRef::Global, None, None),
             };
 
-        // 10) Final draft
+        // 9) Final draft.
         let body_md = to_markdown(&finding);
         let preview = truncate(&body_md, 140);
 
@@ -345,7 +409,7 @@ pub async fn build_draft_comments(
             severity_str(finding.severity),
             conf,
             prompt_tokens_approx,
-            escalated,
+            slow_invoked_for_item,
             fast_ms,
             slow_ms,
             related_present,
@@ -364,8 +428,12 @@ pub async fn build_draft_comments(
         );
     }
 
-    // Deduplicate overlapping or semantically identical drafts.
-    dedup_in_place(&mut drafts);
+    // LLM-assisted deduplication (FAST model). Budget keeps it cheap.
+    let dedup_budget: usize = std::env::var("REVIEW_DEDUP_LLM_BUDGET")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    dedup_drafts_llm_async(&mut drafts, &router, dedup_budget).await;
 
     let elapsed = t0.elapsed().as_millis();
     let escalated_total = used_slow;
@@ -380,13 +448,22 @@ pub async fn build_draft_comments(
         elapsed
     );
 
+    let escalated_drafts = rows
+        .iter()
+        .filter(|r| r.severity != "Dropped" && r.escalated)
+        .count();
+    let fast_only_drafts = rows
+        .iter()
+        .filter(|r| r.severity != "Dropped" && !r.escalated)
+        .count();
+
     // Persist JSON report for operator insight.
     let report = Step4Report {
         head_sha: head_sha.clone(),
         targets_total: plan.targets.len(),
         drafts_total: drafts.len(),
-        escalated_total,
-        fast_only_total: fast_only,
+        escalated_total: escalated_drafts,
+        fast_only_total: fast_only_drafts,
         elapsed_ms: elapsed,
         items: rows,
     };
@@ -395,6 +472,61 @@ pub async fn build_draft_comments(
     }
 
     Ok(drafts)
+}
+
+// ---------------- pre-routing logic ----------------
+
+/// Decide whether to go directly to SLOW before running FAST.
+/// Heuristics:
+/// - Respect the router policy gate (min severity).
+/// - Very long prompts (tokens > policy.long_prompt_tokens) → SLOW.
+/// - Symbol targets are more error-prone → prefer SLOW when the gate passes.
+/// - Wide ranges (span_lines >= 80) also prefer SLOW when the gate passes.
+/// - Otherwise default to FAST.
+fn decide_initial_route(
+    router: &LlmRouter,
+    hint: TargetKindHint,
+    prompt_tokens_approx: usize,
+    used_slow: usize,
+) -> RouteDecision {
+    // If escalation disabled or budget exhausted → always FAST.
+    if !router.policy.enabled || used_slow >= router.policy.max_escalations {
+        return RouteDecision::Fast;
+    }
+
+    // Approximate expected severity by target kind (gate must pass).
+    let expected_sev = match hint {
+        TargetKindHint::Symbol => Severity::High,
+        TargetKindHint::Range { span_lines } if span_lines >= 60 => Severity::High,
+        TargetKindHint::Range { .. } => Severity::Medium,
+        TargetKindHint::Line => Severity::Medium,
+        TargetKindHint::File | TargetKindHint::Global => Severity::Low,
+    };
+
+    // Severity gate: only allow SLOW when expected severity meets policy gate.
+    let sev_gate = {
+        let gate_rank = |s: Severity| match s {
+            Severity::High => 3,
+            Severity::Medium => 2,
+            Severity::Low => 1,
+        };
+        gate_rank(expected_sev) >= gate_rank(router.policy.min_severity)
+    };
+    if !sev_gate {
+        return RouteDecision::Fast;
+    }
+
+    // Clear signals for SLOW:
+    let too_long = prompt_tokens_approx > router.policy.long_prompt_tokens;
+    let prefer_symbol = matches!(hint, TargetKindHint::Symbol);
+    let prefer_wide_range =
+        matches!(hint, TargetKindHint::Range { span_lines } if span_lines >= 80);
+
+    if too_long || prefer_symbol || prefer_wide_range {
+        RouteDecision::Slow
+    } else {
+        RouteDecision::Fast
+    }
 }
 
 // ---------------- helpers ----------------
@@ -543,74 +675,6 @@ fn make_report_row(
         body_markdown,
         preview: preview.to_string(),
     }
-}
-
-/// Deduplicate drafts with overlapping anchors or identical semantics.
-/// Preference order: higher severity, narrower (or single-line) anchor, longer body.
-fn dedup_in_place(drafts: &mut Vec<DraftComment>) {
-    drafts.sort_by(|a, b| {
-        (
-            first_path(a),
-            first_anchor(a).map(|x| x.0).unwrap_or(usize::MAX),
-            first_anchor(a).map(|x| x.1).unwrap_or(usize::MAX),
-            first_title(&a.body_markdown).to_ascii_lowercase(),
-        )
-            .cmp(&(
-                first_path(b),
-                first_anchor(b).map(|x| x.0).unwrap_or(usize::MAX),
-                first_anchor(b).map(|x| x.1).unwrap_or(usize::MAX),
-                first_title(&b.body_markdown).to_ascii_lowercase(),
-            ))
-    });
-
-    let sev_rank = |s: Severity| match s {
-        Severity::High => 3,
-        Severity::Medium => 2,
-        Severity::Low => 1,
-    };
-
-    let norm_title = |md: &str| -> String {
-        first_title(md)
-            .trim_start_matches("QUESTION:")
-            .trim()
-            .to_ascii_lowercase()
-    };
-
-    let overlaps = |a: Option<(usize, usize)>, b: Option<(usize, usize)>| -> bool {
-        match (a, b) {
-            (Some((as_, ae)), Some((bs, be))) => !(ae < bs || be < as_),
-            _ => false,
-        }
-    };
-
-    let mut out: Vec<DraftComment> = Vec::new();
-    for d in drafts.drain(..) {
-        if let Some(last) = out.last_mut() {
-            let same_file = first_path(last) == first_path(&d);
-            let same_title = norm_title(&last.body_markdown) == norm_title(&d.body_markdown);
-            let anchors_overlap = overlaps(first_anchor(last), first_anchor(&d));
-            if same_file && same_title && anchors_overlap {
-                // Keep the better one.
-                let last_len = last.body_markdown.len();
-                let d_len = d.body_markdown.len();
-                let last_span = first_anchor(last)
-                    .map(|(s, e)| e.saturating_sub(s))
-                    .unwrap_or(usize::MAX);
-                let d_span = first_anchor(&d)
-                    .map(|(s, e)| e.saturating_sub(s))
-                    .unwrap_or(usize::MAX);
-                let d_better = (sev_rank(d.severity) > sev_rank(last.severity))
-                    || (d_span < last_span)
-                    || (d_len > last_len);
-                if d_better {
-                    *last = d;
-                }
-                continue;
-            }
-        }
-        out.push(d);
-    }
-    *drafts = out;
 }
 
 fn first_title(md: &str) -> String {
