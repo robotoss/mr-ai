@@ -12,12 +12,17 @@
 pub mod context;
 mod dedup_llm;
 pub mod llm;
+mod llm_ext;
 pub mod policy;
+mod preq;
 pub mod prompt;
+mod rag_support;
+mod util;
 
 use crate::errors::MrResult;
 use crate::map::TargetRef;
 use crate::review::dedup_llm::dedup_drafts_llm_async;
+use crate::review::llm_ext::TraceCtx;
 use crate::{ReviewPlan, telemetry::prompt_dump::dump_prompt_for_target};
 
 use context::{
@@ -28,10 +33,14 @@ use context::{
 use llm::{LlmConfig, LlmRouter};
 use policy::{ParsedFinding, Severity, parse_and_validate};
 use prompt::{build_refine_prompt, build_strict_prompt};
-
 use serde::Serialize;
+
 use std::{fs, path::PathBuf, time::Instant};
 use tracing::{debug, info, warn};
+
+/// Build-only mode: construct and dump final prompts, never call any LLMs.
+/// Set to `false` to restore normal behavior.
+const PROMPT_BUILD_ONLY: bool = false;
 
 /// Final product of step 4: drafts suitable for publication.
 #[derive(Debug, Clone)]
@@ -46,6 +55,19 @@ pub struct DraftComment {
     pub severity: Severity,
     /// Short preview for logs/telemetry.
     pub preview: String,
+}
+
+/// Read-only related code chunk (goes into the RELATED section of the prompt).
+#[derive(Debug, Clone)]
+pub struct RelatedBlock {
+    /// Repo-relative path of the snippet source.
+    pub path: String,
+    /// Language hint (e.g., "dart", "kotlin"); can be empty.
+    pub language: String,
+    /// The snippet body (as-is; do not number these lines).
+    pub snippet: String,
+    /// Optional rationale for why this block was selected (telemetry/debug only).
+    pub why: Option<String>,
 }
 
 // ---------- Reporting ----------
@@ -113,8 +135,11 @@ pub async fn build_draft_comments(
     debug!("step4: build draft comments (context → prompt → llm → policy)");
 
     // Warm both clients to avoid cold-start cliffs.
-    router.fast.warmup().await;
-    router.slow.warmup().await;
+    if !PROMPT_BUILD_ONLY {
+        // Skip warmups in build-only mode.
+        router.fast.warmup().await;
+        router.slow.warmup().await;
+    }
 
     let mut drafts: Vec<DraftComment> = Vec::new();
     let mut used_slow = 0usize;
@@ -124,19 +149,117 @@ pub async fn build_draft_comments(
 
     for (idx, tgt) in plan.targets.iter().enumerate() {
         let t_item = Instant::now();
+        let trace = TraceCtx {
+            head_sha: head_sha.clone(),
+            item_idx: idx,
+        };
 
-        // 1) Build context (HEAD/PRIMARY + RELATED/BASE).
+        // 1) Build context (HEAD/PRIMARY).
         let ctx: PrimaryCtx = context::build_primary_ctx(&head_sha, tgt, &plan.symbols)?;
-        let related = context::fetch_related_context(&plan.symbols, tgt).await?;
+
+        // 1.1) Pre-question agent: ask a small LLM what extra context is needed, then fetch it from RAG.
+        // Build minimal inputs (local window lines come from ctx.numbered_snippet filtered to allowed anchors).
+        let allowed: Vec<(usize, usize)> = ctx
+            .allowed_anchors
+            .iter()
+            .map(|a| (a.start, a.end))
+            .collect();
+        let preq_input = crate::review::preq::PreqInput {
+            head_sha: &head_sha,
+            idx,
+            ctx: &ctx,
+            local_window_numbered: &ctx.numbered_snippet, // already numbered HEAD
+            allowed_anchors: &allowed,
+            target_path: crate::review::target_path(&tgt.target),
+            language_hint: crate::review::util::lang_from_path(crate::review::target_path(
+                &tgt.target,
+            )),
+        };
+        // Always run pre-question agent to collect RAG context and logs,
+        // even in build-only mode (we only skip *final* LLM generations).
+        let preq_ctx = crate::review::preq::run_preq_agent(&router, preq_input).await?;
+
+        // Convert preq_ctx.hits to "related" strings (compatible with existing prompt builder).
+        let mut related: Vec<RelatedBlock> =
+            context::fetch_related_context(&plan.symbols, tgt).await?;
+        for h in preq_ctx.hits {
+            // Each hit is stored as a synthetic RELATED block.
+            related.push(RelatedBlock {
+                path: h.path,
+                language: h.language.unwrap_or_default(),
+                snippet: h.snippet,
+                why: Some(h.why),
+            });
+        }
         let related_present = !related.is_empty() || ctx.full_file_readonly.is_some();
 
         // 2) Build initial strict prompt (FAST flavor; reused for confidence scoring).
-        let prompt = build_strict_prompt(tgt, &ctx, &related);
+        //    Optionally augment with RAG based on FAST hint (ask first, then rebuild prompt).
+        let mut base_prompt = build_strict_prompt(tgt, &ctx, &related);
+
+        // Ask FAST for RAG hints (safe to run in build-only mode; we skip only final generations).
+        let rag_hints = match crate::review::llm_ext::ask_rag_hints_fast(
+            &router.fast,
+            &ctx,
+            &tgt.target,
+            &trace,
+        )
+        .await
+        {
+            Ok(h) => h,
+            Err(_) => Default::default(),
+        };
+
+        // Try fetching small RAG chunks (replace NoopRag with a real searcher later).
+        let rag_chunks = crate::review::rag_support::search_with_hints(
+            &crate::review::rag_support::NoopRag,
+            &rag_hints,
+            6,
+        );
+        if !rag_chunks.is_empty() {
+            // Dump chosen chunks for traceability
+            let _ = crate::review::rag_support::dump_rag_chunks(&head_sha, idx, &rag_chunks);
+        }
+        if !rag_chunks.is_empty() {
+            let rag_block = crate::review::rag_support::format_rag_chunks_for_prompt(&rag_chunks);
+            base_prompt.push_str("\n\n");
+            base_prompt.push_str(&rag_block);
+        }
+
+        let prompt = base_prompt;
         let prompt_chars = prompt.chars().count();
         let prompt_tokens_approx = prompt_chars / 4;
 
         // Dump the "fast" prompt (even if we pre-route to SLOW, this is useful for telemetry).
         dump_prompt_for_target(&head_sha, idx, "fast", tgt, &prompt, prompt_tokens_approx);
+
+        // Build-only mode: also dump the final "slow/refine" prompt and skip all LLM calls.
+        if PROMPT_BUILD_ONLY {
+            // We don't have a previous draft here; build a generic refine prompt.
+            let refine = build_refine_prompt(None, tgt, &ctx, &related);
+            let refine_tokens = refine.chars().count() / 4;
+            dump_prompt_for_target(&head_sha, idx, "slow", tgt, &refine, refine_tokens);
+
+            // Record a DryRun row for operator insight; no drafts are produced.
+            rows.push(make_report_row(
+                idx,
+                &tgt.target,
+                &tgt.snippet_hash,
+                None,     // no final anchor in build-only mode
+                "DryRun", // severity marker for report
+                0.0,      // confidence
+                prompt_tokens_approx,
+                false, // escalated
+                0,     // fast_ms
+                None,  // slow_ms
+                !related.is_empty() || ctx.full_file_readonly.is_some(),
+                0,             // body_len
+                String::new(), // body_markdown
+                &tgt.preview,
+            ));
+            // Skip the rest of the loop: no LLM route, no parsing, no drafts.
+            continue;
+        }
 
         // --- Pre-routing decision BEFORE running FAST ---
         let tk_hint = match &tgt.target {
@@ -433,7 +556,9 @@ pub async fn build_draft_comments(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(12);
-    dedup_drafts_llm_async(&mut drafts, &router, dedup_budget).await;
+    if !PROMPT_BUILD_ONLY {
+        dedup_drafts_llm_async(&mut drafts, &router, dedup_budget).await;
+    }
 
     let elapsed = t0.elapsed().as_millis();
     let escalated_total = used_slow;
@@ -674,38 +799,6 @@ fn make_report_row(
         body_len,
         body_markdown,
         preview: preview.to_string(),
-    }
-}
-
-fn first_title(md: &str) -> String {
-    md.lines()
-        .next()
-        .unwrap_or("")
-        .trim_matches('*')
-        .trim()
-        .to_string()
-}
-
-fn first_path(d: &DraftComment) -> String {
-    match &d.target {
-        TargetRef::Line { path, .. }
-        | TargetRef::Range { path, .. }
-        | TargetRef::Symbol { path, .. }
-        | TargetRef::File { path } => path.clone(),
-        TargetRef::Global => String::new(),
-    }
-}
-
-fn first_anchor(d: &DraftComment) -> Option<(usize, usize)> {
-    match &d.target {
-        TargetRef::Line { line, .. } => Some((*line, *line)),
-        TargetRef::Range {
-            start_line,
-            end_line,
-            ..
-        } => Some((*start_line, *end_line)),
-        TargetRef::Symbol { decl_line, .. } => Some((*decl_line, *decl_line)),
-        _ => None,
     }
 }
 

@@ -88,6 +88,58 @@ pub struct SymbolRecord {
     pub body_span: Span,
 }
 
+/// Minimal "document" returned from RAG-style searches.
+/// This is what `preq::fetch_context` expects to turn into `RagHit`.
+#[derive(Debug, Clone)]
+pub struct RagDoc {
+    pub path: String,
+    pub language: String,
+    pub snippet: String,
+    /// Optional, normalized symbol name (helps dedup/why).
+    pub symbol: Option<String>,
+}
+
+fn kind_label(k: SymbolKind) -> &'static str {
+    match k {
+        SymbolKind::Class => "class",
+        SymbolKind::Method => "method",
+        SymbolKind::Function => "function",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Impl => "impl",
+        SymbolKind::Field => "field",
+        SymbolKind::Variable => "variable",
+        SymbolKind::Mixin => "mixin",
+        SymbolKind::Extension => "extension",
+        SymbolKind::TypeAlias => "typealias",
+        SymbolKind::Other => "symbol",
+    }
+}
+
+/// Render a compact, human-friendly snippet for prompts/logs.
+/// We avoid loading full file contents (keeps it cheap).
+fn synth_snippet(s: &SymbolRecord) -> String {
+    let lines = s
+        .body_span
+        .lines
+        .map(|l| format!("{}..{}", l.start_line, l.end_line))
+        .unwrap_or_else(|| "-".into());
+    format!(
+        "{} {}  (lines: {})\nfile: {}\n// synthetic header only",
+        kind_label(s.kind),
+        s.name,
+        lines,
+        s.path
+    )
+}
+
+/// Case-insensitive "contains" helper.
+fn contains_ci(hay: &str, needle: &str) -> bool {
+    hay.to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
 /// In-memory index of symbols discovered in changed files (delta index).
 #[derive(Debug, Clone)]
 pub struct SymbolIndex {
@@ -102,6 +154,108 @@ pub struct SymbolIndex {
 }
 
 impl SymbolIndex {
+    /// Search by **symbol name** (highest precision here).
+    pub async fn search_symbol(&self, needle: &str) -> MrResult<Vec<RagDoc>> {
+        debug!("rag_shim.search_symbol: needle={}", needle);
+        let mut out = Vec::new();
+
+        // Exact bucket
+        if let Some(indices) = self.by_name.get(needle) {
+            for &i in indices {
+                let s = &self.symbols[i];
+                out.push(RagDoc {
+                    path: s.path.clone(),
+                    language: format!("{:?}", s.language),
+                    snippet: synth_snippet(s),
+                    symbol: Some(s.name.clone()),
+                });
+            }
+        }
+
+        // Fuzzy fallback (contains, case-insensitive)
+        if out.is_empty() {
+            for (name, indices) in &self.by_name {
+                if contains_ci(name, needle) {
+                    for &i in indices {
+                        let s = &self.symbols[i];
+                        out.push(RagDoc {
+                            path: s.path.clone(),
+                            language: format!("{:?}", s.language),
+                            snippet: synth_snippet(s),
+                            symbol: Some(s.name.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        debug!("rag_shim.search_symbol: hits={}", out.len());
+        Ok(out)
+    }
+
+    /// Search by **path pattern** (substring/prefix match).
+    pub async fn search_path_like(&self, pattern: &str) -> MrResult<Vec<RagDoc>> {
+        debug!("rag_shim.search_path_like: pattern={}", pattern);
+        let mut out = Vec::new();
+
+        for (path, indices) in &self.by_path {
+            if contains_ci(path, pattern) {
+                // Take a few symbols per path to keep prompt light.
+                for &i in indices.iter().take(6) {
+                    let s = &self.symbols[i];
+                    out.push(RagDoc {
+                        path: s.path.clone(),
+                        language: format!("{:?}", s.language),
+                        snippet: synth_snippet(s),
+                        symbol: Some(s.name.clone()),
+                    });
+                }
+            }
+        }
+
+        debug!("rag_shim.search_path_like: hits={}", out.len());
+        Ok(out)
+    }
+
+    /// Fallback "text" search across name + path (cheap; no file bodies).
+    pub async fn search_text(&self, q: &str) -> MrResult<Vec<RagDoc>> {
+        debug!("rag_shim.search_text: q={}", q);
+        let mut out = Vec::new();
+
+        // 1) Name-first
+        for (name, indices) in &self.by_name {
+            if contains_ci(name, q) {
+                for &i in indices {
+                    let s = &self.symbols[i];
+                    out.push(RagDoc {
+                        path: s.path.clone(),
+                        language: format!("{:?}", s.language),
+                        snippet: synth_snippet(s),
+                        symbol: Some(s.name.clone()),
+                    });
+                }
+            }
+        }
+
+        // 2) Path fallback
+        for (path, indices) in &self.by_path {
+            if contains_ci(path, q) {
+                for &i in indices {
+                    let s = &self.symbols[i];
+                    out.push(RagDoc {
+                        path: s.path.clone(),
+                        language: format!("{:?}", s.language),
+                        snippet: synth_snippet(s),
+                        symbol: Some(s.name.clone()),
+                    });
+                }
+            }
+        }
+
+        debug!("rag_shim.search_text: hits={}", out.len());
+        Ok(out)
+    }
+
     /// Returns indices of all symbols defined in the given file path.
     pub fn symbols_in_file<S: AsRef<str>>(&self, path: S) -> &[usize] {
         static EMPTY: [usize; 0] = [];

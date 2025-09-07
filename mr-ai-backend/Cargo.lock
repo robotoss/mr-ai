@@ -1383,6 +1383,7 @@ dependencies = [
  "chrono",
  "codegraph-prep",
  "contextor",
+ "lazy_static",
  "regex",
  "reqwest",
  "serde",

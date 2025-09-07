@@ -81,17 +81,23 @@ pub async fn retrieve_with_opts(
     let items = expanded
         .into_iter()
         .map(|h| {
-            let body = if let Some(s) = h.snippet {
-                rag_store::record::clamp_snippet(&s, 800, 20)
+            let snippet = if h.snippet.is_some() {
+                Some(h.snippet.unwrap().clone())
+                // Some(rag_store::record::clamp_snippet(
+                //     &h.snippet.unwrap(),
+                //     800,
+                //     100,
+                // ))
             } else {
-                rag_store::record::clamp_snippet(&h.text, 800, 20)
+                None
             };
             UsedChunk {
                 score: h.score,
                 source: h.source,
                 fqn: h.fqn,
                 kind: h.kind,
-                text: body,
+                snippet: snippet,
+                text: rag_store::record::clamp_snippet(&h.text, 800, 100),
             }
         })
         .collect();

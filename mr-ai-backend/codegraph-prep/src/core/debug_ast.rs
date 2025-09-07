@@ -17,7 +17,7 @@ use tree_sitter::{Node, Parser, Tree};
 use crate::model::language::LanguageKind;
 
 /// Maximum snippet size when dumping code fragments.
-const MAX_SNIPPET: usize = 100;
+const MAX_SNIPPET: usize = 700;
 
 /// Entry point: check if the file matches `AST_TARGET_SUFFIX`, and if so,
 /// parse and dump its AST.

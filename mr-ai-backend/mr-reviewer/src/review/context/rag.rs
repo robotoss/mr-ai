@@ -1,8 +1,8 @@
 //! Read-only related context via RAG with a small in-process memo.
 //! This version injects compact AST facts (from SymbolIndex) keyed by path + anchor line.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use contextor::{RetrieveOptions, retrieve_with_opts};
 use tracing::debug;
@@ -10,126 +10,108 @@ use tracing::debug;
 use crate::errors::Error;
 use crate::lang::SymbolIndex;
 use crate::map::{MappedTarget, TargetRef};
+use crate::review::{RelatedBlock, target_path};
 
-#[derive(Default)]
-struct MemoStore {
-    map: HashMap<String, String>,
-    order: VecDeque<String>,
-    cap: usize,
-}
-impl MemoStore {
-    fn new() -> Self {
-        let cap = std::env::var("RAG_MEMO_CAP")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(64);
-        Self {
-            map: HashMap::new(),
-            order: VecDeque::new(),
-            cap,
-        }
-    }
-    fn get(&self, k: &str) -> Option<String> {
-        self.map.get(k).cloned()
-    }
-    fn put(&mut self, k: String, v: String) {
-        if self.map.contains_key(&k) {
-            self.map.insert(k, v);
-            return;
-        }
-        if self.order.len() >= self.cap {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
-            }
-        }
-        self.order.push_back(k.clone());
-        self.map.insert(k, v);
-    }
-}
-static RELATED_MEMO_CELL: OnceLock<Mutex<MemoStore>> = OnceLock::new();
-fn related_memo() -> &'static Mutex<MemoStore> {
-    RELATED_MEMO_CELL.get_or_init(|| Mutex::new(MemoStore::new()))
+// ------------- simple in-process memo -------------
+lazy_static::lazy_static! {
+    /// Global memo cache for related context lookups.
+    static ref RELATED_MEMO: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
 }
 
-/// Fetch globally-related context via RAG. Memoized per path.
-/// If import-like analysis is in play, the full-file read-only context often suffices.
+/// Fetch globally-related context via RAG as structured blocks.
+///
+/// Returns up to `take_per_target` relevant chunks (based on score/threshold),
+/// and also adds compact AST facts for the current file/anchor as a separate block.
+///
+/// Behavior is configured via environment variables:
+/// - `RAG_DISABLE` = "true" → completely disable RAG (returns an empty list).
+/// - `RAG_TOP_K` (u64) — how many candidates to return from the search engine (default: 8).
+/// - `RAG_TAKE_PER_TARGET` (usize) — how many of the best results to include in the output (default: 3).
+/// - `RAG_MIN_SCORE` (f32) — cutoff threshold for score (default: 0.50).
 pub async fn fetch_related_context(
     symbols: &SymbolIndex,
     tgt: &MappedTarget,
-) -> Result<String, Error> {
+) -> Result<Vec<RelatedBlock>, Error> {
     let disabled = std::env::var("RAG_DISABLE").unwrap_or_else(|_| "false".into()) == "true";
     if disabled {
         debug!("step4: RAG disabled via env");
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
 
-    let path = match &tgt.target {
-        TargetRef::Line { path, .. }
-        | TargetRef::Range { path, .. }
-        | TargetRef::Symbol { path, .. }
-        | TargetRef::File { path } => path.clone(),
-        TargetRef::Global => String::new(),
+    let Some(path) = target_path(&tgt.target).map(|s| s.to_string()) else {
+        // Global targets: nothing to attach from code index.
+        return Ok(Vec::new());
     };
-    if path.is_empty() {
-        return Ok(String::new());
+
+    // Build a compact query: start from preview, backoff to path-based term if needed.
+    let mut query = tgt.preview.trim().to_string();
+    if query.len() < 24 {
+        query = format!("context for {}", path);
     }
 
-    // Include anchor line in the memo key so facts are specific to the diff location.
-    let anchor_line = target_anchor_line(tgt);
-    let memo_key = format!("{}#{}", path, anchor_line.unwrap_or(0));
-
-    if let Some(hit) = related_memo().lock().unwrap().get(&path) {
-        debug!("step4: related context memo hit path={}", path);
-        return Ok(hit);
-    }
-
-    let mut query = tgt.preview.clone();
-    if query.len() < 32 {
-        query.push_str(" code review context");
-    }
-
+    // Tuning knobs from env.
     let top_k = std::env::var("RAG_TOP_K")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(8);
     let take_per_target = std::env::var("RAG_TAKE_PER_TARGET")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(3);
     let min_score = std::env::var("RAG_MIN_SCORE")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.50_f32);
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.50);
 
+    debug!(
+        "step4: RAG query start path={} top_k={} take={} min_score={}",
+        path, top_k, take_per_target, min_score
+    );
+
+    // Retrieve candidates from your vector index.
     let opts = RetrieveOptions {
-        top_k: top_k as u64,
+        top_k,
         ..Default::default()
     };
-    let mut chunks = retrieve_with_opts(&query, opts)
-        .await
-        .map_err(|e| Error::Validation(format!("contextor retrieve: {}", e)))?;
 
-    chunks.retain(|c| c.score >= min_score);
-    let mut related = chunks
-        .into_iter()
-        .take(take_per_target)
-        .map(|c| c.text)
-        .collect::<Vec<_>>()
-        .join("\n---\n");
+    let mut out: Vec<RelatedBlock> = Vec::new();
 
-    // Append compact AST facts for this path + anchor (language-agnostic).
-    if let Some(facts) = ast_facts_for(symbols, &path, anchor_line) {
-        if !related.trim().is_empty() {
-            related.push_str("\n---\n");
+    // Note: if your `retrieve_with_opts` can return 'thinking' fields,
+    // it should be stripped by that function already. We still only read .text/path/lang/score here.
+    match retrieve_with_opts(&query, opts).await {
+        Ok(mut chunks) => {
+            chunks.retain(|c| c.score >= min_score);
+            // Map candidates → RelatedBlock
+            for c in chunks.into_iter().take(take_per_target) {
+                if c.snippet.is_some() {
+                    out.push(RelatedBlock {
+                        path: c.source.clone().unwrap_or_else(|| "<unknown>".to_string()),
+                        language: "".to_string(),
+                        snippet: c.snippet.unwrap().clone(),
+                        why: Some(format!("RAG hit (score {:.2})", c.score)),
+                    });
+                }
+            }
         }
-        related.push_str(&facts);
+        Err(e) => {
+            // Non-fatal: just log and return only AST facts below.
+            debug!("step4: RAG retrieve error: {}", e);
+        }
     }
 
-    related_memo()
-        .lock()
-        .unwrap()
-        .put(memo_key, related.clone());
-    Ok(related)
+    // Append compact AST facts for this path + anchor (language-agnostic).
+    let anchor_line = target_anchor_line(tgt);
+    if let Some(facts) = ast_facts_for(symbols, &path, anchor_line) {
+        out.push(RelatedBlock {
+            path: "AST FACTS (read-only; from global index)".to_string(),
+            language: "".to_string(),
+            snippet: facts,
+            why: Some("Symbol/anchor facts for this file".to_string()),
+        });
+    }
+
+    debug!("step4: RAG related blocks ready → {}", out.len());
+    Ok(out)
 }
 
 /// Derive a stable anchor line from the target for AST lookup.

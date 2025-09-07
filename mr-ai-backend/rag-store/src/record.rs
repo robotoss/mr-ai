@@ -86,7 +86,7 @@ impl fmt::Display for RagHit {
         writeln!(f, "  text    : {}", self.text)?;
 
         if let Some(snippet) = &self.snippet {
-            let shown = clamp_snippet(snippet, 600, 20);
+            let shown = clamp_snippet(snippet, 800, 100);
             if !shown.is_empty() {
                 writeln!(f, "  snippet :\n    {}", shown.replace('\n', "\n    "))?;
             }

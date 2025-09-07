@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use super::context::PrimaryCtx;
 use super::context::types::CodeFacts;
 use crate::map::MappedTarget;
+use crate::review::RelatedBlock;
 use crate::review::context::types::STRICT_OUTPUT_SPEC;
 
 /// Build a strict prompt for the FAST model (single-pass).
@@ -29,7 +30,11 @@ use crate::review::context::types::STRICT_OUTPUT_SPEC;
 /// - RELATED as read-only extra context (BASE/external),
 /// - Deterministic, machine-parseable output format,
 /// - Display of CodeFacts with enclosing + one chunk {index/total}.
-pub fn build_strict_prompt(tgt: &MappedTarget, ctx: &PrimaryCtx, related: &str) -> String {
+pub fn build_strict_prompt(
+    tgt: &MappedTarget,
+    ctx: &PrimaryCtx,
+    related: &[RelatedBlock],
+) -> String {
     let mut s = String::new();
 
     // Role & guardrails
@@ -71,7 +76,7 @@ pub fn build_strict_prompt(tgt: &MappedTarget, ctx: &PrimaryCtx, related: &str) 
     // RELATED (BASE/external; optional)
     if !related.is_empty() {
         s.push_str("\nRELATED (read-only; BASE/external):\n```code\n");
-        s.push_str(&sanitize_fence(related));
+        s.push_str(&sanitize_fence(&format_related_for_log(related)));
         s.push_str("\n```\n");
     }
 
@@ -189,7 +194,7 @@ pub fn build_refine_prompt(
     maybe_prev: Option<&crate::review::policy::ParsedFinding>,
     tgt: &MappedTarget,
     ctx: &PrimaryCtx,
-    related: &str,
+    related: &[RelatedBlock],
 ) -> String {
     let mut s = String::new();
     s.push_str("Refine the draft below while preserving the STRICT format.\n");
@@ -395,4 +400,26 @@ fn read_dir_concat(dir: &Path) -> Option<String> {
     } else {
         Some(buf)
     }
+}
+
+/// Helper: pretty dump RELATED blocks into one debug string (for logs/telemetry).
+pub fn format_related_for_log(blocks: &[RelatedBlock]) -> String {
+    let mut s = String::new();
+    for (i, b) in blocks.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            s,
+            "-- RELATED[{i}] path={} lang={} why={}",
+            b.path,
+            if b.language.is_empty() {
+                "-"
+            } else {
+                &b.language
+            },
+            b.why.as_deref().unwrap_or("-")
+        );
+        let _ = writeln!(s, "{}", b.snippet);
+        let _ = writeln!(s, "-----");
+    }
+    s
 }
