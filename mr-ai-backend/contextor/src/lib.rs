@@ -5,19 +5,17 @@
 //! neighbors from the same source/FQN, builds a compact prompt, calls Ollama,
 //! and returns the model answer.
 
+mod api_types;
 mod cfg;
 mod error;
 mod llm;
 mod progress;
 mod prompt;
+mod retrieve;
 mod select;
 
-mod api_types;
-
 pub use api_types::{AskOptions, QaAnswer, UsedChunk};
-
 pub use error::ContextorError;
-
 pub use progress::{IndicatifProgress, NoopProgress, Progress};
 
 use cfg::ContextorConfig;
@@ -25,6 +23,8 @@ use rag_store::{
     RagQuery, RagStore,
     embed::ollama::{OllamaConfig, OllamaEmbedder},
 };
+
+pub use retrieve::{RetrieveOptions, retrieve_with_opts};
 
 /// Ask the LLM with RAG augmentation and get a final answer as plain text.
 ///
@@ -139,17 +139,22 @@ pub async fn ask_with_opts(question: &str, opts: AskOptions) -> Result<QaAnswer,
         .into_iter()
         .map(|h| {
             // Prefer snippet if present, otherwise `text`. Clamp for transport/UI.
-            let body = if let Some(s) = h.snippet {
-                rag_store::record::clamp_snippet(&s, 800, 20)
+            let snippet = if h.snippet.is_some() {
+                Some(rag_store::record::clamp_snippet(
+                    &h.snippet.unwrap(),
+                    800,
+                    20,
+                ))
             } else {
-                rag_store::record::clamp_snippet(&h.text, 800, 20)
+                None
             };
             api_types::UsedChunk {
                 score: h.score,
                 source: h.source,
                 fqn: h.fqn,
                 kind: h.kind,
-                text: body,
+                snippet: snippet,
+                text: rag_store::record::clamp_snippet(&h.text, 800, 20),
             }
         })
         .collect();

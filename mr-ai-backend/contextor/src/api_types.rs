@@ -40,6 +40,7 @@ pub struct UsedChunk {
     pub source: Option<String>,
     pub fqn: Option<String>,
     pub kind: Option<String>,
+    pub snippet: Option<String>,
     pub text: String,
 }
 
