@@ -11,19 +11,20 @@
 //! Position requires `head_sha` + `base_sha` + (usually) `start_sha` from MR meta.
 //!
 //! Notable fixes & improvements:
-//! - **URL-encodes** `project` segments in all endpoints; non-encoded group/project
-//!   was a common cause of 404/400 and “not posted” issues.
-//! - Posts the **full** markdown body (not just the title) and appends a hidden marker,
-//!   so patches and details are preserved.
-//! - Loads existing markers from both **discussions** and **notes** for robust idempotency.
-//! - Omits `start_sha` field if it is missing, improving compatibility.
+//! - URL-encodes `project` segments in all endpoints.
+//! - Posts the full markdown body and appends a hidden idempotency marker.
+//! - Loads existing markers from both discussions and notes.
+//! - Supports both `new_*` and `old_*` inline positions (with auto-retry).
+//! - Passes `start_sha` when available.
+//! - Applies robust HTTP timeouts and limited concurrency.
+//! - Retries transient errors (5xx/429) with exponential backoff honoring `Retry-After`.
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use regex::Regex;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER, USER_AGENT};
 use tokio::sync::Semaphore;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::errors::{Error, MrResult};
 use crate::git_providers::ChangeRequestId;
@@ -39,7 +40,26 @@ use urlencoding::encode;
 /// Example: `<!-- mrai:key=packages/a.dart:42|line;hash=abcdef;ver=1 -->`
 const _MARKER_PREFIX: &str = "<!-- mrai:key="; // kept for clarity
 
+/// Maximum attempts for transient failures (HTTP 5xx / 429).
+const MAX_RETRIES: usize = 3;
+
+/// Initial backoff for transient failures.
+const INITIAL_BACKOFF_MS: u64 = 400;
+
 /// Publish all drafts to GitLab.
+///
+/// Loads existing markers (from both discussions and notes) to enforce idempotency,
+/// then publishes each draft with bounded concurrency and robust error handling.
+///
+/// # Parameters
+/// - `cfg`: Provider configuration (token, base API).
+/// - `id`: MR identifier (project path or id, IID).
+/// - `plan`: Review plan (used for MR diff refs).
+/// - `drafts`: Draft comments to publish.
+/// - `pcfg`: Publish configuration (dry-run, concurrency, etc.).
+///
+/// # Returns
+/// List of `PublishedComment` describing what was performed or skipped.
 pub async fn publish_gitlab(
     cfg: &crate::git_providers::ProviderConfig,
     id: &ChangeRequestId,
@@ -47,7 +67,6 @@ pub async fn publish_gitlab(
     drafts: &[DraftComment],
     pcfg: &PublishConfig,
 ) -> MrResult<Vec<PublishedComment>> {
-    // Prepare HTTP client
     let http = build_http_client()?;
     let headers = build_gitlab_headers(&cfg.token)?;
     let base = cfg.base_api.trim_end_matches('/');
@@ -66,7 +85,7 @@ pub async fn publish_gitlab(
         existing.len()
     );
 
-    // Extract SHAs for inline comment positions
+    // Extract SHAs for inline comment positions (pass start_sha when available)
     let head = plan.bundle.meta.diff_refs.head_sha.clone();
     let base_sha = plan.bundle.meta.diff_refs.base_sha.clone();
     let start_sha_opt = plan.bundle.meta.diff_refs.start_sha.clone();
@@ -74,9 +93,8 @@ pub async fn publish_gitlab(
     // Concurrency guard
     let sem = Arc::new(Semaphore::new(pcfg.max_concurrency.max(1)));
 
-    let mut futs = Vec::new();
-    for d in drafts {
-        // make everything owned for 'static future
+    let mut futs = Vec::with_capacity(drafts.len());
+    for d in drafts.iter().cloned() {
         let http = http.clone();
         let headers = headers.clone();
         let base = base.to_string();
@@ -88,7 +106,6 @@ pub async fn publish_gitlab(
         let allow_edit = pcfg.allow_edit;
         let existing = existing.clone();
         let sem_cloned = sem.clone();
-        let draft = d.clone();
 
         futs.push(tokio::spawn(async move {
             let _permit = sem_cloned.acquire_owned().await.unwrap();
@@ -97,7 +114,7 @@ pub async fn publish_gitlab(
                 &headers,
                 &base,
                 &id,
-                &draft,
+                &d,
                 &head,
                 &base_sha,
                 start_sha_opt.as_deref(),
@@ -120,6 +137,9 @@ pub async fn publish_gitlab(
 }
 
 /// Publish one draft, respecting idempotency and dry-run.
+///
+/// Decides between inline and general note. Inline posting first tries `new_*` side,
+/// and on characteristic `line_code` validation errors automatically retries as `old_*`.
 async fn publish_one(
     http: &reqwest::Client,
     headers: &HeaderMap,
@@ -133,9 +153,8 @@ async fn publish_one(
     _allow_edit: bool,
     existing: &HashSet<String>,
 ) -> MrResult<PublishedComment> {
-    let (marker, key, _line_opt) = make_marker_and_key(draft);
+    let (marker, key, _) = make_marker_and_key(draft);
 
-    // Use the full body markdown and append our hidden marker.
     let body = if draft.body_markdown.trim().is_empty() {
         format!("Review note\n\n{}", marker)
     } else {
@@ -155,7 +174,7 @@ async fn publish_one(
     }
 
     // Inline or general?
-    let res = match &draft.target {
+    match &draft.target {
         TargetRef::Line { path, line } => {
             publish_inline(
                 http,
@@ -175,7 +194,6 @@ async fn publish_one(
         TargetRef::Range {
             path, start_line, ..
         } => {
-            // GitLab inline position supports a single line. Use start_line.
             publish_inline(
                 http,
                 headers,
@@ -212,12 +230,17 @@ async fn publish_one(
         TargetRef::File { .. } | TargetRef::Global => {
             publish_general(http, headers, base_api, id, body, dry_run).await
         }
-    }?;
-
-    Ok(res)
+    }
 }
 
-/// Construct inline discussion body and POST to GitLab.
+/// Construct inline discussion and POST to GitLab with robust behavior.
+///
+/// Strategy:
+/// 1) Attempt as `new_*` side (line exists in head).
+/// 2) If GitLab rejects with a line_code-like error, retry as `old_*` side (line exists in base).
+///
+/// If both attempts fail with validation that implies an invalid position, consider
+/// falling back to a general note at the caller, if desired.
 async fn publish_inline(
     http: &reqwest::Client,
     headers: &HeaderMap,
@@ -238,44 +261,47 @@ async fn publish_inline(
         id.iid
     );
 
-    /// GitLab "text" position payload.
     #[derive(serde::Serialize)]
     struct Position<'a> {
+        /// Must be "text" for textual diffs.
         position_type: &'a str,
-        new_path: &'a str,
-        new_line: usize,
+        /// Old (base) side. Provide either the old_* pair or the new_* pair.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        old_path: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        old_line: Option<usize>,
+        /// New (head) side. Provide either the old_* pair or the new_* pair.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        new_path: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        new_line: Option<usize>,
+        /// MR diff refs.
         head_sha: &'a str,
         base_sha: &'a str,
+        /// Some GitLab versions require start_sha for valid positions.
         #[serde(skip_serializing_if = "Option::is_none")]
         start_sha: Option<&'a str>,
     }
+
     #[derive(serde::Serialize)]
     struct Req<'a> {
         body: &'a str,
         position: Position<'a>,
     }
 
-    let req = Req {
-        body: &body,
-        position: Position {
-            position_type: "text",
-            new_path: path,
-            new_line: line,
-            head_sha,
-            base_sha,
-            start_sha: start_sha_opt,
-        },
-    };
+    // GitLab expects 1-based line numbers.
+    let line_1b = line.max(1);
 
     debug!(
-        "step5: inline POST path={} line={} dry_run={}",
-        path, line, dry_run
+        "step5: inline POST path={} line={} (1b={}) dry_run={}",
+        path, line, line_1b, dry_run
     );
+
     if dry_run {
         return Ok(PublishedComment {
             target: TargetRef::Line {
                 path: path.to_string(),
-                line,
+                line: line_1b,
             },
             performed: false,
             created_new: true,
@@ -284,22 +310,72 @@ async fn publish_inline(
         });
     }
 
-    let resp = http
-        .post(&url)
-        .headers(headers.clone())
-        .json(&req)
-        .send()
-        .await?;
+    // 1) Try as new_* side.
+    let req_new = Req {
+        body: &body,
+        position: Position {
+            position_type: "text",
+            old_path: None,
+            old_line: None,
+            new_path: Some(path),
+            new_line: Some(line_1b),
+            head_sha,
+            base_sha,
+            start_sha: start_sha_opt,
+        },
+    };
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.ok();
-        return Err(Error::Validation(format!(
-            "gitlab inline post failed: status={} body={:?}",
-            status, text
-        )));
+    match post_with_retries(http, headers, &url, &req_new).await {
+        Ok(resp) => {
+            #[derive(serde::Deserialize)]
+            struct DiscussionResp {
+                id: String,
+            }
+            let disc: DiscussionResp = resp
+                .json()
+                .await
+                .unwrap_or(DiscussionResp { id: String::new() });
+            return Ok(PublishedComment {
+                target: TargetRef::Line {
+                    path: path.to_string(),
+                    line: line_1b,
+                },
+                performed: true,
+                created_new: true,
+                skipped_reason: None,
+                provider_ids: Some(ProviderIds {
+                    discussion_id: Some(disc.id),
+                    note_id: None,
+                }),
+            });
+        }
+        Err(Error::Validation(msg)) => {
+            // Characteristic GitLab validation for invalid positions returns an error mentioning line_code.
+            let should_retry_old = looks_like_line_code_error(&msg);
+            if !should_retry_old {
+                return Err(Error::Validation(msg));
+            }
+            warn!("step5: retry inline as old_* due to validation: {}", msg);
+        }
+        Err(e) => return Err(e),
     }
 
+    // 2) Retry as old_* side (removed/modified lines on base).
+    let req_old = Req {
+        body: &body,
+        position: Position {
+            position_type: "text",
+            old_path: Some(path),
+            old_line: Some(line_1b),
+            new_path: None,
+            new_line: None,
+            head_sha,
+            base_sha,
+            start_sha: start_sha_opt,
+        },
+    };
+
+    let resp = post_with_retries(http, headers, &url, &req_old).await?;
     #[derive(serde::Deserialize)]
     struct DiscussionResp {
         id: String,
@@ -312,7 +388,7 @@ async fn publish_inline(
     Ok(PublishedComment {
         target: TargetRef::Line {
             path: path.to_string(),
-            line,
+            line: line_1b,
         },
         performed: true,
         created_new: true,
@@ -324,7 +400,7 @@ async fn publish_inline(
     })
 }
 
-/// General MR note (file/global).
+/// Create a general MR note (file/global).
 async fn publish_general(
     http: &reqwest::Client,
     headers: &HeaderMap,
@@ -356,21 +432,7 @@ async fn publish_general(
         });
     }
 
-    let resp = http
-        .post(&url)
-        .headers(headers.clone())
-        .json(&Req { body: &body })
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.ok();
-        return Err(Error::Validation(format!(
-            "gitlab note post failed: status={} body={:?}",
-            status, text
-        )));
-    }
+    let resp = post_with_retries(http, headers, &url, &Req { body: &body }).await?;
 
     #[derive(serde::Deserialize)]
     struct NoteResp {
@@ -412,16 +474,7 @@ async fn load_existing_markers_from_discussions(
         notes: Vec<Note>,
     }
 
-    let resp = http.get(&url).headers(headers.clone()).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.ok();
-        return Err(Error::Validation(format!(
-            "gitlab list discussions failed: status={} body={:?}",
-            status, text
-        )));
-    }
-
+    let resp = get_with_retries(http, headers, &url).await?;
     let discussions: Vec<Discussion> = resp.json().await.unwrap_or_default();
     Ok(extract_markers_from_bodies(
         discussions
@@ -449,23 +502,18 @@ async fn load_existing_markers_from_notes(
         body: Option<String>,
     }
 
-    let resp = http.get(&url).headers(headers.clone()).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.ok();
-        return Err(Error::Validation(format!(
-            "gitlab list notes failed: status={} body={:?}",
-            status, text
-        )));
-    }
-
+    let resp = get_with_retries(http, headers, &url).await?;
     let notes: Vec<Note> = resp.json().await.unwrap_or_default();
     Ok(extract_markers_from_bodies(
         notes.into_iter().filter_map(|n| n.body).collect(),
     ))
 }
 
-/// Extracts idempotency markers from a list of HTML/Markdown bodies.
+/// Extract idempotency markers from a list of HTML/Markdown bodies.
+///
+/// Marker format: `<!-- mrai:key=<key>;hash=<hex>;ver=<int> -->`
+///
+/// Returns a set of `<key>#<hash>` strings used for duplicate detection.
 fn extract_markers_from_bodies(bodies: Vec<String>) -> HashSet<String> {
     let mut set = HashSet::new();
     let re = Regex::new(r"<!--\s*mrai:key=([^;>]+);hash=([0-9a-f]+);ver=\d+\s*-->").unwrap();
@@ -479,10 +527,10 @@ fn extract_markers_from_bodies(bodies: Vec<String>) -> HashSet<String> {
     set
 }
 
-/// A single place to build the *idempotency key* + marker string.
+/// Build the idempotency key and marker string for a draft.
 ///
-/// key format: "<path>:<line_or_decl_or_start>|<kind>"
-/// - File/Global use "global" or "file:<path>"
+/// Key format: `<path>:<line_or_decl_or_start>|<kind>`
+/// - File/Global use "file" or "global".
 fn make_marker_and_key(d: &DraftComment) -> (String, String, Option<usize>) {
     let (path, line_opt, kind) = match &d.target {
         TargetRef::Line { path, line } => (path.clone(), Some(*line), "line"),
@@ -500,7 +548,6 @@ fn make_marker_and_key(d: &DraftComment) -> (String, String, Option<usize>) {
         .map(|l| l.to_string())
         .unwrap_or_else(|| "-".into());
     let key = format!("{}:{}|{}", path, line_key, kind);
-    // embed also snippet_hash to key for ultra-idempotency
     let full_key = format!("{}#{}", key, d.snippet_hash);
 
     let marker = format!("<!-- mrai:key={};hash={};ver=1 -->", key, d.snippet_hash);
@@ -508,6 +555,7 @@ fn make_marker_and_key(d: &DraftComment) -> (String, String, Option<usize>) {
     (marker, full_key, line_opt)
 }
 
+/// Build a tuned HTTP client with sane timeouts and pooling.
 fn build_http_client() -> MrResult<reqwest::Client> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -518,15 +566,123 @@ fn build_http_client() -> MrResult<reqwest::Client> {
     Ok(client)
 }
 
+/// Build GitLab headers, including Private Token.
 fn build_gitlab_headers(token: &str) -> MrResult<HeaderMap> {
     let mut h = HeaderMap::new();
     h.insert(USER_AGENT, HeaderValue::from_static("mr-reviewer/1.0"));
     h.insert(ACCEPT, HeaderValue::from_static("application/json"));
     h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    // GitLab Private Token header:
     h.insert(
         "PRIVATE-TOKEN",
         HeaderValue::from_str(token).map_err(|e| Error::Validation(format!("bad token: {e}")))?,
     );
     Ok(h)
+}
+
+/// Returns true if the given error message looks like a GitLab invalid `line_code` validation.
+fn looks_like_line_code_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("line_code")
+        || m.contains("must be a valid line code")
+        || m.contains("can't be blank")
+}
+
+/// POST with retries for transient failures; returns non-success as Validation error.
+///
+/// - Retries on 429/5xx with exponential backoff.
+/// - Honors `Retry-After` header when present.
+/// - For non-retriable statuses, returns `Validation` to bubble up API details.
+async fn post_with_retries<T: serde::Serialize>(
+    http: &reqwest::Client,
+    headers: &HeaderMap,
+    url: &str,
+    body: &T,
+) -> MrResult<reqwest::Response> {
+    request_with_retries(http, headers, |c| c.post(url).json(body)).await
+}
+
+/// GET with retries for transient failures.
+async fn get_with_retries(
+    http: &reqwest::Client,
+    headers: &HeaderMap,
+    url: &str,
+) -> MrResult<reqwest::Response> {
+    request_with_retries(http, headers, |c| c.get(url)).await
+}
+
+/// Shared retry helper for reqwest requests.
+///
+/// Accepts a closure that builds a `RequestBuilder` (e.g., POST with JSON or GET),
+/// executes it with retries on 429/5xx, and returns the final `Response` on success.
+async fn request_with_retries(
+    http: &reqwest::Client,
+    headers: &HeaderMap,
+    mut build: impl FnMut(&reqwest::Client) -> reqwest::RequestBuilder,
+) -> MrResult<reqwest::Response> {
+    let mut attempt = 0;
+    let mut backoff_ms = INITIAL_BACKOFF_MS;
+
+    loop {
+        attempt += 1;
+        let req = build(http).headers(headers.clone());
+        let resp = req.send().await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => return Ok(r),
+            Ok(r) => {
+                let status = r.status();
+                // Clone headers before consuming the response body
+                let headers_snapshot = r.headers().clone();
+
+                // Body can only be consumed once
+                let body = r.text().await.ok();
+
+                if status.as_u16() == 429 || status.is_server_error() {
+                    if attempt >= MAX_RETRIES {
+                        return Err(Error::Validation(format!(
+                            "gitlab request failed after retries: status={} body={:?}",
+                            status, body
+                        )));
+                    }
+
+                    // Use header snapshot (safe even after consuming body)
+                    let retry_after_ms = headers_snapshot
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(|secs| secs * 1_000);
+
+                    let sleep_ms = retry_after_ms.unwrap_or(backoff_ms);
+                    warn!(
+                        "gitlab transient status={} attempt={}/{} backoff={}ms body={:?}",
+                        status, attempt, MAX_RETRIES, sleep_ms, body
+                    );
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    backoff_ms = (backoff_ms.saturating_mul(2)).min(8_000);
+                    continue;
+                }
+
+                return Err(Error::Validation(format!(
+                    "gitlab request failed: status={} body={:?}",
+                    status, body
+                )));
+            }
+            Err(e) => {
+                if attempt >= MAX_RETRIES {
+                    return Err(Error::Other(format!(
+                        "gitlab network error after retries: {e}"
+                    )));
+                }
+                tracing::warn!(
+                    "gitlab network error attempt={}/{} backoff={}ms err={}",
+                    attempt,
+                    MAX_RETRIES,
+                    backoff_ms,
+                    e
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(8_000);
+            }
+        }
+    }
 }
