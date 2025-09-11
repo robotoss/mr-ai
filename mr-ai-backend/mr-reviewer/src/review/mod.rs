@@ -155,7 +155,43 @@ pub async fn build_draft_comments(
         };
 
         // 1) Build context (HEAD/PRIMARY).
-        let ctx: PrimaryCtx = context::build_primary_ctx(&head_sha, tgt, &plan.symbols)?;
+        let ctx: PrimaryCtx = match context::build_primary_ctx(&head_sha, tgt, &plan.symbols) {
+            Ok(c) => c,
+            Err(e) => {
+                // Gracefully drop only this target when the HEAD file wasn't materialized.
+                // This avoids failing the whole MR run on dotfiles or deleted/renamed files.
+                let is_missing_mat = matches!(&e,
+                    crate::errors::Error::Validation(msg)
+                        if msg.starts_with("materialized file not found:")
+                );
+                if is_missing_mat {
+                    warn!(
+                        "step4: drop target due to missing materialized file: {:?}",
+                        e
+                    );
+                    rows.push(make_report_row(
+                        idx,
+                        &tgt.target,
+                        &tgt.snippet_hash,
+                        None,
+                        "Dropped",
+                        0.0,
+                        /* prompt_tokens_approx: */ 0,
+                        /* escalated: */ false,
+                        /* fast_ms: */ 0,
+                        /* slow_ms: */ None,
+                        /* related_present: */ false,
+                        /* body_len: */ 0,
+                        String::new(),
+                        &tgt.preview,
+                    ));
+                    continue;
+                } else {
+                    // Unknown/real error: propagate.
+                    return Err(e);
+                }
+            }
+        };
 
         // 1.1) Pre-question agent: ask a small LLM what extra context is needed, then fetch it from RAG.
         // Build minimal inputs (local window lines come from ctx.numbered_snippet filtered to allowed anchors).
