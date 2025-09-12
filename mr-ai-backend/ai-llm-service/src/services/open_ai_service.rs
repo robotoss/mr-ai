@@ -1,24 +1,22 @@
 //! OpenAI (ChatGPT) service for text generation and embeddings.
 //!
-//! This module provides a minimal, synchronous (non-streaming) client for the
-//! OpenAI REST API using a shared [`LlmModelConfig`] configuration.
+//! Minimal, synchronous (non-streaming) client around OpenAI REST API.
+//! Endpoints are derived from `LlmModelConfig::endpoint`:
+//! - POST {endpoint}/v1/chat/completions — chat completion (non-streaming)
+//! - POST {endpoint}/v1/embeddings       — embeddings retrieval
 //!
-//! Supported endpoints (built from `cfg.endpoint`):
-//! - `POST {endpoint}/v1/chat/completions` — chat completion (non-streaming)
-//! - `POST {endpoint}/v1/embeddings`       — embeddings retrieval
-//!
-//! Validation performed by the constructor:
-//! - `cfg.provider` must be [`LlmProvider::OpenAI`]
+//! Constructor validation:
+//! - `cfg.provider` must be `LlmProvider::OpenAI`
 //! - `cfg.api_key` must be present
-//! - `cfg.endpoint` must start with `http://` or `https://`
+//! - `cfg.endpoint` must start with http:// or https://
 //!
-//! Errors are normalized via the unified error types in `error_handler`.
+//! Errors are normalized via unified error types in `error_handler`.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, instrument};
+use tracing::{debug, error, info};
 
 use crate::{
     config::{llm_model_config::LlmModelConfig, llm_provider::LlmProvider},
@@ -66,7 +64,7 @@ impl OpenAiService {
             ProviderError::new(Provider::OpenAI, ProviderErrorKind::MissingApiKey)
         })?;
 
-        // 3) Endpoint must use http/https (allows custom gateways if needed).
+        // 3) Endpoint must use http/https.
         let endpoint = cfg.endpoint.trim();
         if endpoint.is_empty()
             || !(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
@@ -99,7 +97,6 @@ impl OpenAiService {
             header::HeaderValue::from_static("application/json"),
         );
 
-        // Modern reqwest enables compression via crate features; no explicit .gzip/.brotli calls.
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .default_headers(headers)
@@ -108,6 +105,14 @@ impl OpenAiService {
         let base = endpoint.trim_end_matches('/').to_string();
         let url_chat = format!("{}/v1/chat/completions", base);
         let url_embeddings = format!("{}/v1/embeddings", base);
+
+        info!(
+            provider = ?cfg.provider,
+            model = %cfg.model,
+            endpoint = %cfg.endpoint,
+            timeout_secs = cfg.timeout_secs.unwrap_or(60),
+            "OpenAiService initialized"
+        );
 
         Ok(Self {
             client,
@@ -119,30 +124,29 @@ impl OpenAiService {
 
     /// Performs a **non-streaming** chat completion request (`/v1/chat/completions`).
     ///
-    /// The request composes a minimal `messages` array:
-    /// - optional system message (if `system` is provided);
+    /// Minimal `messages` array:
+    /// - optional system message (if provided)
     /// - user message with `prompt`.
     ///
-    /// Mapped options from config:
-    /// - `model`       ← `self.cfg.model`
-    /// - `temperature` ← `self.cfg.temperature`
-    /// - `top_p`       ← `self.cfg.top_p`
-    /// - `max_tokens`  ← `self.cfg.max_tokens`
-    ///
-    /// # Parameters
-    /// - `prompt`: user content
-    /// - `system`: optional system instruction
+    /// Mapped options from config: `model`, `temperature`, `top_p`, `max_tokens`.
     ///
     /// # Errors
     /// - [`AiLlmError::Provider`] with `HttpStatus` for non-2xx responses
     /// - [`AiLlmError::HttpTransport`] for client/network failures
     /// - [`AiLlmError::Provider`] with `Decode` if the JSON cannot be parsed
     /// - [`AiLlmError::Provider`] with `EmptyChoices` if no choices are returned
-    #[instrument(skip_all, fields(model = %self.cfg.model))]
     pub async fn generate(&self, prompt: &str, system: Option<&str>) -> Result<String, AiLlmError> {
+        let started = Instant::now();
         let body = ChatCompletionRequest::from_cfg(&self.cfg, prompt, system);
 
-        debug!("POST {}", self.url_chat);
+        debug!(
+            model = %self.cfg.model,
+            endpoint = %self.cfg.endpoint,
+            prompt_len = prompt.len(),
+            has_system = system.is_some(),
+            "POST {}", self.url_chat
+        );
+
         let resp = self.client.post(&self.url_chat).json(&body).send().await?;
 
         if !resp.status().is_success() {
@@ -150,6 +154,17 @@ impl OpenAiService {
             let url = self.url_chat.clone();
             let text = resp.text().await.unwrap_or_default();
             let snippet = make_snippet(&text);
+
+            error!(
+                %status,
+                %url,
+                %snippet,
+                model = %self.cfg.model,
+                endpoint = %self.cfg.endpoint,
+                latency_ms = started.elapsed().as_millis(),
+                "OpenAI /v1/chat/completions returned non-success status"
+            );
+
             return Err(ProviderError::new(
                 Provider::OpenAI,
                 ProviderErrorKind::HttpStatus(HttpError {
@@ -161,14 +176,25 @@ impl OpenAiService {
             .into());
         }
 
-        let out: ChatCompletionResponse = resp.json().await.map_err(|e| {
-            ProviderError::new(
-                Provider::OpenAI,
-                ProviderErrorKind::Decode(format!(
-                    "serde error: {e}; expected `choices[0].message.content`"
-                )),
-            )
-        })?;
+        let out: ChatCompletionResponse = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    model = %self.cfg.model,
+                    endpoint = %self.cfg.endpoint,
+                    latency_ms = started.elapsed().as_millis(),
+                    "failed to decode /v1/chat/completions response"
+                );
+                return Err(ProviderError::new(
+                    Provider::OpenAI,
+                    ProviderErrorKind::Decode(format!(
+                        "serde error: {e}; expected `choices[0].message.content`"
+                    )),
+                )
+                .into());
+            }
+        };
 
         let content = out
             .choices
@@ -176,29 +202,39 @@ impl OpenAiService {
             .find_map(|c| c.message.content)
             .ok_or_else(|| ProviderError::new(Provider::OpenAI, ProviderErrorKind::EmptyChoices))?;
 
+        info!(
+            model = %self.cfg.model,
+            endpoint = %self.cfg.endpoint,
+            latency_ms = started.elapsed().as_millis(),
+            "chat completion completed"
+        );
+
         Ok(content)
     }
 
     /// Retrieves a single embeddings vector via `/v1/embeddings`.
     ///
-    /// By default uses `self.cfg.model`. If you need a different embeddings
-    /// model (e.g., `text-embedding-3-small`), configure it in `LlmModelConfig`.
-    ///
-    /// # Parameters
-    /// - `input`: raw text to embed
+    /// By default uses `self.cfg.model`. For a dedicated embeddings model,
+    /// configure it in `LlmModelConfig`.
     ///
     /// # Errors
     /// - [`AiLlmError::Provider`] with `HttpStatus` for non-2xx responses
     /// - [`AiLlmError::HttpTransport`] for client/network failures
     /// - [`AiLlmError::Provider`] with `Decode` if the JSON cannot be parsed
-    #[instrument(skip_all, fields(model = %self.cfg.model))]
     pub async fn embeddings(&self, input: &str) -> Result<Vec<f32>, AiLlmError> {
+        let started = Instant::now();
         let body = EmbeddingsRequest {
             model: &self.cfg.model,
             input,
         };
 
-        debug!("POST {}", self.url_embeddings);
+        debug!(
+            model = %self.cfg.model,
+            endpoint = %self.cfg.endpoint,
+            input_len = input.len(),
+            "POST {}", self.url_embeddings
+        );
+
         let resp = self
             .client
             .post(&self.url_embeddings)
@@ -211,6 +247,17 @@ impl OpenAiService {
             let url = self.url_embeddings.clone();
             let text = resp.text().await.unwrap_or_default();
             let snippet = make_snippet(&text);
+
+            error!(
+                %status,
+                %url,
+                %snippet,
+                model = %self.cfg.model,
+                endpoint = %self.cfg.endpoint,
+                latency_ms = started.elapsed().as_millis(),
+                "OpenAI /v1/embeddings returned non-success status"
+            );
+
             return Err(ProviderError::new(
                 Provider::OpenAI,
                 ProviderErrorKind::HttpStatus(HttpError {
@@ -222,14 +269,25 @@ impl OpenAiService {
             .into());
         }
 
-        let out: EmbeddingsResponse = resp.json().await.map_err(|e| {
-            ProviderError::new(
-                Provider::OpenAI,
-                ProviderErrorKind::Decode(format!(
-                    "serde error: {e}; expected `data[0].embedding`"
-                )),
-            )
-        })?;
+        let out: EmbeddingsResponse = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    model = %self.cfg.model,
+                    endpoint = %self.cfg.endpoint,
+                    latency_ms = started.elapsed().as_millis(),
+                    "failed to decode /v1/embeddings response"
+                );
+                return Err(ProviderError::new(
+                    Provider::OpenAI,
+                    ProviderErrorKind::Decode(format!(
+                        "serde error: {e}; expected `data[0].embedding`"
+                    )),
+                )
+                .into());
+            }
+        };
 
         let first = out.data.into_iter().next().ok_or_else(|| {
             ProviderError::new(
@@ -237,6 +295,13 @@ impl OpenAiService {
                 ProviderErrorKind::Decode("empty `data` in embeddings response".into()),
             )
         })?;
+
+        info!(
+            model = %self.cfg.model,
+            endpoint = %self.cfg.endpoint,
+            latency_ms = started.elapsed().as_millis(),
+            "embeddings completed"
+        );
 
         Ok(first.embedding)
     }
@@ -260,7 +325,7 @@ struct ChatCompletionRequest<'a> {
 }
 
 impl<'a> ChatCompletionRequest<'a> {
-    /// Builds a minimal chat request from config, user prompt, and an optional system message.
+    /// Builds a minimal chat request from config, `prompt`, and an optional system message.
     fn from_cfg(cfg: &'a LlmModelConfig, prompt: &'a str, system: Option<&'a str>) -> Self {
         let mut messages = Vec::with_capacity(2);
         if let Some(sys) = system {
@@ -289,7 +354,7 @@ impl<'a> ChatCompletionRequest<'a> {
 struct ChatMessage<'a> {
     /// One of: "system" | "user" | "assistant" | "tool" | ...
     role: &'a str,
-    /// Plain string content. For advanced payloads OpenAI also accepts arrays of parts.
+    /// Plain string content; for advanced payloads OpenAI also accepts arrays of parts.
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<&'a str>,
 }

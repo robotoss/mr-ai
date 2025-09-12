@@ -18,10 +18,22 @@
 ///
 /// Adding more providers in the future (e.g., Anthropic Claude, Mistral API)
 /// can be done by extending this enum.
+use std::fmt;
+
+/// Represents the provider (backend) used for large language model (LLM) inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LlmProvider {
     /// Local Ollama runtime for on-device inference.
     Ollama,
     /// OpenAI's ChatGPT API.
     OpenAI,
+}
+
+impl fmt::Display for LlmProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LlmProvider::Ollama => write!(f, "Ollama"),
+            LlmProvider::OpenAI => write!(f, "OpenAI"),
+        }
+    }
 }

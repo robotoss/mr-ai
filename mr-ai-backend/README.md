@@ -239,28 +239,39 @@ Contents:
 
 ---
 
-## 🧠 AI LLM Service Profiles
+Принял 👍
+Сделаем раздел **AI LLM Service** с акцентом на логирование, примером кода для `add_directive`, и вынесем блок про логи так же, как у тебя в разделе API.
 
-`ai-llm-service` provides a shared, async-safe manager for **three logical profiles**:
+---
 
-* **fast** — drafting, speed-first generation
-* **slow** — refinement/verification (falls back to fast if not provided)
+## 🧠 AI LLM Service
+
+The `ai-llm-service` crate provides a **shared manager** for three LLM profiles:
+
+* **fast** — quick drafting
+* **slow** — refinement/verification (falls back to fast if not set)
 * **embedding** — vector embeddings
 
-Key properties:
+### Features
 
-* **Tokio-native**: lives in the same runtime
-* **One-time construction**: wrap in `Arc`, pass around
-* **Client caching**: reuses underlying HTTP clients keyed by `(provider, endpoint, model, key, timeout)`
-* **Provider-agnostic**: supports **Ollama** and **OpenAI** (OpenAI optional)
+* **Provider-agnostic** — works with **Ollama** and **OpenAI**
+* **Client caching** — reuses HTTP clients per `(provider, endpoint, model, key, timeout)`
+* **Async + Arc-safe** — designed for reuse across tasks and modules
+* **Built-in health checks** — probes Ollama (`/api/tags`) and OpenAI (`/v1/models`)
+* **Unified errors** — normalized error model with snippets
+* **Structured logging** — uses [`tracing`](https://docs.rs/tracing), tagged `[AI LLM Service]`
 
-### Initialize
+---
+
+### Example
 
 ```rust
 use std::sync::Arc;
-use ai_llm_service::service_profiles::LlmServiceProfiles;
-use ai_llm_service::llm::LlmModelConfig;
-use ai_llm_service::config::llm_provider::LlmProvider;
+use ai_llm_service::{
+    service_profiles::LlmServiceProfiles,
+    llm::LlmModelConfig,
+    config::llm_provider::LlmProvider,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -275,50 +286,77 @@ async fn main() -> anyhow::Result<()> {
         timeout_secs: Some(30),
     };
 
-    let slow = LlmModelConfig {
-        model: "qwen3:32b".into(),
-        ..fast.clone()
-    };
-
+    let slow = LlmModelConfig { model: "qwen3:32b".into(), ..fast.clone() };
     let embedding = LlmModelConfig { ..fast.clone() };
 
-    // health_timeout_secs = 10 seconds
+    // Create service with health checker (timeout = 10s)
     let svc = Arc::new(LlmServiceProfiles::new(fast, Some(slow), embedding, Some(10))?);
 
-    // Use it
     let txt = svc.generate_fast("Hello world", None).await?;
     println!("FAST: {}", txt);
 
     let emb = svc.embed("Ferris").await?;
-    println!("Embedding dim = {}", emb.len());
+    println!("Embedding size = {}", emb.len());
 
     let statuses = svc.health_all().await?;
-    println!("Health = {:?}", statuses);
+    println!("Health: {:?}", statuses);
 
     Ok(())
 }
 ```
 
-### Methods (high-level)
+---
 
-* `generate_fast(prompt: &str, system: Option<&str>) -> Result<String>`
-  Draft with fast profile. `system` (optional) is used for ChatGPT-style models.
+### API
 
-* `generate_slow(prompt: &str, system: Option<&str>) -> Result<String>`
-  High-quality refinement. Falls back to fast if slow is not configured.
+* `generate_fast(prompt, system)` → quick text generation
+* `generate_slow(prompt, system)` → refined generation (falls back to fast)
+* `embed(input)` → vector embeddings
+* `health_all()` → probe all distinct profiles
+* `profiles()` → return references to `(fast, slow, embedding)` configs
 
-* `embed(input: &str) -> Result<Vec<f32>>`
-  Compute embeddings using the embedding profile.
+All methods return `Result<_, AiLlmError>` with normalized provider-specific errors.
 
-* `health_all() -> Result<Vec<HealthStatus>>`
-  Provider-agnostic health checks for all **distinct** profiles (no duplicates).
+---
 
-* `profiles() -> (&LlmModelConfig, &LlmModelConfig, &LlmModelConfig)`
-  Return references to the `(fast, slow, embedding)` configs.
+### Logging
 
-### Error Model
+This library uses **structured logs** via `tracing`.
+Logs include provider, endpoint, model, and error snippets, e.g.:
 
-All errors are normalized into unified variants (e.g., HTTP status with trimmed body snippet, decode errors, invalid provider/endpoint). Log messages contain the suffix `[AI LLM Service]` for easy attribution.
+```
+2025-09-12T12:05:33Z [DEBUG] [AI LLM Service] POST http://localhost:11434/api/generate model="qwen3:14b"
+2025-09-12T12:05:34Z [ERROR] [AI LLM Service] Ollama returned 500 at /api/generate snippet="internal error"
+```
+
+**What is logged:**
+
+* **INFO** — profile creation, health check results
+* **DEBUG** — outgoing HTTP requests (`POST /api/...`)
+* **ERROR** — non-2xx responses, decode errors, missing models
+* **WARN** — unexpected but non-fatal conditions (e.g. missing `models` field in health check)
+
+You can **tune log level just for this crate** in your `main` with `EnvFilter::add_directive`:
+
+```rust
+use tracing_subscriber::{EnvFilter, prelude::*};
+
+fn init_tracing() {
+    // Base filter from env or fallback
+    let base = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    // Raise verbosity for ai-llm-service only
+    let filter = base.add_directive("ai_llm_service=debug".parse().unwrap());
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+}
+```
+
+This way you can keep your app logs at `info` while enabling **detailed debug logs** only for `ai-llm-service`.
 
 ---
 

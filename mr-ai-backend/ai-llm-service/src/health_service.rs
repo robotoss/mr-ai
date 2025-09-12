@@ -5,15 +5,14 @@
 //! - OpenAI: `GET {endpoint}/v1/models` with Bearer auth (best-effort model existence check)
 //!
 //! The returned [`HealthStatus`] is JSON-serializable and suitable for a `/health` endpoint.
-//! Use [`HealthService::check`] for a resilient one-shot probe that **never fails**
-//! (errors are mapped to `ok = false`). For strict behavior (error bubbling), use the
-//! provider-specific `try_*` probes.
+//! [`HealthService::check`] is resilient and never fails (errors mapped to `ok=false`).
+//! Provider-specific probes (`try_*`) return strict `Result`.
 
 use std::time::{Duration, Instant};
 
 use reqwest::header;
 use serde::Serialize;
-use tracing::{debug, instrument};
+use tracing::{debug, error, info, warn};
 
 use crate::config::llm_model_config::LlmModelConfig;
 use crate::config::llm_provider::LlmProvider;
@@ -93,6 +92,12 @@ impl HealthService {
     pub fn new(timeout_secs: Option<u64>) -> Result<Self, AiLlmError> {
         let timeout = Duration::from_secs(timeout_secs.unwrap_or(10));
         let client = reqwest::Client::builder().timeout(timeout).build()?;
+
+        info!(
+            default_timeout_secs = timeout.as_secs(),
+            "HealthService initialized"
+        );
+
         Ok(Self {
             client,
             default_timeout: timeout,
@@ -103,16 +108,17 @@ impl HealthService {
     ///
     /// This method is **resilient**: it never returns an error. Any failure is converted
     /// to `HealthStatus { ok: false, message: ... }`, which is convenient for `/health`.
-    #[instrument(
-        skip_all,
-        fields(provider = ?cfg.provider, endpoint = %cfg.endpoint, model = %cfg.model)
-    )]
     pub async fn check(&self, cfg: &LlmModelConfig) -> HealthStatus {
         // Quick endpoint validation to avoid obvious issues.
         let endpoint = cfg.endpoint.trim();
         if endpoint.is_empty()
             || !(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
         {
+            warn!(
+                provider = ?cfg.provider,
+                endpoint = %cfg.endpoint,
+                "invalid endpoint (empty or missing http/https)"
+            );
             return HealthStatus::fail(
                 cfg.provider,
                 endpoint,
@@ -122,7 +128,6 @@ impl HealthService {
             );
         }
 
-        // Route to provider-specific strict probes; then map any error to a failure status.
         let start = Instant::now();
         let result = match cfg.provider {
             LlmProvider::Ollama => self.try_probe_ollama(cfg).await,
@@ -134,9 +139,29 @@ impl HealthService {
                 if status.latency_ms == 0 {
                     status.latency_ms = start.elapsed().as_millis();
                 }
+                info!(
+                    provider = %status.provider,
+                    endpoint = %status.endpoint,
+                    model = %status.model.as_deref().unwrap_or("n/a"),
+                    ok = status.ok,
+                    latency_ms = status.latency_ms,
+                    "health probe completed"
+                );
                 status
             }
-            Err(err) => Self::status_from_error(cfg, start.elapsed().as_millis(), err),
+            Err(err) => {
+                let status =
+                    Self::status_from_error(cfg, start.elapsed().as_millis(), err.to_string());
+                warn!(
+                    provider = %status.provider,
+                    endpoint = %status.endpoint,
+                    model = %status.model.as_deref().unwrap_or("n/a"),
+                    latency_ms = status.latency_ms,
+                    message = %status.message,
+                    "health probe failed"
+                );
+                status
+            }
         }
     }
 
@@ -145,7 +170,7 @@ impl HealthService {
     /// This function never returns an error: each failing check is converted into
     /// a `HealthStatus` with `ok = false`.
     pub async fn check_many(&self, configs: &[LlmModelConfig]) -> Vec<HealthStatus> {
-        // Sequential for simplicity. If you expect many configs, consider parallelizing.
+        debug!(count = configs.len(), "running batch health probes");
         let mut out = Vec::with_capacity(configs.len());
         for cfg in configs {
             out.push(self.check(cfg).await);
@@ -167,7 +192,13 @@ impl HealthService {
             .unwrap_or(self.default_timeout);
 
         let start = Instant::now();
-        debug!("GET {}", url);
+        debug!(
+            provider = "Ollama",
+            endpoint = %cfg.endpoint,
+            model = %cfg.model,
+            "GET {}", url
+        );
+
         let resp = self
             .client
             .get(&url)
@@ -182,6 +213,16 @@ impl HealthService {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             let snippet = make_snippet(&text);
+
+            error!(
+                provider = "Ollama",
+                %url,
+                %status,
+                %snippet,
+                latency_ms = latency,
+                "health GET /api/tags returned non-success status"
+            );
+
             return Err(AiLlmError::from(HealthError::HttpStatus(HttpError {
                 status,
                 url,
@@ -221,7 +262,6 @@ impl HealthService {
                         ))
                     }
                 } else {
-                    // If payload does not include `models`, still consider the server up.
                     Ok(HealthStatus::ok(
                         cfg.provider,
                         &cfg.endpoint,
@@ -232,7 +272,14 @@ impl HealthService {
                 }
             }
             Err(e) => {
-                // Server reachable but payload shape unexpected — still mark as up.
+                warn!(
+                    provider = "Ollama",
+                    endpoint = %cfg.endpoint,
+                    model = %cfg.model,
+                    error = %e,
+                    latency_ms = latency,
+                    "failed to decode /api/tags; treating server as reachable"
+                );
                 Ok(HealthStatus::ok(
                     cfg.provider,
                     &cfg.endpoint,
@@ -268,7 +315,13 @@ impl HealthService {
             })?;
 
         let start = Instant::now();
-        debug!("GET {}", url);
+        debug!(
+            provider = "OpenAI",
+            endpoint = %cfg.endpoint,
+            model = %cfg.model,
+            "GET {}", url
+        );
+
         let resp = self
             .client
             .get(&url)
@@ -284,6 +337,16 @@ impl HealthService {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             let snippet = make_snippet(&text);
+
+            error!(
+                provider = "OpenAI",
+                %url,
+                %status,
+                %snippet,
+                latency_ms = latency,
+                "health GET /v1/models returned non-success status"
+            );
+
             return Err(AiLlmError::Health(HealthError::HttpStatus(HttpError {
                 status,
                 url,
@@ -322,26 +385,35 @@ impl HealthService {
                     ))
                 }
             }
-            Err(e) => Ok(HealthStatus::ok(
-                cfg.provider,
-                &cfg.endpoint,
-                Some(&cfg.model),
-                latency,
-                format!("OpenAI is reachable; failed to decode /v1/models: {e}"),
-            )),
+            Err(e) => {
+                warn!(
+                    provider = "OpenAI",
+                    endpoint = %cfg.endpoint,
+                    model = %cfg.model,
+                    error = %e,
+                    latency_ms = latency,
+                    "failed to decode /v1/models; treating server as reachable"
+                );
+                Ok(HealthStatus::ok(
+                    cfg.provider,
+                    &cfg.endpoint,
+                    Some(&cfg.model),
+                    latency,
+                    format!("OpenAI is reachable; failed to decode /v1/models: {e}"),
+                ))
+            }
         }
     }
 
     /// Converts an error into a failure `HealthStatus` with a concise message.
     #[inline]
-    fn status_from_error(cfg: &LlmModelConfig, latency_ms: u128, err: AiLlmError) -> HealthStatus {
-        // `AiLlmError::Display` already appends the global suffix for attribution.
+    fn status_from_error(cfg: &LlmModelConfig, latency_ms: u128, msg: String) -> HealthStatus {
         HealthStatus::fail(
             cfg.provider,
             &cfg.endpoint,
             Some(&cfg.model),
             latency_ms,
-            err.to_string(),
+            msg,
         )
     }
 }

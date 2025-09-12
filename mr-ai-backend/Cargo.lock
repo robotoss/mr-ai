@@ -30,11 +30,14 @@ dependencies = [
 name = "ai-llm-service"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

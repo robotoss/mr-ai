@@ -12,10 +12,10 @@
 //! Errors are normalized via the unified error types from your `error_handler`
 //! (e.g., `ProviderErrorKind::{InvalidProvider, InvalidEndpoint, HttpStatus, Decode}`).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, instrument};
+use tracing::{debug, error, info};
 
 use crate::{
     config::{llm_model_config::LlmModelConfig, llm_provider::LlmProvider},
@@ -79,6 +79,14 @@ impl OllamaService {
         let url_generate = format!("{}/api/generate", base);
         let url_embeddings = format!("{}/api/embeddings", base);
 
+        info!(
+            provider = ?cfg.provider,
+            model = %cfg.model,
+            endpoint = %cfg.endpoint,
+            timeout_secs = cfg.timeout_secs.unwrap_or(60),
+            "OllamaService initialized"
+        );
+
         Ok(Self {
             client,
             cfg,
@@ -105,11 +113,17 @@ impl OllamaService {
     /// - [`AiLlmError::Provider`] with `HttpStatus` for non-2xx responses
     /// - [`AiLlmError::HttpTransport`] for client/network failures
     /// - [`AiLlmError::Provider`] with `Decode` if the JSON cannot be parsed
-    #[instrument(skip_all, fields(model = %self.cfg.model))]
     pub async fn generate(&self, prompt: &str) -> Result<String, AiLlmError> {
+        let started = Instant::now();
         let body = GenerateRequest::from_cfg(&self.cfg, prompt);
 
-        debug!("POST {}", self.url_generate);
+        debug!(
+            model = %self.cfg.model,
+            endpoint = %self.cfg.endpoint,
+            prompt_len = prompt.len(),
+            "POST {}", self.url_generate
+        );
+
         let resp = self
             .client
             .post(&self.url_generate)
@@ -122,6 +136,17 @@ impl OllamaService {
             let url = self.url_generate.clone();
             let text = resp.text().await.unwrap_or_default();
             let snippet = make_snippet(&text);
+
+            error!(
+                %status,
+                %url,
+                %snippet,
+                model = %self.cfg.model,
+                endpoint = %self.cfg.endpoint,
+                latency_ms = started.elapsed().as_millis(),
+                "Ollama /api/generate returned non-success status"
+            );
+
             return Err(ProviderError::new(
                 Provider::Ollama,
                 ProviderErrorKind::HttpStatus(HttpError {
@@ -133,15 +158,32 @@ impl OllamaService {
             .into());
         }
 
-        let out: GenerateResponse = resp.json().await.map_err(|e| {
-            ProviderError::new(
-                Provider::Ollama,
-                ProviderErrorKind::Decode(format!(
-                    "serde error: {e}; ensure `stream=false` is used"
-                )),
-            )
-        })?;
+        let out: GenerateResponse = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    model = %self.cfg.model,
+                    endpoint = %self.cfg.endpoint,
+                    latency_ms = started.elapsed().as_millis(),
+                    "failed to decode /api/generate response"
+                );
+                return Err(ProviderError::new(
+                    Provider::Ollama,
+                    ProviderErrorKind::Decode(format!(
+                        "serde error: {e}; ensure `stream=false` is used"
+                    )),
+                )
+                .into());
+            }
+        };
 
+        info!(
+            model = %self.cfg.model,
+            endpoint = %self.cfg.endpoint,
+            latency_ms = started.elapsed().as_millis(),
+            "generation completed"
+        );
         Ok(out.response)
     }
 
@@ -158,14 +200,20 @@ impl OllamaService {
     /// - [`AiLlmError::Provider`] with `HttpStatus` for non-2xx responses
     /// - [`AiLlmError::HttpTransport`] for client/network failures
     /// - [`AiLlmError::Provider`] with `Decode` if the JSON cannot be parsed
-    #[instrument(skip_all, fields(model = %self.cfg.model))]
     pub async fn embeddings(&self, input: &str) -> Result<Vec<f32>, AiLlmError> {
+        let started = Instant::now();
         let body = EmbeddingsRequest {
             model: &self.cfg.model,
             input,
         };
 
-        debug!("POST {}", self.url_embeddings);
+        debug!(
+            model = %self.cfg.model,
+            endpoint = %self.cfg.endpoint,
+            input_len = input.len(),
+            "POST {}", self.url_embeddings
+        );
+
         let resp = self
             .client
             .post(&self.url_embeddings)
@@ -178,6 +226,17 @@ impl OllamaService {
             let url = self.url_embeddings.clone();
             let text = resp.text().await.unwrap_or_default();
             let snippet = make_snippet(&text);
+
+            error!(
+                %status,
+                %url,
+                %snippet,
+                model = %self.cfg.model,
+                endpoint = %self.cfg.endpoint,
+                latency_ms = started.elapsed().as_millis(),
+                "Ollama /api/embeddings returned non-success status"
+            );
+
             return Err(ProviderError::new(
                 Provider::Ollama,
                 ProviderErrorKind::HttpStatus(HttpError {
@@ -189,13 +248,32 @@ impl OllamaService {
             .into());
         }
 
-        let out: EmbeddingsResponse = resp.json().await.map_err(|e| {
-            ProviderError::new(
-                Provider::Ollama,
-                ProviderErrorKind::Decode(format!("serde error: {e}; expected `embedding` array")),
-            )
-        })?;
+        let out: EmbeddingsResponse = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    model = %self.cfg.model,
+                    endpoint = %self.cfg.endpoint,
+                    latency_ms = started.elapsed().as_millis(),
+                    "failed to decode /api/embeddings response"
+                );
+                return Err(ProviderError::new(
+                    Provider::Ollama,
+                    ProviderErrorKind::Decode(format!(
+                        "serde error: {e}; expected `embedding` array"
+                    )),
+                )
+                .into());
+            }
+        };
 
+        info!(
+            model = %self.cfg.model,
+            endpoint = %self.cfg.endpoint,
+            latency_ms = started.elapsed().as_millis(),
+            "embeddings completed"
+        );
         Ok(out.embedding)
     }
 }
