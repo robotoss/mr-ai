@@ -18,7 +18,7 @@
 ///
 /// Adding more providers in the future (e.g., Anthropic Claude, Mistral API)
 /// can be done by extending this enum.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LlmProvider {
     /// Local Ollama runtime for on-device inference.
     Ollama,

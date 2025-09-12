@@ -1,32 +1,32 @@
 //! Universal health service for LLM backends (Ollama, OpenAI).
 //!
-//! This module provides light-weight health checks for supported providers:
+//! This module exposes lightweight health checks for supported providers:
 //! - Ollama: `GET {endpoint}/api/tags` (best-effort model existence check)
 //! - OpenAI: `GET {endpoint}/v1/models` with Bearer auth (best-effort model existence check)
 //!
-//! The returned [`HealthStatus`] is serializable to JSON and suitable for
-//! exposing a `/health` endpoint in your app. Use [`HealthService::check`]
-//! for a resilient one-shot check that never fails (errors are mapped to `ok=false`),
-//! or use the provider-specific `try_*` probes for strict `Result` behavior.
+//! The returned [`HealthStatus`] is JSON-serializable and suitable for a `/health` endpoint.
+//! Use [`HealthService::check`] for a resilient one-shot probe that **never fails**
+//! (errors are mapped to `ok = false`). For strict behavior (error bubbling), use the
+//! provider-specific `try_*` probes.
 
 use std::time::{Duration, Instant};
 
-use reqwest::{StatusCode, header};
+use reqwest::header;
 use serde::Serialize;
 use tracing::{debug, instrument};
 
+use crate::config::llm_model_config::LlmModelConfig;
 use crate::config::llm_provider::LlmProvider;
-use crate::error_handler::{AiLlmError, HealthError, Result};
-use crate::llm::LlmModelConfig;
+use crate::error_handler::{AiLlmError, HealthError, HttpError, make_snippet};
 
 /// A serializable health snapshot for a single provider/config.
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthStatus {
-    /// Backend/provider (e.g., "Ollama", "ChatGpt").
+    /// Backend/provider (e.g., "Ollama", "OpenAI").
     pub provider: String,
     /// Target endpoint base URL.
     pub endpoint: String,
-    /// Optional model identifier if relevant to the check.
+    /// Optional model identifier relevant to the probe (if any).
     pub model: Option<String>,
     /// Overall health flag.
     pub ok: bool,
@@ -37,6 +37,7 @@ pub struct HealthStatus {
 }
 
 impl HealthStatus {
+    #[inline]
     fn ok(
         provider: LlmProvider,
         endpoint: &str,
@@ -47,13 +48,14 @@ impl HealthStatus {
         Self {
             provider: format!("{provider:?}"),
             endpoint: endpoint.to_string(),
-            model: model.map(|s| s.to_string()),
+            model: model.map(str::to_string),
             ok: true,
             latency_ms,
             message: message.into(),
         }
     }
 
+    #[inline]
     fn fail(
         provider: LlmProvider,
         endpoint: &str,
@@ -64,7 +66,7 @@ impl HealthStatus {
         Self {
             provider: format!("{provider:?}"),
             endpoint: endpoint.to_string(),
-            model: model.map(|s| s.to_string()),
+            model: model.map(str::to_string),
             ok: false,
             latency_ms,
             message: message.into(),
@@ -73,6 +75,9 @@ impl HealthStatus {
 }
 
 /// A universal health checker that reuses a single HTTP client.
+///
+/// The client is constructed with a default timeout. Individual probes may
+/// override the timeout per request based on the provided config.
 pub struct HealthService {
     client: reqwest::Client,
     default_timeout: Duration,
@@ -80,27 +85,30 @@ pub struct HealthService {
 
 impl HealthService {
     /// Creates a new health service with an optional client timeout (seconds).
-    pub fn new(timeout_secs: Option<u64>) -> Result<Self> {
+    ///
+    /// The internal client is reused across all probes.
+    ///
+    /// # Errors
+    /// Returns [`AiLlmError::HttpTransport`] if the HTTP client cannot be built.
+    pub fn new(timeout_secs: Option<u64>) -> Result<Self, AiLlmError> {
         let timeout = Duration::from_secs(timeout_secs.unwrap_or(10));
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .gzip(true)
-            .brotli(true)
-            .deflate(true)
-            .build()?;
+        let client = reqwest::Client::builder().timeout(timeout).build()?;
         Ok(Self {
             client,
             default_timeout: timeout,
         })
     }
 
-    /// Checks health for a single LLM config by routing to the appropriate provider-specific probe.
+    /// Checks health for a single LLM config, routing to the provider-specific probe.
     ///
-    /// This method is **resilient**: it never returns an error. Any error is converted
-    /// into `HealthStatus { ok: false, message: ... }` for easy consumption by a `/health` route.
-    #[instrument(skip_all, fields(provider = ?cfg.provider, endpoint = %cfg.endpoint, model = %cfg.model))]
+    /// This method is **resilient**: it never returns an error. Any failure is converted
+    /// to `HealthStatus { ok: false, message: ... }`, which is convenient for `/health`.
+    #[instrument(
+        skip_all,
+        fields(provider = ?cfg.provider, endpoint = %cfg.endpoint, model = %cfg.model)
+    )]
     pub async fn check(&self, cfg: &LlmModelConfig) -> HealthStatus {
-        // Basic endpoint validation up-front to avoid obvious issues.
+        // Quick endpoint validation to avoid obvious issues.
         let endpoint = cfg.endpoint.trim();
         if endpoint.is_empty()
             || !(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
@@ -110,20 +118,19 @@ impl HealthService {
                 endpoint,
                 Some(&cfg.model),
                 0,
-                "[AI LLM Service] endpoint is empty or missing http/https",
+                "endpoint is empty or missing http/https",
             );
         }
 
-        // Route to provider-specific strict probes and downcast errors to a failure status.
+        // Route to provider-specific strict probes; then map any error to a failure status.
         let start = Instant::now();
         let result = match cfg.provider {
             LlmProvider::Ollama => self.try_probe_ollama(cfg).await,
-            LlmProvider::ChatGpt => self.try_probe_openai(cfg).await,
+            LlmProvider::OpenAI => self.try_probe_openai(cfg).await,
         };
 
         match result {
             Ok(mut status) => {
-                // Ensure latency_ms is set for success path if not provided by probe.
                 if status.latency_ms == 0 {
                     status.latency_ms = start.elapsed().as_millis();
                 }
@@ -136,9 +143,9 @@ impl HealthService {
     /// Checks health for multiple configs and returns a vector of statuses.
     ///
     /// This function never returns an error: each failing check is converted into
-    /// a `HealthStatus` with `ok=false`.
+    /// a `HealthStatus` with `ok = false`.
     pub async fn check_many(&self, configs: &[LlmModelConfig]) -> Vec<HealthStatus> {
-        // Sequential by default for simplicity; switch to `join_all` for parallel checks if desired.
+        // Sequential for simplicity. If you expect many configs, consider parallelizing.
         let mut out = Vec::with_capacity(configs.len());
         for cfg in configs {
             out.push(self.check(cfg).await);
@@ -146,20 +153,25 @@ impl HealthService {
         out
     }
 
-    /// Strict probe of Ollama: may return an error on failures.
+    /// Strict Ollama probe. Returns an error on hard failures.
     ///
     /// Probe:
     /// - `GET {endpoint}/api/tags`
-    /// - Verify 2xx
-    /// - Best-effort: check that `cfg.model` exists in the returned models list
-    async fn try_probe_ollama(&self, cfg: &LlmModelConfig) -> Result<HealthStatus> {
+    /// - Ensure 2xx
+    /// - Best-effort: verify `cfg.model` exists in the returned tags
+    async fn try_probe_ollama(&self, cfg: &LlmModelConfig) -> Result<HealthStatus, AiLlmError> {
         let url = format!("{}/api/tags", cfg.endpoint.trim_end_matches('/'));
-        let start = Instant::now();
+        let timeout = cfg
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(self.default_timeout);
 
+        let start = Instant::now();
         debug!("GET {}", url);
         let resp = self
             .client
             .get(&url)
+            .timeout(timeout)
             .send()
             .await
             .map_err(AiLlmError::from)?;
@@ -168,15 +180,16 @@ impl HealthService {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let snippet = resp.text().await.unwrap_or_default();
-            return Err(AiLlmError::from(HealthError::HttpStatus {
+            let text = resp.text().await.unwrap_or_default();
+            let snippet = make_snippet(&text);
+            return Err(AiLlmError::from(HealthError::HttpStatus(HttpError {
                 status,
                 url,
-                snippet: snippet.chars().take(240).collect(),
-            }));
+                snippet,
+            })));
         }
 
-        // Minimal expected shape: { "models": [ { "name": "qwen3:14b" }, ... ] }
+        // Expected minimal JSON: { "models": [ { "name": "<model>" }, ... ] }
         #[derive(serde::Deserialize)]
         struct Tag {
             name: String,
@@ -204,11 +217,11 @@ impl HealthService {
                             &cfg.endpoint,
                             Some(&cfg.model),
                             latency,
-                            "[AI LLM Service] Ollama is up, but model not found in /api/tags",
+                            "Ollama is up, but model not found in /api/tags",
                         ))
                     }
                 } else {
-                    // If payload doesn't include models list, still consider server up.
+                    // If payload does not include `models`, still consider the server up.
                     Ok(HealthStatus::ok(
                         cfg.provider,
                         &cfg.endpoint,
@@ -219,74 +232,66 @@ impl HealthService {
                 }
             }
             Err(e) => {
-                // Server reachable but unexpected shape.
+                // Server reachable but payload shape unexpected — still mark as up.
                 Ok(HealthStatus::ok(
                     cfg.provider,
                     &cfg.endpoint,
                     Some(&cfg.model),
                     latency,
-                    format!(
-                        "[AI LLM Service] Ollama is reachable; failed to decode /api/tags: {e}"
-                    ),
+                    format!("Ollama is reachable; failed to decode /api/tags: {e}"),
                 ))
             }
         }
     }
 
-    /// Strict probe of OpenAI: may return an error on failures.
+    /// Strict OpenAI probe. Returns an error on hard failures.
     ///
     /// Probe:
     /// - `GET {endpoint}/v1/models` with `Authorization: Bearer <api_key>`
-    /// - Verify 2xx
-    /// - Best-effort: check that `cfg.model` exists in the returned list
-    async fn try_probe_openai(&self, cfg: &LlmModelConfig) -> Result<HealthStatus> {
+    /// - Ensure 2xx
+    /// - Best-effort: verify `cfg.model` exists in the returned list
+    async fn try_probe_openai(&self, cfg: &LlmModelConfig) -> Result<HealthStatus, AiLlmError> {
         let base = cfg.endpoint.trim_end_matches('/').to_string();
         let url = format!("{}/v1/models", base);
+        let timeout = cfg
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(self.default_timeout);
 
         let api_key = cfg.api_key.as_ref().ok_or_else(|| {
-            AiLlmError::Health(HealthError::Decode(
-                "[AI LLM Service] missing OpenAI API key".into(),
-            ))
+            AiLlmError::Health(HealthError::Decode("missing OpenAI API key".into()))
         })?;
 
-        let mut headers = header::HeaderMap::new();
-        let auth = header::HeaderValue::from_str(&format!("Bearer {}", api_key)).map_err(|e| {
-            AiLlmError::Health(HealthError::Decode(format!(
-                "[AI LLM Service] invalid API key header: {e}"
-            )))
-        })?;
-        headers.insert(header::AUTHORIZATION, auth);
-
-        let client = reqwest::Client::builder()
-            .timeout(
-                cfg.timeout_secs
-                    .map(Duration::from_secs)
-                    .unwrap_or(self.default_timeout),
-            )
-            .default_headers(headers)
-            .gzip(true)
-            .brotli(true)
-            .deflate(true)
-            .build()
-            .map_err(AiLlmError::from)?;
+        let auth_header =
+            header::HeaderValue::from_str(&format!("Bearer {}", api_key)).map_err(|e| {
+                AiLlmError::Health(HealthError::Decode(format!("invalid API key header: {e}")))
+            })?;
 
         let start = Instant::now();
         debug!("GET {}", url);
-        let resp = client.get(&url).send().await.map_err(AiLlmError::from)?;
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(timeout)
+            .header(header::AUTHORIZATION, auth_header)
+            .send()
+            .await
+            .map_err(AiLlmError::from)?;
 
         let latency = start.elapsed().as_millis();
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let snippet = resp.text().await.unwrap_or_default();
-            return Err(AiLlmError::Health(HealthError::HttpStatus {
+            let text = resp.text().await.unwrap_or_default();
+            let snippet = make_snippet(&text);
+            return Err(AiLlmError::Health(HealthError::HttpStatus(HttpError {
                 status,
                 url,
-                snippet: snippet.chars().take(240).collect(),
-            }));
+                snippet,
+            })));
         }
 
-        // Minimal expected shape: { "data": [ { "id": "gpt-4o-mini" }, ... ] }
+        // Expected minimal JSON: { "data": [ { "id": "<model>" }, ... ] }
         #[derive(serde::Deserialize)]
         struct ModelItem {
             id: String,
@@ -313,7 +318,7 @@ impl HealthService {
                         &cfg.endpoint,
                         Some(&cfg.model),
                         latency,
-                        "[AI LLM Service] OpenAI is up, but model not found in /v1/models",
+                        "OpenAI is up, but model not found in /v1/models",
                     ))
                 }
             }
@@ -322,14 +327,15 @@ impl HealthService {
                 &cfg.endpoint,
                 Some(&cfg.model),
                 latency,
-                format!("[AI LLM Service] OpenAI is reachable; failed to decode /v1/models: {e}"),
+                format!("OpenAI is reachable; failed to decode /v1/models: {e}"),
             )),
         }
     }
 
     /// Converts an error into a failure `HealthStatus` with a concise message.
+    #[inline]
     fn status_from_error(cfg: &LlmModelConfig, latency_ms: u128, err: AiLlmError) -> HealthStatus {
-        // The error Display already includes the "[AI LLM Service]" prefix.
+        // `AiLlmError::Display` already appends the global suffix for attribution.
         HealthStatus::fail(
             cfg.provider,
             &cfg.endpoint,

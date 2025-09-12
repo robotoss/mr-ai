@@ -5,7 +5,7 @@ edition = "2024"
 
 
 [workspace]
-members = [".", "ai-llm-service", "ai-service", "api", "codegraph-prep", "contextor", "mr-reviewer",  "rag-store", "services"]
+members = [".", "ai-llm-service", "api", "codegraph-prep", "contextor", "mr-reviewer",  "rag-store", "services"]
 
 [dependencies]
 api = { path = "api" }
@@ -13,6 +13,7 @@ api = { path = "api" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+ai-llm-service = { path = "./ai-llm-service" }
 
 dotenvy = "0.15"
 

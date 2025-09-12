@@ -32,7 +32,7 @@ use crate::config::llm_provider::LlmProvider;
 ///     timeout_secs: Some(30),
 /// };
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LlmModelConfig {
     /// The LLM provider/backend (e.g., Ollama, ChatGPT).
     pub provider: LlmProvider,

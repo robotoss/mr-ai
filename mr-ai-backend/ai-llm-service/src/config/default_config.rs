@@ -23,10 +23,10 @@
 //! - `OLLAMA_MODEL_FAST_MODEL` or `OLLAMA_MODEL_FAST` = fast/speed model (mandatory)
 //! - `EMBEDDING_MODEL`             = embedding model (mandatory)
 
-use crate::config::llm_provider::LlmProvider;
-use crate::error::{ConfigError, Result, env_opt_u32, must_env};
-use crate::error_handler::ConfigError;
-use crate::llm::LlmModelConfig;
+use crate::{
+    config::{llm_model_config::LlmModelConfig, llm_provider::LlmProvider},
+    error_handler::{AiLlmError, ConfigError, env_opt_u32, must_env},
+};
 
 /// Resolves the Ollama endpoint strictly from environment.
 ///
@@ -38,7 +38,7 @@ use crate::llm::LlmModelConfig;
 ///
 /// - [`ConfigError::MissingVar`] if both are missing
 /// - [`ConfigError::InvalidNumber`] if `OLLAMA_PORT` is invalid
-fn ollama_endpoint() -> Result<String> {
+fn ollama_endpoint() -> Result<String, AiLlmError> {
     if let Ok(url) = std::env::var("OLLAMA_URL") {
         if !url.trim().is_empty() {
             return Ok(url);
@@ -55,7 +55,9 @@ fn ollama_endpoint() -> Result<String> {
             return Ok(format!("http://localhost:{port}"));
         }
     }
-    Err(ConfigError::MissingVar("OLLAMA_URL or OLLAMA_PORT"))
+    Err(AiLlmError::Config(ConfigError::MissingVar(
+        "OLLAMA_URL or OLLAMA_PORT",
+    )))
 }
 
 /// Constructs a config for the **slow/quality** Ollama model.
@@ -69,7 +71,7 @@ fn ollama_endpoint() -> Result<String> {
 /// # Defaults
 /// - `temperature = Some(0.2)`
 /// - `timeout_secs = Some(60)`
-pub fn config_ollama_slow() -> Result<LlmModelConfig> {
+pub fn config_ollama_slow() -> Result<LlmModelConfig, AiLlmError> {
     let endpoint = ollama_endpoint()?;
     let model = must_env("OLLAMA_MODEL")?;
     let max_tokens = env_opt_u32("LLM_MAX_TOKENS")?;
@@ -98,7 +100,7 @@ pub fn config_ollama_slow() -> Result<LlmModelConfig> {
 /// - `temperature = Some(0.7)`
 /// - `top_p = Some(0.9)`
 /// - `timeout_secs = Some(45)`
-pub fn config_ollama_fast() -> Result<LlmModelConfig> {
+pub fn config_ollama_fast() -> Result<LlmModelConfig, AiLlmError> {
     let endpoint = ollama_endpoint()?;
     let model = std::env::var("OLLAMA_MODEL_FAST_MODEL")
         .ok()
@@ -132,7 +134,7 @@ pub fn config_ollama_fast() -> Result<LlmModelConfig> {
 /// - `temperature = Some(0.0)` (deterministic)
 /// - `max_tokens = None`
 /// - `timeout_secs = Some(30)`
-pub fn config_ollama_embedding() -> Result<LlmModelConfig> {
+pub fn config_ollama_embedding() -> Result<LlmModelConfig, AiLlmError> {
     let endpoint = ollama_endpoint()?;
     let model = must_env("EMBEDDING_MODEL")?;
 
