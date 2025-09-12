@@ -17,6 +17,7 @@ codegraph-prep = { path = "../codegraph-prep" }
 rag-store = { path = "../rag-store" }
 contextor = {path = "../contextor"}
 mr-reviewer = {path = "../mr-reviewer"}
+ai-llm-service = { path = "../ai-llm-service" }
 
 
 serde = { workspace = true }

@@ -16,6 +16,8 @@ tracing = { workspace = true }
 codegraph-prep = { path = "../codegraph-prep" }
 contextor = { path = "../contextor" }
 
+ai-llm-service = { path = "../ai-llm-service" }
+
 
 # crate-local deps
 sha2 = "0.10"
