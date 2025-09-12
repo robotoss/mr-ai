@@ -2,7 +2,7 @@ use std::{error::Error, sync::Arc};
 
 use ai_llm_service::{config::default_config, service_profiles::LlmServiceProfiles};
 use api;
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -11,15 +11,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv()?;
 
     init_tracing();
-
-    // let filter = EnvFilter::try_from_default_env()
-    //     .or_else(|_| EnvFilter::try_new("debug"))
-    //     .unwrap();
-
-    // tracing_subscriber::registry()
-    //     .with(filter)
-    //     .with(fmt::layer().with_target(false))
-    //     .init();
 
     let slow = default_config::config_ollama_slow()?;
     let fast = default_config::config_ollama_fast()?;
