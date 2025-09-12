@@ -43,8 +43,12 @@ pub fn build_strict_prompt(
     s.push_str(
         "You MUST consult read-only blocks before any global claim (imports/symbols/cross-file invariants).\n",
     );
-    s.push_str("PRIMARY and FULL FILE are HEAD (authoritative). RELATED is BASE/external.\n");
+    s.push_str("PRIMARY and FULL FILE are HEAD (authoritative). RELATED is BASE/external (non-authoritative).\n");
     s.push_str("On conflicts, trust HEAD.\n");
+    // New: strict precedence & speculation guard
+    s.push_str("HEAD is the sole source of truth for behavior. RELATED may be used only to validate imports/symbols/types/signatures — never to assert behavior or business logic by itself.\n");
+    s.push_str("If a concern depends on RELATED or external code and is not provable from HEAD, use QUESTION mode anchored to the changed lines; otherwise return NO_ISSUES.\n");
+    s.push_str("Avoid speculation and hedging. Do not use words like 'Potential', 'Maybe', 'Could', 'Might' in findings. Be categorical or return NO_ISSUES.\n");
     s.push_str("CodeFacts provide: FULL enclosing snippet and a single CHUNK {index/total}.\n\n");
 
     // Review policy (rules/)
@@ -75,7 +79,7 @@ pub fn build_strict_prompt(
 
     // RELATED (BASE/external; optional)
     if !related.is_empty() {
-        s.push_str("\nRELATED (read-only; BASE/external):\n```code\n");
+        s.push_str("\nRELATED (read-only; BASE/external; non-authoritative — use ONLY to validate imports/symbols/types; do NOT assert behavior based on it):\n```code\n");
         s.push_str(&sanitize_fence(&format_related_for_log(related)));
         s.push_str("\n```\n");
     }
@@ -140,12 +144,9 @@ PATCH:
 
 QUESTION mode (when key context is missing or uncertainty is high):
 
-- Use the SAME block format but omit PATCH.
-
-- TITLE must start with: "NEEDS CONTEXT: "
-
-- In BODY, ask up to 3 focused questions. For each, include: "Why needed" and "Exact artifact/path needed".
-
+Additional QUESTION rules:
+- Use QUESTION mode only when a fix is blocked by missing artifacts that are not present in PRIMARY/FULL. Anchor your questions to the changed line(s).
+- If your concern relies on RELATED or external code and is not provable from HEAD, prefer a QUESTION. If still uncertain → return NO_ISSUES.
 
 Examples:
 ANCHOR: 12-12
@@ -161,20 +162,12 @@ Questions:
 
 Rules:
 
-- Anchors must be inside ALLOWED_ANCHORS. Prefer added lines when possible.
-
-- Do not mention line numbers in BODY unless they match ANCHOR exactly.
-
-- Do not propose edits outside the anchored lines.
-
-- Prefer minimal, safe changes; avoid speculative or non-applicable diffs.
-
-- If you cannot propose a correct patch, omit PATCH and just explain the issue.
-
+Anchor coupling & precedence:
+- Every comment MUST directly pertain to code within the specified ANCHOR range. Do not discuss other screens/modules unless reflected in these lines.
+- HEAD is the only source for behavior claims. RELATED may NOT initiate a finding without confirmation in HEAD. Use RELATED only to validate imports/symbols/types/signatures.
+- Hedging language is not allowed ("Potential", "Maybe", "Could", "Might"). Be definitive or return NO_ISSUES.
 
 Hard constraints:
-
-- Output ONLY between these markers. If there are no valid issues, output exactly: NO_ISSUES
     <<<END_STRICT>>>
     "#,
     );
@@ -198,7 +191,8 @@ pub fn build_refine_prompt(
 ) -> String {
     let mut s = String::new();
     s.push_str("Refine the draft below while preserving the STRICT format.\n");
-    s.push_str("Increase precision, keep anchors valid, and remove any speculation.\n\n");
+    s.push_str("Increase precision, keep anchors valid, and remove any speculation.\n");
+    s.push_str("Do not weaken guardrails: if the draft relies on RELATED or is not provable from HEAD for the given ANCHOR, either convert to QUESTION (anchored) or return NO_ISSUES.\n\n");
 
     if let Some(prev) = maybe_prev {
         s.push_str("PREVIOUS DRAFT:\n```\n");
