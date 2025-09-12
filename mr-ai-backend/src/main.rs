@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let fast = default_config::config_ollama_fast()?;
     let embedding = default_config::config_ollama_embedding()?;
 
-    let svc = Arc::new(LlmServiceProfiles::new(
+    let _svc = Arc::new(LlmServiceProfiles::new(
         slow,
         Some(fast),
         embedding,
