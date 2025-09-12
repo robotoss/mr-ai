@@ -5,6 +5,7 @@ use tracing::debug;
 
 use crate::errors::Error;
 
+// TODO(kos): Remove after migration. New LlmProvider in ai-llm-service
 #[derive(Debug, Clone, Copy)]
 pub enum LlmKind {
     Ollama,
