@@ -23,5 +23,5 @@ pub enum LlmProvider {
     /// Local Ollama runtime for on-device inference.
     Ollama,
     /// OpenAI's ChatGPT API.
-    ChatGpt,
+    OpenAI,
 }
