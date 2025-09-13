@@ -209,7 +209,7 @@ pub async fn build_draft_comments(
 
         // Convert preq_ctx.hits to "related" strings (compatible with existing prompt builder).
         let mut related: Vec<RelatedBlock> =
-            context::fetch_related_context(&plan.symbols, tgt).await?;
+            context::fetch_related_context(&plan.symbols, tgt, svc.clone()).await?;
         for h in preq_ctx.hits {
             // Each hit is stored as a synthetic RELATED block.
             related.push(RelatedBlock {

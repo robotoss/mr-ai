@@ -3,17 +3,15 @@
 //! Provides asynchronous embedding calls to an Ollama server using
 //! `reqwest::Client`.
 
+use std::sync::Arc;
+
 use crate::{EmbeddingsProvider, RagError};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 
 /// Configuration for the Ollama embedding backend.
 #[derive(Clone, Debug)]
 pub struct OllamaConfig {
-    /// Base URL of the Ollama server (e.g. http://localhost:7869).
-    pub url: String,
-    /// Model name or tag to use (e.g. "nomic-embed-text").
-    pub model: String,
+    pub svc: Arc<LlmServiceProfiles>,
     /// Expected embedding dimension size.
     pub dim: usize,
 }
@@ -21,9 +19,7 @@ pub struct OllamaConfig {
 /// Ollama embedding provider (async).
 #[derive(Clone)]
 pub struct OllamaEmbedder {
-    client: Client,
-    url: String,
-    model: String,
+    pub svc: Arc<LlmServiceProfiles>,
     dim: usize,
 }
 
@@ -31,9 +27,7 @@ impl OllamaEmbedder {
     /// Construct a new embedder from configuration.
     pub fn new(cfg: OllamaConfig) -> Self {
         Self {
-            client: Client::new(),
-            url: cfg.url,
-            model: cfg.model,
+            svc: cfg.svc,
             dim: cfg.dim,
         }
     }
@@ -46,45 +40,17 @@ impl EmbeddingsProvider for OllamaEmbedder {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<f32>, RagError>> + Send + 'a>>
     {
         Box::pin(async move {
-            #[derive(Serialize)]
-            struct Request<'a> {
-                model: &'a str,
-                prompt: &'a str,
-            }
+            let resp = self.svc.embed(&text).await.expect("Embed failed");
 
-            #[derive(Deserialize)]
-            struct Response {
-                embedding: Vec<f32>,
-            }
-
-            let req = Request {
-                model: &self.model,
-                prompt: text,
-            };
-
-            let resp = self
-                .client
-                .post(&format!("{}/api/embeddings", self.url))
-                .json(&req)
-                .send()
-                .await
-                .map_err(|e| RagError::Provider(format!("Ollama request failed: {e}")))?
-                .error_for_status()
-                .map_err(|e| RagError::Provider(format!("Ollama HTTP error: {e}")))?;
-
-            let parsed: Response = resp
-                .json()
-                .await
-                .map_err(|e| RagError::Provider(format!("Ollama JSON parse failed: {e}")))?;
-
-            if parsed.embedding.len() != self.dim {
+            if resp.len() != self.dim {
+                println!("[SOME_TEST]: Len{}", resp.len());
                 return Err(RagError::VectorSizeMismatch {
-                    got: parsed.embedding.len(),
+                    got: resp.len(),
                     want: self.dim,
                 });
             }
 
-            Ok(parsed.embedding)
+            Ok(resp)
         })
     }
 }

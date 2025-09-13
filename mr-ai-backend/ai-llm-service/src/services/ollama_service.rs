@@ -201,17 +201,17 @@ impl OllamaService {
     /// - [`AiLlmError::Provider`] with `HttpStatus` for non-2xx responses
     /// - [`AiLlmError::HttpTransport`] for client/network failures
     /// - [`AiLlmError::Provider`] with `Decode` if the JSON cannot be parsed
-    pub async fn embeddings(&self, input: &str) -> Result<Vec<f32>, AiLlmError> {
+    pub async fn embeddings(&self, prompt: &str) -> Result<Vec<f32>, AiLlmError> {
         let started = Instant::now();
         let body = EmbeddingsRequest {
             model: &self.cfg.model,
-            input,
+            prompt,
         };
 
         debug!(
             model = %self.cfg.model,
             endpoint = %self.cfg.endpoint,
-            input_len = input.len(),
+            input_len = prompt.len(),
             "POST {}", self.url_embeddings
         );
 
@@ -337,7 +337,7 @@ struct GenerateResponse {
 #[derive(Debug, Serialize)]
 struct EmbeddingsRequest<'a> {
     model: &'a str,
-    input: &'a str,
+    prompt: &'a str,
 }
 
 /// Response body for `/api/embeddings`.

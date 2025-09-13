@@ -3,10 +3,13 @@
 //! This mirrors the first half of `ask_with_opts` but stops after MMR/expansion,
 //! returning selected chunks for downstream consumers (e.g., code-review prompts).
 
+use std::sync::Arc;
+
 use crate::api_types::UsedChunk;
 use crate::cfg::ContextorConfig;
 use crate::error::ContextorError;
 use crate::select;
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 use rag_store::{
     RagQuery, RagStore,
     embed::ollama::{OllamaConfig, OllamaEmbedder},
@@ -28,9 +31,10 @@ pub struct RetrieveOptions {
 pub async fn retrieve_with_opts(
     query_text: &str,
     opts: RetrieveOptions,
+    svc: Arc<LlmServiceProfiles>,
 ) -> Result<Vec<UsedChunk>, ContextorError> {
     // 1) Config
-    let gcfg = ContextorConfig::from_env();
+    let gcfg = ContextorConfig::new(svc);
     let top_k = if opts.top_k == 0 {
         gcfg.initial_top_k
     } else {
@@ -45,8 +49,7 @@ pub async fn retrieve_with_opts(
     // 2) Facades
     let store = RagStore::new(gcfg.make_rag_config())?;
     let emb_cfg = OllamaConfig {
-        url: gcfg.ollama_host.clone(),
-        model: gcfg.embed_model.clone(),
+        svc: gcfg.svc.clone(),
         dim: gcfg.make_rag_config().embedding_dim.unwrap_or(1024),
     };
     let embedder = OllamaEmbedder::new(emb_cfg);

@@ -430,6 +430,7 @@ dependencies = [
 name = "contextor"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "indicatif 0.17.11",
  "rag-store",
  "reqwest",
@@ -1795,6 +1796,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 name = "rag-store"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "futures",
  "indicatif 0.18.0",
  "qdrant-client",

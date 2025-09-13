@@ -2,8 +2,9 @@
 //! This version injects compact AST facts (from SymbolIndex) keyed by path + anchor line.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 use contextor::{RetrieveOptions, retrieve_with_opts};
 use tracing::debug;
 
@@ -31,6 +32,7 @@ lazy_static::lazy_static! {
 pub async fn fetch_related_context(
     symbols: &SymbolIndex,
     tgt: &MappedTarget,
+    svc: Arc<LlmServiceProfiles>,
 ) -> Result<Vec<RelatedBlock>, Error> {
     let disabled = std::env::var("RAG_DISABLE").unwrap_or_else(|_| "false".into()) == "true";
     if disabled {
@@ -78,7 +80,7 @@ pub async fn fetch_related_context(
 
     // Note: if your `retrieve_with_opts` can return 'thinking' fields,
     // it should be stripped by that function already. We still only read .text/path/lang/score here.
-    match retrieve_with_opts(&query, opts).await {
+    match retrieve_with_opts(&query, opts, svc).await {
         Ok(mut chunks) => {
             chunks.retain(|c| c.score >= min_score);
             // Map candidates → RelatedBlock

@@ -29,3 +29,4 @@ reqwest = { workspace = true, features = ["json", "rustls-tls", "blocking"] }
 
 indicatif = "0.18"
 services = { path = "../services" }
+ai-llm-service = { path = "../ai-llm-service" }
