@@ -1,0 +1,17 @@
+[package]
+name = "ai-llm-service"
+version = "0.1.0"
+edition = "2024"
+authors = ["Yeftifeyev Konstantin <zoxo@outlook.com>"]
+license = "FSL-1.1"
+description = "Shared LLM service with providers (Ollama/OpenAI), unified errors, health checks, and fast/slow/embedding profiles."
+
+[dependencies]
+reqwest   = { workspace = true, features = ["json", "brotli"] }
+serde     = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }

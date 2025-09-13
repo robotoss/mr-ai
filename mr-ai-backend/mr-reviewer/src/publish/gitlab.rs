@@ -22,7 +22,7 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use regex::Regex;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER, USER_AGENT};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 

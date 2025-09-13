@@ -125,6 +125,7 @@ pub async fn run_preq_agent(
             use_symbols: true,
         },
         8,
+        router.svc.clone(),
     )
     .await?;
 

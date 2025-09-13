@@ -1,14 +1,15 @@
 //! Runtime configuration loaded from environment variables.
 
+use std::sync::Arc;
+
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 use rag_store::{DistanceKind, RagConfig, RagFilter};
 use serde_json::Value;
 
 /// Config bag for the gateway. All fields have defaults via `from_env`.
 #[derive(Clone, Debug)]
 pub struct ContextorConfig {
-    pub ollama_host: String,
-    pub chat_model: String,  // e.g. "qwen3:32b"
-    pub embed_model: String, // e.g. "dengcao/Qwen3-Embedding-0.6B:Q8_0"
+    pub svc: Arc<LlmServiceProfiles>,
 
     // RAG retrieval knobs
     pub initial_top_k: u64,
@@ -38,7 +39,7 @@ impl ContextorConfig {
     /// let cfg = ContextorConfig::from_env();
     /// assert!(cfg.initial_top_k >= 1);
     /// ```
-    pub fn from_env() -> Self {
+    pub fn new(svc: Arc<LlmServiceProfiles>) -> Self {
         let initial_filter = std::env::var("RAG_FILTER_KEY")
             .ok()
             .and_then(|k| {
@@ -51,9 +52,7 @@ impl ContextorConfig {
             });
 
         Self {
-            ollama_host: env("OLLAMA_URL", "http://127.0.0.1:11434"),
-            chat_model: env("OLLAMA_MODEL", "qwen3:32b"),
-            embed_model: env("OLLAMA_EMBED_MODEL", "dengcao/Qwen3-Embedding-0.6B:Q8_0"),
+            svc: svc,
 
             initial_top_k: parse("RAG_TOP_K", 12),
             context_k: parse("CTX_K", 6usize),

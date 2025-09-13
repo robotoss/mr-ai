@@ -27,6 +27,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai-llm-service"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "alloc-no-stdlib"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+
+[[package]]
+name = "alloc-stdlib"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94fb8275041c72129eb51b7d0322c29b8387a0386127718b096429201a5d6ece"
+dependencies = [
+ "alloc-no-stdlib",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -57,6 +86,7 @@ checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 name = "api"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "anyhow",
  "axum 0.8.4",
  "codegraph-prep",
@@ -75,6 +105,7 @@ version = "0.4.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddb939d66e4ae03cee6091612804ba446b12878410cfa17f785f4dd67d4014e8"
 dependencies = [
+ "brotli",
  "flate2",
  "futures-core",
  "memchr",
@@ -265,6 +296,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "brotli"
+version = "8.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bd8b9603c7aa97359dbd97ecf258968c95f3adddd6db2f7e7a5bef101c84560"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "874bb8112abecc98cbd6d81ea4fa7e94fb9449648c93cc89aa40c81c24d7de03"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -378,6 +430,7 @@ dependencies = [
 name = "contextor"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "indicatif 0.17.11",
  "rag-store",
  "reqwest",
@@ -1369,6 +1422,7 @@ dependencies = [
 name = "mr-ai-backend"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "api",
  "dotenvy",
  "tokio",
@@ -1380,6 +1434,7 @@ dependencies = [
 name = "mr-reviewer"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "chrono",
  "codegraph-prep",
  "contextor",
@@ -1741,6 +1796,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 name = "rag-store"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "futures",
  "indicatif 0.18.0",
  "qdrant-client",

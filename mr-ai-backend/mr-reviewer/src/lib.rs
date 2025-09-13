@@ -25,13 +25,16 @@ pub mod publish; // step 5
 
 mod telemetry;
 
-use std::time::Instant;
+use ai_llm_service::service_profiles::LlmServiceProfiles;
+use std::{sync::Arc, time::Instant};
 use tracing::debug;
 
 use errors::MrResult;
-use git_providers::{ChangeRequestId, CrBundle, ProviderClient, ProviderConfig};
+use git_providers::{ChangeRequestId, CrBundle, ProviderClient};
 use lang::SymbolIndex;
 use map::MappedTarget;
+
+use crate::git_providers::ProviderConfig;
 
 /// Final output of steps 1–3 (plan for step 4).
 #[derive(Debug, Clone)]
@@ -48,7 +51,7 @@ pub struct ReviewPlan {
 pub async fn run_review(
     cfg: ProviderConfig,
     id: ChangeRequestId,
-    llm_cfg: review::llm::LlmConfig,
+    svc: Arc<LlmServiceProfiles>,
     pub_cfg: publish::PublishConfig,
 ) -> MrResult<(ReviewPlan, Vec<review::DraftComment>)> {
     // --- Step 1: bundle fetch with cache ------------------------------------
@@ -145,7 +148,7 @@ pub async fn run_review(
     // --- Step 4: context → prompt → LLM (dual-model) → policy ---------------
     let t4 = Instant::now();
     debug!("step4: build draft comments (context → prompt → llm → policy)");
-    let drafts = review::build_draft_comments(&plan, llm_cfg).await?;
+    let drafts = review::build_draft_comments(&plan, svc).await?;
     debug!(
         "step4: drafts built (count={}) in {} ms",
         drafts.len(),

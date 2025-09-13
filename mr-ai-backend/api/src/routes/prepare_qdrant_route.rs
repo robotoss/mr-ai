@@ -1,6 +1,11 @@
+use std::sync::Arc;
+
+use axum::extract::State;
 use rag_store::{OllamaConfig, OllamaEmbedder, RagConfig, RagStore};
 
-pub async fn prepare_qdrant() -> &'static str {
+use crate::core::app_state::AppState;
+
+pub async fn prepare_qdrant(State(state): State<Arc<AppState>>) -> &'static str {
     // 1) Configure store
     let cfg = RagConfig::from_env();
 
@@ -23,8 +28,7 @@ pub async fn prepare_qdrant() -> &'static str {
     };
 
     let ollama = OllamaEmbedder::new(OllamaConfig {
-        url: std::env::var("OLLAMA_URL").unwrap(),
-        model: std::env::var("EMBEDDING_MODEL").unwrap(),
+        svc: state.svc.clone(),
         dim: std::env::var("EMBEDDING_DIM").unwrap().parse().unwrap(),
     });
 

@@ -1,4 +1,6 @@
-use mr_reviewer::review::llm::LlmConfig;
+use std::sync::Arc;
+
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 
 /// Shared state for all HTTP handlers.
 #[derive(Clone)]
@@ -10,12 +12,12 @@ pub struct AppState {
     /// Shared secret to protect the trigger endpoint from random callers.
     pub trigger_secret: String,
     /// Configuration for the LLM used(e.g., Ollama).
-    pub llm_config: LlmConfig,
+    pub svc: Arc<LlmServiceProfiles>,
 }
 
 impl AppState {
     /// Load shared state from environment variables.
-    pub fn from_env() -> Self {
+    pub fn new(svc: Arc<LlmServiceProfiles>) -> Self {
         Self {
             gitlab_api_base: std::env::var("GITLAB_API_BASE")
                 .unwrap_or_else(|_| "https://gitlab.com/api/v4".into()),
@@ -23,7 +25,7 @@ impl AppState {
             trigger_secret: std::env::var("TRIGGER_SECRET")
                 .unwrap_or_else(|_| "super-secret".into()),
 
-            llm_config: LlmConfig::from_env(),
+            svc: svc,
         }
     }
 }

@@ -1,10 +1,15 @@
 //! POST /ask_question — asks the LLM with RAG context.
 
-use axum::{Json, http::StatusCode};
+use std::sync::Arc;
+
+use axum::{Json, extract::State, http::StatusCode};
 
 use contextor::{AskOptions, QaAnswer, ask_with_opts};
 
-use crate::routes::ask::ask_request::{AskRequest, AskResponse, CtxItem};
+use crate::{
+    core::app_state::AppState,
+    routes::ask::ask_request::{AskRequest, AskResponse, CtxItem},
+};
 
 /// Handler: POST /ask_question
 ///
@@ -15,6 +20,7 @@ use crate::routes::ask::ask_request::{AskRequest, AskResponse, CtxItem};
 ///   -d '{"question":"Where is gamesIcon defined?","top_k":8,"context_k":5}'
 /// ```
 pub async fn ask_question(
+    State(state): State<Arc<AppState>>,
     Json(body): Json<AskRequest>,
 ) -> Result<Json<AskResponse>, (StatusCode, String)> {
     // Build AskOptions (fallback to env if client omits values)
@@ -27,7 +33,7 @@ pub async fn ask_question(
     }
 
     // Delegate to contextor (RAG + LLM)
-    let QaAnswer { answer, context } = ask_with_opts(&body.question, opts)
+    let QaAnswer { answer, context } = ask_with_opts(state.svc.clone(), &body.question, opts)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 

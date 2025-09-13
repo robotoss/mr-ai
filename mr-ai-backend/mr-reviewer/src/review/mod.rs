@@ -22,25 +22,24 @@ mod util;
 use crate::errors::MrResult;
 use crate::map::TargetRef;
 use crate::review::dedup_llm::dedup_drafts_llm_async;
+use crate::review::llm::EscalationPolicy;
 use crate::review::llm_ext::TraceCtx;
 use crate::{ReviewPlan, telemetry::prompt_dump::dump_prompt_for_target};
 
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 use context::{
     AnchorRange, PrimaryCtx, collect_added_lines, infer_anchor_by_signature,
     infer_anchor_prefer_added, patch_applies_to_head, reanchor_via_patch,
     unused_import_claim_is_false_positive,
 };
-use llm::{LlmConfig, LlmRouter};
+use llm::LlmRouter;
 use policy::{ParsedFinding, Severity, parse_and_validate};
 use prompt::{build_refine_prompt, build_strict_prompt};
 use serde::Serialize;
 
+use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Instant};
 use tracing::{debug, info, warn};
-
-/// Build-only mode: construct and dump final prompts, never call any LLMs.
-/// Set to `false` to restore normal behavior.
-const PROMPT_BUILD_ONLY: bool = false;
 
 /// Final product of step 4: drafts suitable for publication.
 #[derive(Debug, Clone)]
@@ -127,19 +126,12 @@ enum RouteDecision {
 /// Build draft comments (step 4).
 pub async fn build_draft_comments(
     plan: &ReviewPlan,
-    llm_cfg: LlmConfig,
+    svc: Arc<LlmServiceProfiles>,
 ) -> MrResult<Vec<DraftComment>> {
-    let router = LlmRouter::from_config(llm_cfg);
+    let router = LlmRouter::new(svc.clone(), EscalationPolicy::from_env());
 
     let t0 = Instant::now();
     debug!("step4: build draft comments (context → prompt → llm → policy)");
-
-    // Warm both clients to avoid cold-start cliffs.
-    if !PROMPT_BUILD_ONLY {
-        // Skip warmups in build-only mode.
-        router.fast.warmup().await;
-        router.slow.warmup().await;
-    }
 
     let mut drafts: Vec<DraftComment> = Vec::new();
     let mut used_slow = 0usize;
@@ -217,7 +209,7 @@ pub async fn build_draft_comments(
 
         // Convert preq_ctx.hits to "related" strings (compatible with existing prompt builder).
         let mut related: Vec<RelatedBlock> =
-            context::fetch_related_context(&plan.symbols, tgt).await?;
+            context::fetch_related_context(&plan.symbols, tgt, svc.clone()).await?;
         for h in preq_ctx.hits {
             // Each hit is stored as a synthetic RELATED block.
             related.push(RelatedBlock {
@@ -235,7 +227,7 @@ pub async fn build_draft_comments(
 
         // Ask FAST for RAG hints (safe to run in build-only mode; we skip only final generations).
         let rag_hints = match crate::review::llm_ext::ask_rag_hints_fast(
-            &router.fast,
+            svc.clone(),
             &ctx,
             &tgt.target,
             &trace,
@@ -269,33 +261,28 @@ pub async fn build_draft_comments(
         // Dump the "fast" prompt (even if we pre-route to SLOW, this is useful for telemetry).
         dump_prompt_for_target(&head_sha, idx, "fast", tgt, &prompt, prompt_tokens_approx);
 
-        // Build-only mode: also dump the final "slow/refine" prompt and skip all LLM calls.
-        if PROMPT_BUILD_ONLY {
-            // We don't have a previous draft here; build a generic refine prompt.
-            let refine = build_refine_prompt(None, tgt, &ctx, &related);
-            let refine_tokens = refine.chars().count() / 4;
-            dump_prompt_for_target(&head_sha, idx, "slow", tgt, &refine, refine_tokens);
+        // We don't have a previous draft here; build a generic refine prompt.
+        let refine = build_refine_prompt(None, tgt, &ctx, &related);
+        let refine_tokens = refine.chars().count() / 4;
+        dump_prompt_for_target(&head_sha, idx, "slow", tgt, &refine, refine_tokens);
 
-            // Record a DryRun row for operator insight; no drafts are produced.
-            rows.push(make_report_row(
-                idx,
-                &tgt.target,
-                &tgt.snippet_hash,
-                None,     // no final anchor in build-only mode
-                "DryRun", // severity marker for report
-                0.0,      // confidence
-                prompt_tokens_approx,
-                false, // escalated
-                0,     // fast_ms
-                None,  // slow_ms
-                !related.is_empty() || ctx.full_file_readonly.is_some(),
-                0,             // body_len
-                String::new(), // body_markdown
-                &tgt.preview,
-            ));
-            // Skip the rest of the loop: no LLM route, no parsing, no drafts.
-            continue;
-        }
+        // Record a DryRun row for operator insight; no drafts are produced.
+        rows.push(make_report_row(
+            idx,
+            &tgt.target,
+            &tgt.snippet_hash,
+            None,     // no final anchor in build-only mode
+            "DryRun", // severity marker for report
+            0.0,      // confidence
+            prompt_tokens_approx,
+            false, // escalated
+            0,     // fast_ms
+            None,  // slow_ms
+            !related.is_empty() || ctx.full_file_readonly.is_some(),
+            0,             // body_len
+            String::new(), // body_markdown
+            &tgt.preview,
+        ));
 
         // --- Pre-routing decision BEFORE running FAST ---
         let tk_hint = match &tgt.target {
@@ -592,9 +579,7 @@ pub async fn build_draft_comments(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(12);
-    if !PROMPT_BUILD_ONLY {
-        dedup_drafts_llm_async(&mut drafts, &router, dedup_budget).await;
-    }
+    dedup_drafts_llm_async(&mut drafts, &router, dedup_budget).await;
 
     let elapsed = t0.elapsed().as_millis();
     let escalated_total = used_slow;

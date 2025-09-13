@@ -1,34 +1,115 @@
-//! LLM layer with dual-model routing (fast + slow).
+//! LLM routing layer on top of `ai-llm-service` profiles (fast + slow + embedding).
+//!
+//! This module keeps only the *routing* logic (escalation policy and decisions)
+//! and delegates actual generation/embedding calls to `LlmServiceProfiles`.
+//!
+//! - No HTTP code here.
+//! - No provider-specific structs here.
+//! - All inference is performed by `ai-llm-service`.
+//!
+//! Typical usage:
+//! ```no_run
+//! use std::sync::Arc;
+//! use ai_llm_service::service_profiles::LlmServiceProfiles;
+//! use crate::llm_router::{LlmRouter, EscalationPolicy, RouteHint, TargetKindHint};
+//!
+//! async fn example(router: &LlmRouter) -> Result<(), crate::errors::Error> {
+//!     // Route before running FAST
+//!     let decision = router.route_for(&RouteHint {
+//!         target_kind: TargetKindHint::Symbol,
+//!         prompt_tokens_approx: 3_000,
+//!         severity: crate::review::policy::Severity::High,
+//!         confidence: 0.5,
+//!         used_escalations: 0,
+//!         range_span_lines: Some(120),
+//!     });
+//!
+//!     let text = match decision {
+//!         crate::llm_router::RouteDecision::Fast => router.generate_fast("prompt").await?,
+//!         crate::llm_router::RouteDecision::Slow => router.generate_slow("prompt").await?,
+//!     };
+//!     println!("{}", text);
+//!     Ok(())
+//! }
+//! ```
 
-use std::time::Duration;
+use ai_llm_service::service_profiles::LlmServiceProfiles;
+use std::sync::Arc;
 use tracing::debug;
 
-use crate::errors::Error;
+use crate::errors::ProviderError;
 
-#[derive(Debug, Clone, Copy)]
-pub enum LlmKind {
-    Ollama,
+/// Routing hint target granularity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKindHint {
+    /// Single-line hint (very localized).
+    Line,
+    /// Range of lines (medium locality).
+    Range,
+    /// Symbol-level (function/module/class) — usually harder reasoning.
+    Symbol,
+    /// Entire file.
+    File,
+    /// Global or cross-file reasoning.
+    Global,
 }
 
-/// Model configuration (per endpoint).
+/// Routing hint supplied by the caller.
 #[derive(Debug, Clone)]
-pub struct ModelConfig {
-    pub model: String,
-    pub endpoint: String,
-    pub max_tokens: Option<u32>,
+pub struct RouteHint {
+    /// Target kind (helps detect heavy reasoning upfront).
+    pub target_kind: TargetKindHint,
+    /// Approximate prompt tokens (heuristic: ~4 chars ≈ 1 token).
+    pub prompt_tokens_approx: usize,
+    /// Estimated/expected severity.
+    pub severity: crate::review::policy::Severity,
+    /// Estimated confidence in the current result (0..1).
+    pub confidence: f32,
+    /// Already used slow escalations in this run.
+    pub used_escalations: usize,
+    /// Optional line-span for `Range`.
+    pub range_span_lines: Option<usize>,
 }
 
-/// Escalation policy knobs controlling when to call the SLOW model.
+/// Router decision: run with the fast or the slow profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteDecision {
+    /// Use fast profile.
+    Fast,
+    /// Use slow profile (higher quality / cost).
+    Slow,
+}
+
+impl RouteDecision {
+    /// Returns `true` if the decision is slow.
+    pub fn is_slow(self) -> bool {
+        matches!(self, RouteDecision::Slow)
+    }
+}
+
+/// Escalation policy controlling when to call the SLOW model.
 #[derive(Debug, Clone)]
 pub struct EscalationPolicy {
+    /// Master switch.
     pub enabled: bool,
+    /// Upper bound on number of slow escalations in a run.
     pub max_escalations: usize,
+    /// Minimum severity gate required to allow escalation.
     pub min_severity: crate::review::policy::Severity,
+    /// Escalate when confidence is below this threshold.
     pub min_confidence: f32,
+    /// Escalate when prompt tokens exceed this threshold.
     pub long_prompt_tokens: usize,
 }
 
 impl EscalationPolicy {
+    /// Loads escalation knobs from environment variables.
+    ///
+    /// - `REVIEW_ESCALATE_ENABLED` (default: `"true"`)
+    /// - `REVIEW_ESCALATE_MAX` (default: `5`)
+    /// - `REVIEW_ESCALATE_SEVERITY` (`"High"|"Medium"|"Low"`, default: `"High"`)
+    /// - `REVIEW_ESCALATE_MIN_CONF` (default: `0.55`)
+    /// - `REVIEW_ESCALATE_LONG_PROMPT_TOK` (default: `2500`)
     pub fn from_env() -> Self {
         let enabled =
             std::env::var("REVIEW_ESCALATE_ENABLED").unwrap_or_else(|_| "true".into()) == "true";
@@ -63,168 +144,51 @@ impl EscalationPolicy {
     }
 }
 
-/// Config for routing between FAST and SLOW models.
-#[derive(Debug, Clone)]
-pub struct LlmConfig {
-    pub kind: LlmKind,
-    pub fast: ModelConfig,
-    pub slow: ModelConfig,
-    pub routing: EscalationPolicy,
-}
-
-impl LlmConfig {
-    pub fn from_env() -> Self {
-        let endpoint =
-            std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-        let slow_model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3:32b".to_string());
-        let fast_model =
-            std::env::var("OLLAMA_MODEL_FAST_MODEL").unwrap_or_else(|_| slow_model.clone());
-
-        let routing = EscalationPolicy::from_env();
-
-        LlmConfig {
-            kind: LlmKind::Ollama,
-            fast: ModelConfig {
-                model: fast_model,
-                endpoint: endpoint.clone(),
-                max_tokens: None,
-            },
-            slow: ModelConfig {
-                model: slow_model,
-                endpoint,
-                max_tokens: None,
-            },
-            routing,
-        }
-    }
-}
-
-/// Thin Ollama client reused by router.
-#[derive(Debug, Clone)]
-pub struct LlmClient {
-    http: reqwest::Client,
-    cfg: ModelConfig,
-}
-
-impl LlmClient {
-    pub fn new(cfg: ModelConfig) -> Self {
-        let http = reqwest::Client::builder()
-            .http2_keep_alive_interval(Some(Duration::from_secs(20)))
-            .pool_idle_timeout(Some(Duration::from_secs(90)))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .build()
-            .expect("http client");
-        Self { http, cfg }
-    }
-
-    /// Best-effort warmup to avoid cold starts.
-    pub async fn warmup(&self) {
-        let _ = self.generate_raw("ping").await;
-    }
-
-    /// Minimal `/api/generate` wrapper, returns plain text.
-    pub async fn generate_raw(&self, prompt: &str) -> Result<String, Error> {
-        #[derive(serde::Serialize)]
-        struct Req<'a> {
-            model: &'a str,
-            prompt: &'a str,
-            stream: bool,
-        }
-        #[derive(serde::Deserialize)]
-        struct Resp {
-            response: String,
-        }
-
-        let url = format!("{}/api/generate", self.cfg.endpoint.trim_end_matches('/'));
-        debug!("llm.generate model={} url={}", self.cfg.model, url);
-        let resp = self
-            .http
-            .post(&url)
-            .json(&Req {
-                model: &self.cfg.model,
-                prompt,
-                stream: false,
-            })
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(crate::errors::Error::Provider(
-                crate::errors::ProviderError::HttpStatus(resp.status().as_u16()),
-            ));
-        }
-        let body: Resp = resp.json().await?;
-        Ok(body.response)
-    }
-}
-
-/// Target kind hint for routing.
-/// Keep this local (duplicated) to avoid depending on mapping module here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetKindHint {
-    Line,
-    Range,
-    Symbol,
-    File,
-    Global,
-}
-
-/// Routing hint supplied by the caller (step4 orchestrator).
-#[derive(Debug, Clone)]
-pub struct RouteHint {
-    pub target_kind: TargetKindHint,
-    /// Approx prompt tokens (4 chars ≈ 1 token heuristic).
-    pub prompt_tokens_approx: usize,
-    /// Severity estimated/parsed from FAST (or expected).
-    pub severity: crate::review::policy::Severity,
-    /// Confidence estimated by heuristics (0..1).
-    pub confidence: f32,
-    /// Already used slow escalations in this run.
-    pub used_escalations: usize,
-    /// Optional: range span in lines (helps detect "big range").
-    pub range_span_lines: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteDecision {
-    Fast,
-    Slow,
-}
-
-impl RouteDecision {
-    pub fn is_slow(self) -> bool {
-        matches!(self, RouteDecision::Slow)
-    }
-}
-
-/// Router holding both fast and slow clients + policy.
+/// Thin router that delegates all inference to `LlmServiceProfiles` and
+/// applies an escalation policy for deciding between fast and slow runs.
 #[derive(Debug, Clone)]
 pub struct LlmRouter {
-    pub fast: LlmClient,
-    pub slow: LlmClient,
+    /// Shared profiles service (fast/slow/embedding) from `ai-llm-service`.
+    pub svc: Arc<LlmServiceProfiles>,
+    /// Escalation policy knobs.
     pub policy: EscalationPolicy,
 }
 
 impl LlmRouter {
-    pub fn from_config(cfg: LlmConfig) -> Self {
-        let fast = LlmClient::new(cfg.fast);
-        let slow = LlmClient::new(cfg.slow);
-        Self {
-            fast,
-            slow,
-            policy: cfg.routing,
-        }
+    /// Creates a new router using the provided shared profiles service.
+    pub fn new(svc: Arc<LlmServiceProfiles>, policy: EscalationPolicy) -> Self {
+        Self { svc, policy }
     }
 
-    pub async fn generate_fast(&self, prompt: &str) -> Result<String, Error> {
-        self.fast.generate_raw(prompt).await
-    }
-    pub async fn generate_slow(&self, prompt: &str) -> Result<String, Error> {
-        self.slow.generate_raw(prompt).await
+    /// Generates with the **fast** profile.
+    ///
+    /// # Errors
+    /// Maps [`AiLlmError`] into your crate's `Error` via `From`.
+    pub async fn generate_fast(&self, prompt: &str) -> Result<String, crate::errors::Error> {
+        debug!("router: generate_fast");
+        self.svc
+            .generate_fast(prompt, None)
+            .await
+            .map_err(|_| crate::errors::Error::Provider(ProviderError::Forbidden))
     }
 
-    /// Decide whether to escalate *after* FAST (legacy path).
-    /// Kept for compatibility; used when we already ran FAST.
+    /// Generates with the **slow** profile.
+    ///
+    /// If slow profile is not configured, the profiles service falls back to fast.
+    ///
+    /// # Errors
+    /// Maps [`AiLlmError`] into your crate's `Error` via `From`.
+    pub async fn generate_slow(&self, prompt: &str) -> Result<String, crate::errors::Error> {
+        debug!("router: generate_slow");
+        self.svc
+            .generate_slow(prompt, None)
+            .await
+            .map_err(|_| crate::errors::Error::Provider(ProviderError::Forbidden))
+    }
+
+    /// Decide whether to escalate **after** FAST (legacy path).
+    ///
+    /// Use this when you already ran FAST and want to decide if SLOW is needed.
     pub fn should_escalate(
         &self,
         sev: crate::review::policy::Severity,
@@ -239,7 +203,7 @@ impl LlmRouter {
             return false;
         }
 
-        // Severity is a gate: if finding is below gate, we never escalate.
+        // Severity gate: if finding is below gate, we never escalate.
         let sev_gate = rank(sev) >= rank(self.policy.min_severity);
 
         // Signals
@@ -249,7 +213,8 @@ impl LlmRouter {
         sev_gate && (conf_low || too_long)
     }
 
-    /// Decide whether to route directly to SLOW *before* running FAST.
+    /// Decide whether to route directly to SLOW **before** running FAST.
+    ///
     /// This prevents wasteful double-inference on obviously heavy targets.
     pub fn route_for(&self, hint: &RouteHint) -> RouteDecision {
         if !self.policy.enabled {
@@ -291,6 +256,8 @@ impl LlmRouter {
         RouteDecision::Fast
     }
 }
+
+/* --------------------- helpers --------------------- */
 
 fn rank(s: crate::review::policy::Severity) -> u8 {
     match s {

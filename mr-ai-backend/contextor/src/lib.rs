@@ -8,12 +8,14 @@
 mod api_types;
 mod cfg;
 mod error;
-mod llm;
 mod progress;
 mod prompt;
 mod retrieve;
 mod select;
 
+use std::sync::Arc;
+
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 pub use api_types::{AskOptions, QaAnswer, UsedChunk};
 pub use error::ContextorError;
 pub use progress::{IndicatifProgress, NoopProgress, Progress};
@@ -39,8 +41,8 @@ pub use retrieve::{RetrieveOptions, retrieve_with_opts};
 /// println!("{answer}");
 /// # }
 /// ```
-pub async fn ask(question: &str) -> Result<String, ContextorError> {
-    let qa = ask_with_opts(question, AskOptions::default()).await?;
+pub async fn ask(svc: Arc<LlmServiceProfiles>, question: &str) -> Result<String, ContextorError> {
+    let qa = ask_with_opts(svc, question, AskOptions::default()).await?;
     Ok(qa.answer)
 }
 
@@ -68,12 +70,16 @@ pub async fn ask(question: &str) -> Result<String, ContextorError> {
 /// println!("Context items: {}", qa.context.len());
 /// # }
 /// ```
-pub async fn ask_with_opts(question: &str, opts: AskOptions) -> Result<QaAnswer, ContextorError> {
+pub async fn ask_with_opts(
+    svc: Arc<LlmServiceProfiles>,
+    question: &str,
+    opts: AskOptions,
+) -> Result<QaAnswer, ContextorError> {
     let prog = IndicatifProgress::spinner();
 
     // 1) Load config from env
     prog.message("loading config");
-    let gcfg = ContextorConfig::from_env();
+    let gcfg = ContextorConfig::new(svc.clone());
 
     // Resolve effective knobs (0 => use env default)
     let top_k = if opts.top_k == 0 {
@@ -91,12 +97,10 @@ pub async fn ask_with_opts(question: &str, opts: AskOptions) -> Result<QaAnswer,
     prog.step("creating store and clients");
     let store = RagStore::new(gcfg.make_rag_config())?;
     let emb_cfg = OllamaConfig {
-        url: gcfg.ollama_host.clone(),
-        model: gcfg.embed_model.clone(),
+        svc: svc,
         dim: gcfg.make_rag_config().embedding_dim.unwrap_or(1024),
     };
-    let embedder = OllamaEmbedder::new(emb_cfg);
-    let chat = llm::OllamaChat::new(&gcfg.ollama_host, &gcfg.chat_model)?;
+    let embedder = OllamaEmbedder::new(emb_cfg.clone());
 
     // 3) Retrieve
     prog.step("embedding + retrieving from qdrant");
@@ -131,7 +135,12 @@ pub async fn ask_with_opts(question: &str, opts: AskOptions) -> Result<QaAnswer,
     let system_prompt = prompt::DEFAULT_SYSTEM;
     let user_prompt = prompt::build_user_prompt(question, &expanded, gcfg.max_ctx_chars);
     prog.step("chatting with model");
-    let answer = chat.chat(system_prompt, &user_prompt).await?;
+    let prompt = format!("{}\n{}", system_prompt, &user_prompt);
+    let answer = emb_cfg
+        .svc
+        .generate_slow(&prompt, None)
+        .await
+        .expect("Failed to ask");
 
     // 7) Convert used context for callers
     prog.finish("done");

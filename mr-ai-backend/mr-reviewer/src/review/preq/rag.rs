@@ -1,10 +1,14 @@
 //! RAG adapter: run short queries against the project's vector index,
 //! unify result shape, and cap size to keep prompts small.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use super::RagHit;
 use crate::errors::MrResult;
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 use contextor::{RetrieveOptions, retrieve_with_opts};
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +51,7 @@ pub async fn fetch_context_flexible(
     need_symbols_like: &[String],
     use_ch: UseChannels,
     final_limit: usize,
+    svc: Arc<LlmServiceProfiles>,
 ) -> MrResult<Vec<RagHit>> {
     let mut syms_hits: Vec<RagHit> = Vec::new();
     let mut path_hits: Vec<RagHit> = Vec::new();
@@ -54,7 +59,7 @@ pub async fn fetch_context_flexible(
 
     // 1) Symbols-only pass (optional)
     if use_ch.use_symbols {
-        syms_hits = fetch_context_symbols_only(need_symbols_like, 3).await?;
+        syms_hits = fetch_context_symbols_only(need_symbols_like, 3, svc.clone()).await?;
     }
 
     // 2) Paths pass (optional): encode paths into query text and retrieve.
@@ -65,7 +70,7 @@ pub async fn fetch_context_flexible(
             context_k: 6,
             ..Default::default()
         };
-        let chunks = retrieve_with_opts(&q, opts)
+        let chunks = retrieve_with_opts(&q, opts, svc.clone())
             .await
             .map_err(|e| crate::errors::Error::Other(format!("contextor failed: {e}")))?;
         path_hits = chunks
@@ -90,7 +95,7 @@ pub async fn fetch_context_flexible(
             context_k: 6,
             ..Default::default()
         };
-        let chunks = retrieve_with_opts(&q, opts)
+        let chunks = retrieve_with_opts(&q, opts, svc)
             .await
             .map_err(|e| crate::errors::Error::Other(format!("contextor failed: {e}")))?;
         text_hits = chunks
@@ -132,6 +137,7 @@ struct ScoredHit {
 async fn fetch_context_symbols_only(
     symbols: &[String],
     top_k_per_symbol: usize,
+    svc: Arc<LlmServiceProfiles>,
 ) -> MrResult<Vec<RagHit>> {
     // Simple guard
     if symbols.is_empty() {
@@ -154,7 +160,7 @@ async fn fetch_context_symbols_only(
         let query_text = format!("symbol: {sym}");
 
         // Call contextor facade → Qdrant.
-        let chunks = retrieve_with_opts(&query_text, opts.clone())
+        let chunks = retrieve_with_opts(&query_text, opts.clone(), svc.clone())
             .await
             .map_err(|e| crate::errors::Error::Other(format!("contextor failed: {e}")))?;
 
