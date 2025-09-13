@@ -33,6 +33,7 @@ use crate::{
 /// High-level operations:
 /// - [`OpenAiService::generate`]   — single, non-streaming chat completion
 /// - [`OpenAiService::embeddings`] — single embeddings vector retrieval
+#[derive(Debug)]
 pub struct OpenAiService {
     client: reqwest::Client,
     cfg: LlmModelConfig,

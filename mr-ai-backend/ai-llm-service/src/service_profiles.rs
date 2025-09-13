@@ -27,6 +27,7 @@ use crate::{
 ///
 /// Internally, it caches Ollama/OpenAI clients keyed by their configuration to
 /// avoid recreating HTTP clients on each call.
+#[derive(Debug)]
 pub struct LlmServiceProfiles {
     fast: LlmModelConfig,
     slow: LlmModelConfig,
@@ -291,7 +292,7 @@ impl LlmServiceProfiles {
 ///
 /// **Note:** `api_key` participates in the key to isolate clients with
 /// different credentials, but the key's fields are never logged.
-#[derive(Clone, Eq)]
+#[derive(Clone, Eq, Debug)]
 struct ClientKey {
     provider: LlmProvider,
     endpoint: String,

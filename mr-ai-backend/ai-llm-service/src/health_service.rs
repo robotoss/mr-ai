@@ -77,6 +77,7 @@ impl HealthStatus {
 ///
 /// The client is constructed with a default timeout. Individual probes may
 /// override the timeout per request based on the provided config.
+#[derive(Debug)]
 pub struct HealthService {
     client: reqwest::Client,
     default_timeout: Duration,

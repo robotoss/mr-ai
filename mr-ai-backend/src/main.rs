@@ -16,12 +16,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let fast = default_config::config_ollama_fast()?;
     let embedding = default_config::config_ollama_embedding()?;
 
-    let _svc = Arc::new(LlmServiceProfiles::new(
+    let svc = Arc::new(LlmServiceProfiles::new(
         slow,
         Some(fast),
         embedding,
         Some(10),
-    ));
+    )?);
+
+    let statuses = svc.health_all().await?;
+
+    println!("{:?}", statuses);
 
     api::start().await?;
     Ok(())

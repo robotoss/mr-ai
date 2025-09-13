@@ -30,6 +30,7 @@ use crate::{
 /// preconfigured `reqwest::Client` (with timeout). Provides two high-level calls:
 /// - [`OllamaService::generate`]   — single, non-streaming text generation
 /// - [`OllamaService::embeddings`] — single embeddings vector retrieval
+#[derive(Debug)]
 pub struct OllamaService {
     client: reqwest::Client,
     cfg: LlmModelConfig,
