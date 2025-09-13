@@ -1,8 +1,15 @@
-use std::{error::Error, sync::Arc};
+use std::{error::Error, str::FromStr, sync::Arc};
 
 use ai_llm_service::{config::default_config, service_profiles::LlmServiceProfiles};
 use api;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::Level;
+use tracing_subscriber::{
+    EnvFilter, Layer,
+    filter::{Directive, Targets},
+    fmt,
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -27,22 +34,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("{:?}", statuses);
 
-    api::start().await?;
+    api::start(svc).await?;
     Ok(())
 }
 
 fn init_tracing() {
-    // 1) base level for the whole app (env or fallback)
-    let base = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let base = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("trace"));
 
-    // 2) raise/lower level ONLY for this lib
-    let filter = base.add_directive(ai_llm_service::telemetry::level_directive(
-        tracing::Level::DEBUG,
-    ));
+    let filter = base.add_directive(Directive::from_str("mr_reviewer=trace").unwrap());
 
-    // 3) compose global subscriber with the lib's own styled layer
+    let fmt_all = fmt::layer();
+
+    let ai_layer = ai_llm_service::telemetry::layer::<_>()
+        .with_filter(Targets::new().with_target("ai_llm_service", Level::DEBUG));
+
     tracing_subscriber::registry()
         .with(filter)
-        .with(ai_llm_service::telemetry::layer::<_>()) // styles apply only to ai-llm-service
+        .with(fmt_all)
+        .with(ai_layer)
         .init();
 }

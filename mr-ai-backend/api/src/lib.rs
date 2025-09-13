@@ -4,6 +4,7 @@ mod core;
 mod models;
 mod routes;
 
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 use axum::{
     Router,
     routing::{get, post},
@@ -20,10 +21,10 @@ use crate::{
     },
 };
 
-pub async fn start() -> Result<(), Box<dyn Error>> {
+pub async fn start(svc: Arc<LlmServiceProfiles>) -> Result<(), Box<dyn Error>> {
     let host_url = env::var("API_ADDRESS").expect("API_ADDRESS must be set in environment");
 
-    let shared_state = Arc::new(AppState::from_env());
+    let shared_state = Arc::new(AppState::new(svc));
 
     let app = Router::new()
         .route("/prepare_graph", get(prepare_graph))

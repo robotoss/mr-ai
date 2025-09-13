@@ -36,7 +36,7 @@ pub async fn trigger_gitlab_mr(
         iid: p.mr_iid,
     };
 
-    match run_review(cfg, id, state.llm_config.clone(), pub_cfg).await {
+    match run_review(cfg, id, state.svc.clone(), pub_cfg).await {
         Ok(_bundle) => {
             // TODO: pass bundle to your queue/store; or keep it in cache only.
             Ok(StatusCode::ACCEPTED)

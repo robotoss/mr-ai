@@ -1,14 +1,15 @@
 // src/review/llm_ext.rs
 // FAST-side "what RAG do you need?" ask + tracing/dumps.
 
+use ai_llm_service::service_profiles::LlmServiceProfiles;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::{fs, path::PathBuf};
 use tracing::{debug, warn};
 
 use crate::errors::Error;
 use crate::map::TargetRef;
 use crate::review::context::{AnchorRange, PrimaryCtx};
-use crate::review::llm::LlmClient;
 
 /// Trace metadata to dump prompt/response per item into code_data/mr_tmp/<sha>/rag/
 #[derive(Debug, Clone)]
@@ -37,7 +38,7 @@ impl RagHints {
 /// Ask FAST model what extra RAG it would like to see for this target.
 /// Returns parsed `RagHints` or empty on safe parsing failure.
 pub async fn ask_rag_hints_fast(
-    fast: &LlmClient,
+    svc: Arc<LlmServiceProfiles>,
     ctx: &PrimaryCtx,
     tgt: &TargetRef,
     trace: &TraceCtx,
@@ -73,7 +74,10 @@ pub async fn ask_rag_hints_fast(
     // Dump the prompt used for hints
     let _ = dump_bytes(trace, "rag_hint_fast_prompt.txt", prompt.as_bytes());
 
-    let raw = fast.generate_raw(&prompt).await?;
+    let raw = svc
+        .generate_fast(&prompt, None)
+        .await
+        .expect("generate_fast failed");
     let _ = dump_bytes(trace, "rag_hint_fast_raw.txt", raw.as_bytes());
 
     // Be robust if provider sometimes wraps JSON with code fences.

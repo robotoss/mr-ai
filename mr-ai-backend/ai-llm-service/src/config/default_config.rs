@@ -84,7 +84,7 @@ pub fn config_ollama_slow() -> Result<LlmModelConfig, AiLlmError> {
         max_tokens,
         temperature: Some(0.2),
         top_p: None,
-        timeout_secs: Some(60),
+        timeout_secs: Some(600),
     })
 }
 
@@ -119,7 +119,7 @@ pub fn config_ollama_fast() -> Result<LlmModelConfig, AiLlmError> {
         max_tokens,
         temperature: Some(0.7),
         top_p: Some(0.9),
-        timeout_secs: Some(45),
+        timeout_secs: Some(600),
     })
 }
 
