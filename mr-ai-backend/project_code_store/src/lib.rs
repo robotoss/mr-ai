@@ -1,92 +1,32 @@
-//! Async Git cloning utilities built on top of **gix** (gitoxide).
+//! Async Git cloning utilities built on `git2` (libgit2).
 //!
-//! ## Features
-//! - Concurrent cloning of multiple repositories with a configurable concurrency limit.
-//! - SSH and HTTPS URLs supported (relies on your system `ssh` agent/`~/.ssh/config`).
-//! - Repositories are placed under `code_data/{project_name}/{repo_name}`.
-//! - Target directory is cleaned (removed) per repository before cloning.
-//!
-//! ## Design
-//! `gix` exposes a blocking cloning API. To integrate smoothly with async code,
-//! each clone runs inside `tokio::task::spawn_blocking`, while a `tokio::sync::Semaphore`
-//! bounds the number of concurrent clones.
-//!
-//! ## Logging
-//! Uses `tracing` (`info!`, `warn!`, `debug!`, `error!`) with `#[instrument]` spans.
-//! To initialize logging in your binary, for example:
-//! ```ignore
-//! use tracing_subscriber::{fmt, EnvFilter};
-//!
-//! tracing_subscriber::fmt()
-//!     .with_env_filter(EnvFilter::from_default_env())
-//!     .compact()
-//!     .init();
-//! ```
-//!
-//! ## Cargo features (important)
-//! Make sure `gix` is compiled with:
-//! - `blocking-network-client`
-//! - `worktree-mutation`
-//!
-//! Example `Cargo.toml` rows:
-//! ```toml
-//! gix = { version = "0.73", default-features = false, features = ["blocking-network-client", "worktree-mutation"] }
-//! tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
-//! tracing = "0.1"
-//! thiserror = "1"
-//! ```
-//!
-//! ## Example
-//! ```ignore
-//! // In your async context:
-//! let urls = vec![
-//!     "git@github.com:owner/repo1.git".to_string(),
-//!     "https://gitlab.com/group/repo2.git".to_string(),
-//! ];
-//! git_clone::clone_list(urls, 4, "project_x".to_string()).await?;
-//! ```
+//! - Concurrency via `tokio::Semaphore` + `spawn_blocking`.
+//! - SSH auth: `SSH_KEY_PATH` (private key) or ssh-agent fallback.
+//! - HTTPS auth: `GIT_HTTP_TOKEN` (+ `GIT_HTTP_USER`, default `oauth2`).
+//! - Repos are cloned to `code_data/{project_name}/{repo_name}`; target dir removed if exists.
 
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
+    sync::Arc,
 };
 
-mod errors;
-
+use git2::{Cred, CredentialType, FetchOptions, RemoteCallbacks, build::RepoBuilder};
 use tokio::{sync::Semaphore, task};
 use tracing::{debug, error, info, instrument, warn};
 
-use errors::{GitCloneError, Result};
+pub mod errors;
+use errors::Result;
 
 /// Clone multiple repositories concurrently (bounded by `max_concurrency`).
 ///
-/// Repositories are placed under `code_data/{project_name}/{repo_name}`.
-/// The function ensures the base directory exists and then spawns a blocking
-/// task per repository clone, bounded by a semaphore.
-///
-/// ### Parameters
-/// - `urls`: List of Git repository URLs (SSH or HTTPS).
-/// - `max_concurrency`: Maximum number of clones to run in parallel (minimum 1).
-/// - `project_name`: Human-friendly project name used to build the target base path.
-///
-/// ### Returns
-/// - `Ok(())` on success (all clones completed).
-/// - `Err(GitCloneError)` if any clone or FS operation fails (fails fast).
-///
-/// ### Notes
-/// - Each target repo directory is **removed** before cloning to avoid dirty states.
-/// - SSH authentication is handled by your system `ssh` setup and/or agent.
-///
-/// ### Example
-/// ```ignore
-/// git_clone::clone_list(vec!["git@github.com:owner/repo.git".into()], 2, "demo".into()).await?;
-/// ```
+/// Target path for each repo: `code_data/{project_name}/{repo_name}`.
+/// The per-repo directory is removed before cloning.
 #[instrument(skip_all, fields(project = %project_name, max = max_concurrency, total = urls.len()))]
 pub async fn clone_list(
     urls: Vec<String>,
     max_concurrency: usize,
-    project_name: String,
+    project_name: &String,
 ) -> Result<()> {
     let base_dir = PathBuf::from(format!("code_data/{project_name}"));
     ensure_dir(&base_dir)?;
@@ -98,7 +38,6 @@ pub async fn clone_list(
         let base_dir = base_dir.clone();
         let permit = sem.clone().acquire_owned().await.unwrap();
 
-        // Heavy I/O runs on a blocking thread to avoid stalling the async runtime.
         tasks.push(task::spawn_blocking(move || {
             let _span = tracing::info_span!("clone_task", repo = %url).entered();
             let res = clone_one_blocking(&url, &base_dir);
@@ -107,7 +46,6 @@ pub async fn clone_list(
         }));
     }
 
-    // Wait for all tasks, returning the first error encountered (if any).
     for t in tasks {
         t.await??;
     }
@@ -116,25 +54,11 @@ pub async fn clone_list(
     Ok(())
 }
 
-/// **Blocking** single-repo clone that runs inside `spawn_blocking`.
+/// Blocking clone (runs inside `spawn_blocking`).
 ///
-/// This performs the canonical gix cloning sequence:
-/// 1) `prepare_clone()`
-/// 2) `fetch_then_checkout()`
-/// 3) `checkout.main_worktree()`
-///
-/// The target directory is removed beforehand if it already exists.
-///
-/// ### Parameters
-/// - `url`: Git repository URL (SSH or HTTPS).
-/// - `base_dir`: Base directory under which the `<repo_name>` folder will be created.
-///
-/// ### Returns
-/// - `Ok(())` on success.
-/// - `Err(GitCloneError)` on failure.
-///
-/// ### Panics
-/// - Does **not** panic; errors are propagated as `GitCloneError`.
+/// - Creates/cleans `<base_dir>/<repo_name>`.
+/// - Configures libgit2 credential callbacks for SSH/HTTPS.
+/// - Clones with `RepoBuilder`.
 #[instrument(skip(base_dir), fields(repo = %url))]
 fn clone_one_blocking(url: &str, base_dir: &Path) -> Result<()> {
     info!("start clone");
@@ -148,47 +72,92 @@ fn clone_one_blocking(url: &str, base_dir: &Path) -> Result<()> {
         fs::remove_dir_all(&target)?;
     }
 
-    // gix clone: prepare → fetch_then_checkout → main_worktree
-    let abort = AtomicBool::new(false);
+    // --- credentials callback ---
+    let key_path_env = std::env::var("SSH_KEY_PATH").ok();
+    let key_path_disk = Path::new("ssh_keys/bot_key");
+    let have_disk_key = key_path_disk.exists();
 
-    let (mut checkout, _outcome) = gix::prepare_clone(url, &target)
-        .map_err(|e| {
-            error!(error = %e, "prepare_clone failed");
-            GitCloneError::Git(format!("prepare_clone: {e}"))
-        })?
-        .fetch_then_checkout(gix::progress::Discard, &abort)
-        .map_err(|e| {
-            error!(error = %e, "fetch_then_checkout failed");
-            GitCloneError::Git(format!("fetch_then_checkout: {e}"))
-        })?;
+    let mut callbacks = RemoteCallbacks::new();
+    callbacks.credentials(move |url_str, username_from_url, allowed| {
+        let user = username_from_url.unwrap_or("git");
 
-    checkout
-        .main_worktree(gix::progress::Discard, &abort)
-        .map_err(|e| {
-            error!(error = %e, "checkout worktree failed");
-            GitCloneError::Git(format!("checkout worktree: {e}"))
-        })?;
+        // HTTPS with token from env (optional)
+        if url_str.starts_with("http") {
+            if let Ok(token) = std::env::var("GIT_HTTP_TOKEN") {
+                let http_user = std::env::var("GIT_HTTP_USER").unwrap_or_else(|_| "oauth2".into());
+                return Cred::userpass_plaintext(&http_user, &token);
+            }
+        }
 
-    info!(path = %target.display(), "clone completed");
-    Ok(())
+        // Prefer explicit SSH key path from env
+        if allowed.contains(CredentialType::SSH_KEY) {
+            if let Some(ref key) = key_path_env {
+                let key_path = Path::new(key);
+                if key_path.exists() {
+                    let pass = std::env::var("SSH_KEY_PASSPHRASE").ok();
+                    return Cred::ssh_key(user, None, key_path, pass.as_deref());
+                }
+            }
+            // fallback: ./ssh_keys/bot_key
+            if have_disk_key {
+                let pass = std::env::var("SSH_KEY_PASSPHRASE").ok();
+                return Cred::ssh_key(user, None, key_path_disk, pass.as_deref());
+            }
+        }
+
+        // Try ssh-agent
+        if allowed.contains(CredentialType::SSH_KEY) {
+            if let Ok(cred) = Cred::ssh_key_from_agent(user) {
+                return Ok(cred);
+            }
+        }
+
+        // libgit2 default creds (netrc/manager, etc.)
+        if allowed.contains(CredentialType::DEFAULT) {
+            if let Ok(cred) = Cred::default() {
+                return Ok(cred);
+            }
+        }
+
+        // If server asked only username, provide it
+        if allowed.contains(CredentialType::USERNAME) {
+            return Cred::username(user);
+        }
+
+        Err(git2::Error::from_str("no usable credentials"))
+    });
+
+    // You *may* want to relax TLS/host checks, but better keep defaults.
+    // callbacks.certificate_check(|_cert, _host| Ok(())); // <- not recommended for prod
+
+    let mut fetch_opts = FetchOptions::new();
+    fetch_opts.remote_callbacks(callbacks);
+
+    let mut builder = RepoBuilder::new();
+    builder.fetch_options(fetch_opts);
+
+    // Shallow clone example (optional):
+    // use git2::RepositoryInitOptions;
+    // fetch_opts.download_tags(git2::AutotagOption::All);
+    // builder.branch("main"); // checkout 'main'
+
+    info!(path = %target.display(), "begin clone");
+    match builder.clone(url, &target) {
+        Ok(_) => {
+            info!(path = %target.display(), "clone completed");
+            Ok(())
+        }
+        Err(e) => {
+            error!(error = %e, "clone failed");
+            Err(e.into())
+        }
+    }
 }
 
-/// Extract the repository folder name from common Git URL forms.
-///
-/// Supports:
-/// - `https://host/org/repo.git`
-/// - `ssh://git@host/org/repo.git`
-/// - `git@host:org/repo.git`
-///
-/// Trailing slashes and `.git` suffix are removed.
-///
-/// ### Examples
-/// ```rust
-/// # use crate::git_clone::mod as _; // doc-only placeholder
-/// let name = super::extract_repo_name("git@github.com:org/repo.git").unwrap();
-/// assert_eq!(name, "repo");
-/// ```
-#[instrument(level = "trace", skip_all, fields(url = %url))]
+/// Extract repository name from common Git URL forms:
+/// - https://host/org/repo.git
+/// - ssh://git@host/org/repo.git
+/// - git@host:org/repo.git
 fn extract_repo_name(url: &str) -> Option<String> {
     let trimmed = url.trim_end_matches('/');
     let last = if let Some(i) = trimmed.rfind('/') {
@@ -198,23 +167,10 @@ fn extract_repo_name(url: &str) -> Option<String> {
     } else {
         trimmed
     };
-    let name = last.trim_end_matches(".git").to_string();
-    debug!(%name, "extracted repo name");
-    Some(name)
+    Some(last.trim_end_matches(".git").to_string())
 }
 
-/// Ensure the given directory exists (create it if necessary).
-///
-/// Returns `Ok(())` if the directory already exists or was created successfully.
-///
-/// ### Errors
-/// - Returns `GitCloneError::Io` if directory creation fails.
-///
-/// ### Example
-/// ```ignore
-/// ensure_dir(std::path::Path::new("code_data/project_x"))?;
-/// ```
-#[instrument(level = "trace", skip_all, fields(path = %dir.display()))]
+/// Ensure the base directory exists.
 fn ensure_dir(dir: &Path) -> Result<()> {
     if !dir.exists() {
         fs::create_dir_all(dir)?;

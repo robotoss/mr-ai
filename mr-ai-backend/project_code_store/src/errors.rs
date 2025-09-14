@@ -4,9 +4,6 @@ pub type Result<T> = std::result::Result<T, GitCloneError>;
 
 #[derive(Debug, Error)]
 pub enum GitCloneError {
-    #[error("required env var is missing: {0}")]
-    MissingEnv(&'static str),
-
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -14,5 +11,5 @@ pub enum GitCloneError {
     Join(#[from] tokio::task::JoinError),
 
     #[error("git error: {0}")]
-    Git(String),
+    Git(#[from] git2::Error),
 }

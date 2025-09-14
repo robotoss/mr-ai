@@ -88,10 +88,4 @@ impl AppState {
             llm_profiles,
         }
     }
-
-    /// Convenience constructor: load config from ENV and return state.
-    pub fn try_from_env(llm_profiles: Arc<LlmServiceProfiles>) -> Result<Self, ConfigError> {
-        let config = Arc::new(AppConfig::from_env()?);
-        Ok(Self::new(config, llm_profiles))
-    }
 }

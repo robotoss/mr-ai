@@ -14,7 +14,7 @@ use crate::{
 };
 
 pub async fn sync_git_route(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(r): Json<GitProjectsRequest>,
 ) -> Response {
@@ -23,6 +23,7 @@ pub async fn sync_git_route(
     }
 
     let urls = r.urls;
+    let url_len = urls.len();
 
     if urls.is_empty() {
         let err = ApiResponse::<()>::error(
@@ -36,8 +37,24 @@ pub async fn sync_git_route(
         return err.into_response_with_status(StatusCode::BAD_REQUEST);
     }
 
+    match project_code_store::clone_list(urls, 2, &state.config.project_name).await {
+        Ok(_) => {}
+        Err(err) => {
+            let err = ApiResponse::<()>::error(
+                "BAD_REQUEST",
+                "Field clone repositories",
+                vec![ApiErrorDetail {
+                    path: Some("clone_list".into()),
+                    hint: Some(format!("{}", err)),
+                }],
+            );
+
+            return err.into_response_with_status(StatusCode::BAD_REQUEST);
+        }
+    };
+
     let ok = ApiResponse::success(GitProjectsResponse {
-        message: format!("Success get {} url(s)", urls.len()),
+        message: format!("Success clone {} git(s)", url_len),
     });
 
     ok.into_response_with_status(StatusCode::OK)

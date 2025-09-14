@@ -1,5 +1,5 @@
 [package]
-name = "project_code_store"
+name = "project-code-store"
 version = "0.1.0"
 edition = "2024"
 authors = ["Yeftifeyev Konstantin <zoxo@outlook.com>"]
@@ -9,7 +9,7 @@ keywords = ["git", "gix", "gitoxide", "clone", "async", "tokio"]
 categories = ["development-tools", "command-line-utilities", "network-programming"]
 
 [dependencies]
-gix = { version = "0.73", default-features = false, features = ["blocking-network-client", "worktree-mutation"] }
+git2 = { version = "0.20", default-features = true, features = ["https", "ssh"] }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing   = { workspace = true }

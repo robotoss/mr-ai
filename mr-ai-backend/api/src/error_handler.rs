@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use project_code_store::errors::GitCloneError;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -89,5 +90,22 @@ impl From<axum::extract::rejection::JsonRejection> for AppError {
 impl From<axum::extract::rejection::QueryRejection> for AppError {
     fn from(err: axum::extract::rejection::QueryRejection) -> Self {
         AppError::BadRequest(err.to_string())
+    }
+}
+
+impl From<GitCloneError> for AppError {
+    fn from(err: GitCloneError) -> Self {
+        use std::io;
+        match err {
+            GitCloneError::Io(e) => AppError::Server(e),
+            GitCloneError::Join(e) => AppError::Server(io::Error::new(
+                io::ErrorKind::Other,
+                format!("join error: {e}"),
+            )),
+            GitCloneError::Git(msg) => AppError::Server(io::Error::new(
+                io::ErrorKind::Other,
+                format!("git error: {msg}"),
+            )),
+        }
     }
 }
