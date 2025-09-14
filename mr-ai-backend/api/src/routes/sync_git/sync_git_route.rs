@@ -13,4 +13,5 @@ pub async fn sync_git_route(
     State(state): State<Arc<AppState>>,
     Json(p): Json<GitProjectsRequest>,
 ) -> Result<Json<GitProjectsResponse>, (StatusCode, String)> {
+    todo!()
 }

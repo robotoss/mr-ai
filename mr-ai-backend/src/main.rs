@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn init_tracing() {
-    let base = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("trace"));
+    let base = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let filter = base.add_directive(Directive::from_str("mr_reviewer=trace").unwrap());
 

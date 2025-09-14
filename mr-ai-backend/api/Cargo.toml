@@ -24,3 +24,4 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+colored = { workspace = true }
