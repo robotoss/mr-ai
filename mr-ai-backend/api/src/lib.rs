@@ -2,12 +2,13 @@ use std::{env, sync::Arc};
 
 mod core;
 mod error_handler;
+mod middleware_layer;
 mod models;
 mod routes;
 
 use ai_llm_service::service_profiles::LlmServiceProfiles;
 use axum::{
-    Router,
+    Router, middleware,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -17,6 +18,7 @@ use tokio::signal; // for colorful console output
 use crate::{
     core::app_state::{AppConfig, AppState},
     error_handler::{AppError, AppResult},
+    middleware_layer::json_extractor::json_error_mapper,
     routes::{
         ask::ask_question_route::ask_question, prepare_graph_route::prepare_graph,
         prepare_qdrant_route::prepare_qdrant, sync_git::sync_git_route::sync_git_route,
@@ -52,6 +54,7 @@ pub async fn start(svc: Arc<LlmServiceProfiles>) -> AppResult<()> {
         .route("/trigger_git_mr", post(trigger_gitlab_mr))
         .route("/upload_project_data", post(upload_project_data))
         .fallback(handler_404)
+        .layer(middleware::from_fn(json_error_mapper))
         .with_state(shared_state);
 
     println!("{}", "🔧 Routes configured successfully".blue());
