@@ -33,9 +33,10 @@ pub async fn ask_question(
     }
 
     // Delegate to contextor (RAG + LLM)
-    let QaAnswer { answer, context } = ask_with_opts(state.svc.clone(), &body.question, opts)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let QaAnswer { answer, context } =
+        ask_with_opts(state.llm_profiles.clone(), &body.question, opts)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     // Map to API response DTOs
     let items = context

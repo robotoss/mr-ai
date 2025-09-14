@@ -20,14 +20,14 @@ pub async fn trigger_gitlab_mr(
     State(state): State<Arc<AppState>>,
     Json(p): Json<TriggerGitLabPayloadRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    if p.secret != state.trigger_secret {
+    if p.secret != state.config.trigger_secret {
         return Err((StatusCode::UNAUTHORIZED, "invalid secret".into()));
     }
 
     let cfg = ProviderConfig {
         kind: ProviderKind::GitLab,
-        base_api: state.gitlab_api_base.clone(),
-        token: state.gitlab_token.clone(),
+        base_api: state.config.git_api_base.clone(),
+        token: state.config.git_token.clone(),
     };
 
     let pub_cfg = PublishConfig::default();
@@ -36,7 +36,7 @@ pub async fn trigger_gitlab_mr(
         iid: p.mr_iid,
     };
 
-    match run_review(cfg, id, state.svc.clone(), pub_cfg).await {
+    match run_review(cfg, id, state.llm_profiles.clone(), pub_cfg).await {
         Ok(_bundle) => {
             // TODO: pass bundle to your queue/store; or keep it in cache only.
             Ok(StatusCode::ACCEPTED)

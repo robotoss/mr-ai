@@ -95,6 +95,7 @@ dependencies = [
  "rag-store",
  "serde",
  "services",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]

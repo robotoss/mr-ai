@@ -28,7 +28,7 @@ pub async fn prepare_qdrant(State(state): State<Arc<AppState>>) -> &'static str 
     };
 
     let ollama = OllamaEmbedder::new(OllamaConfig {
-        svc: state.svc.clone(),
+        svc: state.llm_profiles.clone(),
         dim: std::env::var("EMBEDDING_DIM").unwrap().parse().unwrap(),
     });
 
