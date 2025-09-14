@@ -1,21 +1,19 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
 
-/// Universal response envelope for both success and error (simplified).
+/// Universal response envelope for both success and error (compact variant).
 #[derive(Serialize)]
 pub struct ApiResponse<T>
 where
     T: Serialize,
 {
     pub success: bool,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
 }
@@ -26,17 +24,17 @@ pub struct ApiError {
     pub code: &'static str,
     /// Human-friendly error message.
     pub message: String,
-    /// Optional fine-grained error details (per-field, hints, etc.).
+    /// Optional field-level details or hints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub details: Vec<ApiErrorDetail>,
 }
 
 #[derive(Serialize)]
 pub struct ApiErrorDetail {
-    /// Field path like `urls` or `items[2].name`.
+    /// JSON path or field name (e.g., "urls", "items[2].name").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// Optional hint to help the client fix the request.
+    /// Hint to help the client fix the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }
@@ -71,8 +69,16 @@ where
         }
     }
 
-    /// Convert to axum Response.
+    /// Convert to an Axum Response and mark it as already formatted,
+    /// so error middleware does not wrap it again.
     pub fn into_response_with_status(self, status: StatusCode) -> Response {
-        (status, Json(self)).into_response()
+        let mut res = (status, Json(&self)).into_response();
+        res.headers_mut()
+            .insert("X-Api-Envelope", HeaderValue::from_static("1"));
+        if !self.success {
+            res.headers_mut()
+                .insert("X-Api-Error-Formatted", HeaderValue::from_static("1"));
+        }
+        res
     }
 }

@@ -32,6 +32,14 @@ pub enum AppError {
 
     #[error("not found")]
     NotFound,
+
+    /// Rich HTTP error mapped from lower layers with specific status & code.
+    #[error("{message}")]
+    Http {
+        status: StatusCode,
+        code: &'static str,
+        message: String,
+    },
 }
 
 impl AppError {
@@ -42,6 +50,9 @@ impl AppError {
             AppError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,     // startup-only
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound => StatusCode::NOT_FOUND,
+
+            // custom mapped
+            AppError::Http { status, .. } => *status,
 
             // 5xx
             AppError::Bind(_) | AppError::Server(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -56,6 +67,7 @@ impl AppError {
             AppError::Server(_) => "SERVER_ERROR",
             AppError::BadRequest(_) => "BAD_REQUEST",
             AppError::NotFound => "NOT_FOUND",
+            AppError::Http { code, .. } => code,
         }
     }
 }
@@ -93,19 +105,69 @@ impl From<axum::extract::rejection::QueryRejection> for AppError {
     }
 }
 
+/// Convert `GitCloneError` to `AppError::Http` with precise HTTP status & code.
+/// Uses text heuristics to avoid importing `git2` types here.
 impl From<GitCloneError> for AppError {
     fn from(err: GitCloneError) -> Self {
-        use std::io;
         match err {
-            GitCloneError::Io(e) => AppError::Server(e),
-            GitCloneError::Join(e) => AppError::Server(io::Error::new(
-                io::ErrorKind::Other,
-                format!("join error: {e}"),
-            )),
-            GitCloneError::Git(msg) => AppError::Server(io::Error::new(
-                io::ErrorKind::Other,
-                format!("git error: {msg}"),
-            )),
+            GitCloneError::Io(e) => AppError::Http {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "IO_ERROR",
+                message: format!("Filesystem error occurred during cloning: {e}"),
+            },
+            GitCloneError::Join(e) => AppError::Http {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "JOIN_ERROR",
+                message: format!("Background task failed to complete: {e}"),
+            },
+            GitCloneError::Git(e) => {
+                let msg = e.to_string();
+                let lower = msg.to_lowercase();
+
+                // Heuristics for common remote/auth failures.
+                if lower.contains("auth")
+                    || lower.contains("unauthorized")
+                    || lower.contains("permission")
+                    || lower.contains("denied")
+                {
+                    AppError::Http {
+                        status: StatusCode::UNAUTHORIZED,
+                        code: "UNAUTHORIZED",
+                        message: "The project you were looking for could not be found or you don't have permission to view it.".into(),
+                    }
+                } else if lower.contains("not found")
+                    || lower.contains("could not be found")
+                    || lower.contains("repository not found")
+                {
+                    AppError::Http {
+                        status: StatusCode::NOT_FOUND,
+                        code: "REPO_NOT_FOUND",
+                        message: "Repository not found or not accessible.".into(),
+                    }
+                } else if lower.contains("ssl") || lower.contains("tls") {
+                    AppError::Http {
+                        status: StatusCode::BAD_GATEWAY,
+                        code: "TLS_ERROR",
+                        message: "TLS/SSL error while communicating with the remote.".into(),
+                    }
+                } else if lower.contains("remote")
+                    || lower.contains("network")
+                    || lower.contains("eof")
+                    || lower.contains("early eof")
+                {
+                    AppError::Http {
+                        status: StatusCode::BAD_GATEWAY,
+                        code: "GIT_REMOTE_ERROR",
+                        message: "Remote error or network issue occurred during cloning.".into(),
+                    }
+                } else {
+                    AppError::Http {
+                        status: StatusCode::INTERNAL_SERVER_ERROR,
+                        code: "GIT_ERROR",
+                        message: format!("Git operation failed: {msg}"),
+                    }
+                }
+            }
         }
     }
 }
