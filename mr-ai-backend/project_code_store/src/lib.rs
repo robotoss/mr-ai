@@ -176,7 +176,9 @@ fn ensure_dir(dir: &Path) -> Result<()> {
         fs::create_dir_all(dir)?;
         info!(path = %dir.display(), "created base dir");
     } else {
-        debug!(path = %dir.display(), "base dir exists");
+        fs::remove_dir_all(dir)?;
+        fs::create_dir_all(dir)?;
+        debug!(path = %dir.display(), "update exists dir");
     }
     Ok(())
 }
