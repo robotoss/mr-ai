@@ -1,0 +1,16 @@
+[package]
+name = "project-code-store"
+version = "0.1.0"
+edition = "2024"
+authors = ["Yeftifeyev Konstantin <zoxo@outlook.com>"]
+license = "FSL-1.1"
+description = "Async Git project fetcher built on gix (gitoxide) with Tokio, thiserror-based errors, and tracing instrumentation."
+keywords = ["git", "gix", "gitoxide", "clone", "async", "tokio"]
+categories = ["development-tools", "command-line-utilities", "network-programming"]
+
+[dependencies]
+git2 = { version = "0.20", default-features = true, features = ["https", "ssh"] }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+tracing-subscriber = { workspace = true }

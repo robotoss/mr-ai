@@ -18,8 +18,12 @@ rag-store = { path = "../rag-store" }
 contextor = {path = "../contextor"}
 mr-reviewer = {path = "../mr-reviewer"}
 ai-llm-service = { path = "../ai-llm-service" }
+project-code-store = { path = "../project_code_store" }
 
 
 serde = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
+colored = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
