@@ -23,7 +23,6 @@ use crate::{
         ask::ask_question_route::ask_question, prepare_graph_route::prepare_graph,
         prepare_qdrant_route::prepare_qdrant, sync_git::sync_git_route::sync_git_route,
         trigger_gitlab_mr::trigger_gitlab_mr_route::trigger_gitlab_mr,
-        upload_project_data::upload_project_data,
     },
 };
 
@@ -52,7 +51,6 @@ pub async fn start(svc: Arc<LlmServiceProfiles>) -> AppResult<()> {
         .route("/prepare_qdrant", get(prepare_qdrant))
         .route("/ask_question", post(ask_question))
         .route("/trigger_git_mr", post(trigger_gitlab_mr))
-        .route("/upload_project_data", post(upload_project_data))
         .fallback(handler_404)
         .layer(middleware::from_fn(json_error_mapper))
         .with_state(shared_state);
