@@ -5,7 +5,7 @@ edition = "2024"
 
 
 [workspace]
-members = [".", "ai-llm-service", "api", "code-graph", "codegraph-prep", "contextor", "mr-reviewer", "project_code_store",  "rag-store", "services"]
+members = [".", "ai-llm-service", "api", "code-graph", "code-indexer", "codegraph-prep", "contextor", "mr-reviewer", "project_code_store",  "rag-store", "services"]
 
 [dependencies]
 api = { path = "api" }
