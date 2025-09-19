@@ -388,10 +388,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "code-graph"
-version = "0.1.0"
-
-[[package]]
 name = "code-indexer"
 version = "0.1.0"
 dependencies = [
