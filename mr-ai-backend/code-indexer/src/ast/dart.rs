@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
 
-// FFI symbol provided by the grammar crate.
-// We mark extern block as unsafe to satisfy strict lints.
-unsafe extern "C" {
-    fn tree_sitter_dart() -> Language;
+/// Returns the Dart language for tree-sitter from the orchard grammar crate.
+#[inline]
+fn dart_language() -> Language {
+    tree_sitter_dart_orchard::LANGUAGE.into()
 }
 
 pub struct DartAst;
@@ -18,11 +18,10 @@ impl DartAst {
     /// Parse source code into a tree-sitter Tree.
     fn parse(code: &str) -> Result<tree_sitter::Tree> {
         let mut parser = Parser::new();
-        unsafe {
-            parser
-                .set_language(&tree_sitter_dart())
-                .map_err(|_| Error::TreeSitterLanguage)?;
-        }
+        let lang = dart_language();
+        parser
+            .set_language(&lang)
+            .map_err(|_| Error::TreeSitterLanguage)?;
         parser.parse(code, None).ok_or(Error::TreeSitterParse)
     }
 }
@@ -53,7 +52,7 @@ fn extract_chunks(
     file: &str,
     is_generated: bool,
 ) -> Result<Vec<CodeChunk>> {
-    let lang = unsafe { tree_sitter_dart() };
+    let lang = dart_language();
     let root = tree.root_node();
 
     let q = r#"
@@ -75,7 +74,7 @@ fn extract_chunks(
       ((variable_declaration_list (initialized_identifier_list (identifier) @v.name)))
     "#;
 
-    // Build query (takes Language by value; no &lang).
+    // Build query (takes &Language).
     let query = Query::new(&lang, q).map_err(|_| Error::TreeSitterParse)?;
 
     // -------- pass 1: collect imports (use explicit iterator .next()) --------
@@ -98,7 +97,7 @@ fn extract_chunks(
         imports.dedup();
     }
 
-    // Reusable closures/helpers.
+    // Reusable helpers.
     let make_span = |n: Node| Span {
         start_byte: n.start_byte(),
         end_byte: n.end_byte(),
@@ -440,9 +439,11 @@ fn dedup_chunks(v: &mut Vec<CodeChunk>) {
 fn read_ident(code: &str, n: Node) -> String {
     n.utf8_text(code.as_bytes()).unwrap_or_default().to_string()
 }
+
 fn read_ident_opt(code: &str, n: Node) -> Option<String> {
     Some(n.utf8_text(code.as_bytes()).ok()?.to_string())
 }
+
 fn collect_names_in_vdl(vdl: Node, code: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut st = vec![vdl];
@@ -466,6 +467,7 @@ fn collect_names_in_vdl(vdl: Node, code: &str) -> Vec<String> {
     out.retain(|s| seen.insert(s.clone()));
     out
 }
+
 fn is_ident_like(s: &str) -> bool {
     let mut it = s.chars();
     match it.next() {
@@ -473,6 +475,7 @@ fn is_ident_like(s: &str) -> bool {
         _ => false,
     }
 }
+
 fn first_line(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for ch in s.chars() {
@@ -486,6 +489,7 @@ fn first_line(s: &str, max_chars: usize) -> String {
     }
     out.trim().to_string()
 }
+
 fn looks_generated(path: &str) -> bool {
     path.ends_with(".g.dart") || path.ends_with(".freezed.dart") || path.ends_with(".gr.dart")
 }

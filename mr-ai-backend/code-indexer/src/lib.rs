@@ -143,7 +143,7 @@ pub fn index_project_micro_to_jsonl(
     let base_dir = project_base_dir(project_name);
     util::ensure_dir(&base_dir)?;
 
-    let out_dir = PathBuf::from(format!("out/{project_name}"));
+    let out_dir = PathBuf::from(format!("code_data/out/{project_name}"));
     util::ensure_dir(&out_dir)?;
     let out_path = out_dir.join("micro_chunks.jsonl");
 
