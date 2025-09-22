@@ -27,7 +27,7 @@ pub(crate) fn index_project(base_dir: &Path, enable_lsp: bool) -> Result<Vec<Cod
     }
 
     if enable_lsp {
-        lsp::dart::DartLsp::enrich(base_dir, &mut chunks)?;
+        lsp::dart::dart_provider::DartLsp::enrich(base_dir, &mut chunks)?;
     }
 
     Ok(chunks)
