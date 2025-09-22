@@ -35,16 +35,16 @@ pub enum SymbolKind {
 pub struct Span {
     pub start_byte: usize,
     pub end_byte: usize,
-    pub start_row: u32,
-    pub start_col: u32,
-    pub end_row: u32,
-    pub end_col: u32,
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
+    pub end_col: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChunkFeatures {
     pub byte_len: usize,
-    pub line_count: u32,
+    pub line_count: usize,
     pub has_doc: bool,
     pub has_annotations: bool,
 }
