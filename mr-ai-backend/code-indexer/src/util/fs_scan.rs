@@ -55,6 +55,7 @@ pub fn scan_project_files(root: &Path) -> Vec<PathBuf> {
             if name.ends_with(".g.dart")
                 || name.ends_with(".freezed.dart")
                 || name.ends_with(".gr.dart")
+                || name.ends_with("flutter_app_icons.dart")
             {
                 continue;
             }
