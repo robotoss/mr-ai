@@ -396,6 +396,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
+ "tracing",
  "tree-sitter",
  "tree-sitter-dart-orchard",
  "tree-sitter-javascript",
