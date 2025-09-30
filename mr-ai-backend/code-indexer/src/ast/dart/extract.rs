@@ -1,30 +1,25 @@
 //! High-level extraction for Dart: imports, exports, declarations, variables.
 //!
 //! Strategy:
-//! - Avoid a single monolithic query. We run many tiny patterns via
-//!   `run_query_if_supported`, so unsupported patterns are ignored
-//!   instead of failing the whole pass.
-//! - Emit `CodeChunk`s for classes, mixins, extensions, enums,
-//!   top-level functions, methods, constructors, and variables.
-//! - Keep helpers as plain functions (not closures) to avoid E0499
-//!   (multiple mutable borrows of `out` inside nested closures).
+//! - Avoid one monolithic query. We run many tiny patterns via `run_query_if_supported`.
+//! - Emit one `CodeChunk` per addressable entity (class/mixin/extension/enum/function/method/ctor/var).
+//! - Collapse micro-entities (identifiers) into `identifiers`/`anchors` on the parent chunk.
+//! - Detect Flutter widgets (simple inheritance rule) and GoRouter routes (best-effort).
+//! - Normalize imports and produce retrieval hints/graph facts.
 //!
-//! Improvements in this version:
-//! - Collect `export` URIs together with `import` URIs (both end up in `imports`).
-//! - Handle orchard-style **top-level** variables that surface as
-//!   `static_final_declaration_list` at the program level (not only inside
-//!   class bodies). This fixes files like `app_state_notifiers.dart`.
-//! - Optional synthetic "barrel file" chunk when a file only contains
-//!   directives (imports/exports) and no declarations, to avoid len=0 warnings.
+//! Robustness:
+//! - Patterns are orchard/legacy tolerant; unsupported ones are skipped silently.
+//! - Utilities are kept tree-sitter-light to tolerate grammar drift.
 
 use super::lang::language as dart_language;
 use super::query::run_query_if_supported;
 use super::util::{
-    collect_names_in_vdl, features_for, first_line, is_ident_like, leading_meta, make_id,
+    build_graph_and_hints, class_is_widget, collect_identifiers_and_anchors, collect_names_in_vdl,
+    extract_go_router_routes, features_for, first_line, is_ident_like, leading_meta, make_id,
     read_ident, read_ident_opt, sha_hex, span_of,
 };
 use crate::errors::Result;
-use crate::types::{CodeChunk, LanguageKind, Span, SymbolKind};
+use crate::types::{Anchor, CodeChunk, LanguageKind, Span, SymbolKind};
 use tree_sitter::Node;
 
 /// Emit a synthetic “barrel file” chunk when a Dart file contains only directives
@@ -34,9 +29,12 @@ const EMIT_BARREL_FILE_CHUNK: bool = true;
 
 /// Extract `CodeChunk`s from the parsed tree.
 ///
-/// - Collect imports **and exports** (supports orchard + legacy shapes).
-/// - Collect declarations (class/mixin/extension/enum/functions/methods/ctors).
-/// - Collect variables (fields and top-level vars).
+/// - Collect imports **and exports** and store them in the chunk.
+/// - Collect declarations (class/mixin/extension/enum/functions/methods/ctors/variables).
+/// - Populate `identifiers`, `anchors`, `graph`, `hints`.
+/// - Detect Flutter widgets (class inheritance) and GoRouter routes.
+///
+/// Returns all chunks found in the file (possibly just one "barrel" chunk).
 pub fn extract_chunks(
     tree: &tree_sitter::Tree,
     code: &str,
@@ -135,7 +133,7 @@ pub fn extract_chunks(
     imports.sort();
     imports.dedup();
 
-    // -------- reusable read-only closures --------
+    // -------- reusable helpers --------
 
     // Compute the owner chain for a declaration node, accepting multiple grammar shapes.
     let owner_chain_for = |n: Node| -> Vec<String> {
@@ -210,6 +208,7 @@ pub fn extract_chunks(
                     SymbolKind::Class,
                     &owner_chain_for,
                     &signature_of,
+                    /* extra: widget/routes/identifiers/anchors */ true,
                 );
             }
         });
@@ -243,6 +242,7 @@ pub fn extract_chunks(
                     SymbolKind::Mixin,
                     &owner_chain_for,
                     &signature_of,
+                    false,
                 );
             }
         },
@@ -276,6 +276,7 @@ pub fn extract_chunks(
                     SymbolKind::Extension,
                     &owner_chain_for,
                     &signature_of,
+                    false,
                 );
             }
         },
@@ -309,12 +310,13 @@ pub fn extract_chunks(
                     SymbolKind::Enum,
                     &owner_chain_for,
                     &signature_of,
+                    false,
                 );
             }
         },
     );
 
-    // ---- top-level functions (both orchard and legacy)
+    // ---- top-level functions (orchard/legacy)
     for pat in [
         r#"(function_signature (identifier) @tlfn.name) @tlfn.node"#,
         r#"(function_declaration name: (identifier) @tlfn.name) @tlfn.node"#,
@@ -341,12 +343,13 @@ pub fn extract_chunks(
                     SymbolKind::Function,
                     &owner_chain_for,
                     &signature_of,
+                    /* extra (go_router/identifiers) */ true,
                 );
             }
         });
     }
 
-    // ---- methods (both orchard and legacy)
+    // ---- methods (orchard/legacy)
     for pat in [
         r#"(method_signature (identifier) @method.name) @method.node"#,
         r#"(method_declaration name: (identifier) @method.name) @method.node"#,
@@ -373,6 +376,7 @@ pub fn extract_chunks(
                     SymbolKind::Method,
                     &owner_chain_for,
                     &signature_of,
+                    /* extra (go_router/identifiers) */ true,
                 );
             }
         });
@@ -411,6 +415,7 @@ pub fn extract_chunks(
                     SymbolKind::Constructor,
                     &owner_chain_for,
                     &signature_of,
+                    false,
                 );
             }
         });
@@ -450,15 +455,11 @@ pub fn extract_chunks(
         });
     }
 
-    // ---- top-level variables (several robust shapes)
-    //
-    // 1) Classic: `top_level_variable_declaration -> variable_declaration_list`
-    // 2) Fallback: bare `initialized_variable_definition` (wrapped to be valid)
-    // 3) Orchard (your dump): **bare** `static_final_declaration_list` at the program level.
+    // ---- top-level variables (robust shapes)
     for pat in [
         r#"(top_level_variable_declaration (variable_declaration_list) @tlvar.vdl) @tlvar.node"#,
         r#"((initialized_variable_definition)      @tlvar.vdl) @tlvar.node"#,
-        r#"((static_final_declaration_list)        @tlvar.vdl) @tlvar.node"#, // <-- NEW: orchard top-level form
+        r#"((static_final_declaration_list)        @tlvar.vdl) @tlvar.node"#, // orchard top-level
     ] {
         run_query_if_supported(&lang, root, code, pat, |q, m| {
             let mut decl_node = None;
@@ -500,6 +501,12 @@ pub fn extract_chunks(
 // =====================================================================
 
 /// Emit a non-variable symbol chunk (class/mixin/extension/enum/function/method/ctor).
+///
+/// This function enriches the chunk with:
+/// - `identifiers` + `anchors` collected from the node subtree;
+/// - Flutter widget detection (for classes);
+/// - GoRouter route extraction (for class methods/functions);
+/// - `graph` and `hints` computed from identifiers/imports/routes.
 fn emit_symbol_chunk(
     out: &mut Vec<CodeChunk>,
     code: &str,
@@ -511,6 +518,7 @@ fn emit_symbol_chunk(
     kind: SymbolKind,
     owner_chain_for: &dyn Fn(Node) -> Vec<String>,
     signature_of: &dyn Fn(Node) -> Option<String>,
+    collect_routes_and_idents: bool,
 ) {
     let owner = owner_chain_for(node);
     let symbol_path = if owner.is_empty() {
@@ -522,6 +530,33 @@ fn emit_symbol_chunk(
     let text = &code[span.start_byte..span.end_byte];
     let (doc, annotations) = leading_meta(code, node);
     let features = features_for(&span, &doc, &annotations);
+
+    // Collect identifiers and anchors from the node subtree.
+    let (identifiers, mut anchors) = collect_identifiers_and_anchors(node, code);
+
+    // Widget detection for classes.
+    let is_widget = matches!(kind, SymbolKind::Class) && super::util::class_is_widget(node, code);
+
+    // GoRouter route extraction (best-effort) for functions/methods/classes.
+    let routes = if collect_routes_and_idents {
+        super::util::extract_go_router_routes(node, code)
+    } else {
+        Vec::new()
+    };
+
+    // Enrich graph/hints using identifiers/imports and widget/routes facts.
+    let (graph, hints) = build_graph_and_hints(&identifiers, imports, is_widget, &routes);
+
+    // Add explicit anchors for detected route string literals (if we didn't find any).
+    if !routes.is_empty() && anchors.iter().all(|a| a.kind != "string") {
+        // Very rough additional anchor at the end of node to hint UI; optional.
+        anchors.push(Anchor {
+            kind: "string".to_string(),
+            start_byte: span.start_byte,
+            end_byte: span.end_byte,
+            name: None,
+        });
+    }
 
     out.push(CodeChunk {
         id: make_id(file, &symbol_path, &span),
@@ -542,6 +577,11 @@ fn emit_symbol_chunk(
         features,
         content_sha256: sha_hex(text.as_bytes()),
         neighbors: None,
+        // New structured enrichment:
+        identifiers,
+        anchors,
+        graph: Some(graph),
+        hints: Some(hints),
         lsp: None,
     });
 }
@@ -572,6 +612,11 @@ fn emit_varlist_chunks(
         } else {
             format!("{}::{}", file, owner.join("::")) + &format!("::{sym}")
         };
+
+        // Identifiers/anchors inside the declaration node; for fields/vars it's small.
+        let (identifiers, anchors) = collect_identifiers_and_anchors(decl_node, code);
+        let (graph, hints) = build_graph_and_hints(&identifiers, imports, false, &[]);
+
         out.push(CodeChunk {
             id: make_id(file, &symbol_path, &span),
             language: LanguageKind::Dart,
@@ -591,6 +636,10 @@ fn emit_varlist_chunks(
             features: features.clone(),
             content_sha256: sha_hex(text.as_bytes()),
             neighbors: None,
+            identifiers,
+            anchors,
+            graph: Some(graph),
+            hints: Some(hints),
             lsp: None,
         });
     }
@@ -611,6 +660,8 @@ fn emit_barrel_file_chunk(out: &mut Vec<CodeChunk>, code: &str, file: &str, impo
     let annotations: Vec<String> = Vec::new();
     let features = features_for(&span, &doc, &annotations);
 
+    let (graph, hints) = build_graph_and_hints(&[], imports, false, &[]);
+
     out.push(CodeChunk {
         id: make_id(file, &symbol_path, &span),
         language: LanguageKind::Dart,
@@ -630,6 +681,10 @@ fn emit_barrel_file_chunk(out: &mut Vec<CodeChunk>, code: &str, file: &str, impo
         features,
         content_sha256: sha_hex(text.as_bytes()),
         neighbors: None,
+        identifiers: Vec::new(),
+        anchors: Vec::new(),
+        graph: Some(graph),
+        hints: Some(hints),
         lsp: None,
     });
 }

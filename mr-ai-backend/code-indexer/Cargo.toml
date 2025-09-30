@@ -11,10 +11,11 @@ tracing = { workspace = true }
 sha2 = "0.10"
 walkdir = "2.5"
 # LSP model types
-lsp-types = "0.97.0"
+lsp-types = "0.97"
+url = "2.5"
 
 # Tree-sitter core
-tree-sitter = "0.25.8"
+tree-sitter = "0.25"
 
 # Grammars
 tree-sitter-rust = "0.24"

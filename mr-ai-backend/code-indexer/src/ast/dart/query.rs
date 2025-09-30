@@ -8,8 +8,17 @@
 use tree_sitter::{Language, Node, Query, QueryCursor, QueryMatch, StreamingIterator};
 
 /// Run a single Tree-sitter query pattern if it compiles; otherwise no-op.
-/// NOTE: `QueryCursor::matches` is a `StreamingIterator`, so `.next()` yields `&QueryMatch`.
-/// Therefore the callback takes `&QueryMatch` (by reference), not an owned value.
+///
+/// NOTE:
+/// - `QueryCursor::matches` is a `StreamingIterator`, so `.next()` yields `&QueryMatch`.
+/// - The callback therefore takes `&Query` and `&QueryMatch` by reference.
+///
+/// # Parameters
+/// * `lang` - The active language.
+/// * `root` - Root node for the search (usually the file's root).
+/// * `code` - Source text used to decode captures.
+/// * `pattern` - Tree-sitter pattern; if compilation fails we silently skip.
+/// * `on_match` - Callback invoked for each `QueryMatch`.
 pub fn run_query_if_supported<F>(
     lang: &Language,
     root: Node,
@@ -24,7 +33,6 @@ pub fn run_query_if_supported<F>(
         let mut qc = QueryCursor::new();
         let mut it = qc.matches(&query, root, code.as_bytes());
         while let Some(m) = it.next() {
-            // `m` is `&QueryMatch`, which matches the callback signature above.
             on_match(&query, m);
         }
     }

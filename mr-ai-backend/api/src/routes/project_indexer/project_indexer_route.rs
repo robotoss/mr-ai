@@ -1,4 +1,4 @@
-use code_indexer::index_project_micro_to_jsonl;
+use code_indexer::{index_project_micro_to_jsonl, index_project_to_jsonl};
 use std::sync::Arc;
 
 use axum::{
@@ -22,7 +22,14 @@ pub async fn project_indexer_route(
     }
 
     // Writes: out/my_flutter_app/micro_chunks.jsonl
-    let out_path = index_project_micro_to_jsonl(&state.config.project_name, false, 120, 16);
+    let result = index_project_to_jsonl(&state.config.project_name, true);
+
+    match result {
+        Ok(_) => {}
+        Err(ex) => println!("Failed {:?}", ex),
+    }
+
+    let out_path = index_project_micro_to_jsonl(&state.config.project_name, true, 120, 16);
     println!("Wrote micro-chunks to {:?}", out_path);
 
     ApiResponse::success(ProjectIndexerResponse {

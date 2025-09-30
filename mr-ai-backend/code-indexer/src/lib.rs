@@ -6,7 +6,7 @@ mod lsp;
 pub mod types;
 mod util;
 
-use crate::lsp::interface::LspProvider; // bring trait into scope for ::enrich
+use crate::lsp::{dart::DartLsp, interface::LspProvider}; // bring trait into scope for ::enrich
 pub use errors::{Error, Result};
 pub use types::{CodeChunk, LanguageKind};
 
@@ -27,7 +27,7 @@ pub(crate) fn index_project(base_dir: &Path, enable_lsp: bool) -> Result<Vec<Cod
     }
 
     if enable_lsp {
-        lsp::dart::dart_provider::DartLsp::enrich(base_dir, &mut chunks)?;
+        DartLsp::enrich(base_dir, &mut chunks)?;
     }
 
     Ok(chunks)
@@ -79,7 +79,7 @@ pub fn index_project_to_jsonl(project_name: &str, enable_lsp: bool) -> Result<Pa
     let base_dir = project_base_dir(project_name);
     util::ensure_dir(&base_dir)?;
 
-    let out_dir = PathBuf::from(format!("out/{project_name}"));
+    let out_dir = PathBuf::from(format!("code_data/out/{project_name}"));
     util::ensure_dir(&out_dir)?;
     let out_path = out_dir.join("code_chunks.jsonl");
 
