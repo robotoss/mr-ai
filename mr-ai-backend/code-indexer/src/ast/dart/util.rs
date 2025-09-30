@@ -2,9 +2,7 @@
 //!
 //! These helpers are intentionally tree-sitter-light and robust to grammar drift.
 
-use crate::types::{
-    Anchor, ChunkFeatures, CodeChunk, GraphEdges, RetrievalHints, Span, SymbolKind,
-};
+use crate::types::{Anchor, ChunkFeatures, CodeChunk, GraphEdges, RetrievalHints, Span};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;

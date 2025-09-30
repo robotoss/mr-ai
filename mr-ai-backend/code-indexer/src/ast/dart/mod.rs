@@ -11,6 +11,7 @@
 pub use provider::DartAst;
 
 mod ast_dump;
+mod dart_extras;
 mod extract;
 mod lang;
 mod provider;

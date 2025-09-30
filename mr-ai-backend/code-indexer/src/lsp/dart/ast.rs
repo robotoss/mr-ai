@@ -2,7 +2,7 @@
 
 use crate::lsp::dart::parse::LspSymbolInfo;
 use crate::lsp::dart::util::{DartImport, classify_origin_from_import, parse_imports_in_dart};
-use crate::types::{ImportUse, OriginKind};
+use crate::types::ImportUse;
 
 /// Per-file AST surface we care about for RAG and code review signals.
 #[derive(Debug, Clone)]

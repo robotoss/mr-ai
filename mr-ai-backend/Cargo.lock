@@ -392,6 +392,7 @@ name = "code-indexer"
 version = "0.1.0"
 dependencies = [
  "lsp-types",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

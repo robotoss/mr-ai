@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 //
 
 /// Language discriminator for chunks and files.
+///
+/// Keep this list stable and language-neutral. If a language is missing,
+/// prefer `Other` and use `CodeChunk.extras` to pass per-language metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LanguageKind {
@@ -19,7 +22,10 @@ pub enum LanguageKind {
     Other,
 }
 
-/// Symbol kind taxonomy aligned with IDE/LSP expectations.
+/// Symbol kind taxonomy aligned with common IDE/LSP expectations.
+///
+/// This is intentionally generic. For language-specific refinements,
+/// put additional hints into `CodeChunk.extras` or `LspEnrichment.tags`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
@@ -40,6 +46,10 @@ pub enum SymbolKind {
 }
 
 /// Absolute byte and (row,col) span inside the file.
+///
+/// Offsets are absolute within the file (not snippet-local). Rows/cols are
+/// 0-based and refer to UTF-16 columns only if your parser requires it.
+/// For most use cases treat them as display hints; byte offsets are the ground truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub start_byte: usize,
@@ -57,9 +67,9 @@ pub struct ChunkFeatures {
     pub byte_len: usize,
     /// Raw line count of snippet/code for this chunk.
     pub line_count: usize,
-    /// True when rustdoc/docstring is present directly on the symbol.
+    /// True when documentation is present directly on the symbol.
     pub has_doc: bool,
-    /// True when language-level annotations/attributes are present.
+    /// True when language-level annotations/attributes/metadata are present.
     pub has_annotations: bool,
 }
 
@@ -74,30 +84,34 @@ pub struct Neighbors {
 
 //
 // ──────────────────────────────────────────────────────────────────────────
-//  Import / origin modeling
+// —  Import / origin modeling (language-agnostic)
 // ──────────────────────────────────────────────────────────────────────────
 //
 
 /// Classifies the origin of definitions and imports.
+///
+/// Examples:
+/// - `Sdk`: "python:asyncio", "java:util";
+/// - `Package`: third-party coordinates;
+/// - `Local`: repository-relative file path;
+/// - `Unknown`: unresolvable or custom schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OriginKind {
-    /// Dart SDK library, e.g. "dart:async".
     Sdk,
-    /// Third-party package, e.g. "package:go_router/...".
     Package,
-    /// Local repository file (repo-relative path).
     Local,
-    /// Could not be resolved or unknown scheme/format.
     Unknown,
 }
 
 /// A definition target with origin and an optional LSP-like range.
+///
+/// This is intentionally generic and does not assume any concrete language scheme.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefLocation {
     /// Classified origin kind: sdk | package | local | unknown.
     pub origin: OriginKind,
-    /// Canonical target string (e.g., "dart:async", "package:foo/bar.dart", "lib/src/x.dart").
+    /// Canonical target string (e.g., "python:asyncio", "package:lodash", "src/foo/bar.ts").
     pub target: String,
     /// Optional (start_line, start_col, end_line, end_col).
     pub range: Option<(usize, usize, usize, usize)>,
@@ -108,29 +122,32 @@ pub struct DefLocation {
 pub struct ImportUse {
     /// sdk | package | local | unknown.
     pub origin: OriginKind,
-    /// e.g., "dart:async", "pkg:go_router", "file:lib/src/feature.dart".
+    /// e.g., "python:asyncio", "pkg:lodash", "file:src/feature.ts".
     pub label: String,
-    /// e.g., "Timer", "Future", "GoRoute", "Provider".
+    /// e.g., "Future", "GoRoute", "Provider", "Request".
     pub identifier: String,
 }
 
 //
 // ──────────────────────────────────────────────────────────────────────────
-//  LSP-derived metrics and semantics
+//  LSP-derived metrics and semantics (language-agnostic)
 // ──────────────────────────────────────────────────────────────────────────
 //
 
-/// Lightweight heuristics extracted from LSP/type info for ranking & filters.
+/// Lightweight heuristics extracted from IDE/LSP/type info for ranking & filters.
+///
+/// Fields here must be language-neutral. Any language/framework-specific flags
+/// should go into `custom` with a namespaced key (e.g., "dart.is_widget": true).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SymbolMetrics {
-    /// True if the symbol uses async constructs (Future/Stream/async/await/Timer).
+    /// True if the symbol uses asynchronous constructs (async/await/futures/promise).
     pub is_async: bool,
-    /// True if a class is a Flutter widget (extends Widget/StatelessWidget/StatefulWidget).
-    pub is_widget: bool,
-    /// Approximate lines of code inside the symbol span (whitespace excluded).
+    /// Approximate lines of code inside the symbol span.
     pub loc: Option<u32>,
     /// Number of parameters if trivially parsable from signature/hover.
     pub params_count: Option<u8>,
+    /// Language/framework-specific metrics (namespaced keys, e.g., "dart.is_widget").
+    pub custom: BTreeMap<String, serde_json::Value>,
 }
 
 /// Normalized top token share derived from semantic tokens histogram.
@@ -144,7 +161,7 @@ pub struct SemanticTopToken {
 
 //
 // ──────────────────────────────────────────────────────────────────────────
-//  Fine-grained anchors, graph edges, retrieval hints
+//  Fine-grained anchors, graph edges, retrieval hints (language-agnostic)
 // ──────────────────────────────────────────────────────────────────────────
 //
 
@@ -161,30 +178,33 @@ pub struct Anchor {
 }
 
 /// Cross-code relations and domain-specific facts.
+///
+/// All fields are language-agnostic. If you need language-specific facts,
+/// namespaced keys in `facts` are recommended (e.g., "dart.routes": [...]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GraphEdges {
     /// Fully-qualified symbols called by this chunk.
     pub calls_out: Vec<String>,
     /// Qualified type names used (annotations, generics, extends/implements).
     pub uses_types: Vec<String>,
-    /// Normalized imports touched by this chunk (sdk/package/local).
+    /// Normalized imports touched by this chunk (e.g., "sdk:...", "package:...", "file:...").
     pub imports_out: Vec<String>,
-    /// Domain-specific facts (e.g., for Flutter: routes, guards, DI bindings).
+    /// Domain-specific facts (namespaced keys recommended for per-language data).
     pub facts: BTreeMap<String, serde_json::Value>,
 }
 
 /// Flattened hints for hybrid retrieval (BM25 + dense).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetrievalHints {
-    /// Bag of words from identifiers/imports for BM25.
+    /// Bag of words for BM25 (identifiers, normalized imports, stable tokens).
     pub keywords: Vec<String>,
-    /// Optional language-specific category (e.g., "flutter_widget").
+    /// Optional category label for UI/ranking (e.g., "test", "config", "component").
     pub category: Option<String>,
 }
 
 //
 // ──────────────────────────────────────────────────────────────────────────
-//  LSP enrichment
+//  LSP enrichment (language-agnostic)
 // ──────────────────────────────────────────────────────────────────────────
 //
 
@@ -195,7 +215,7 @@ pub struct RetrievalHints {
 /// - Prefer `definition`/`definitions` and structured tags.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LspEnrichment {
-    /// One-line signature extracted from LSP/hover (legacy).
+    /// One-line signature extracted from hover (legacy).
     pub signature_lsp: Option<String>,
     /// Total number of references to this symbol (if requested).
     pub references_count: Option<u32>,
@@ -219,7 +239,7 @@ pub struct LspEnrichment {
     pub hover_doc_md: Option<String>,
 
     /// Fully-qualified name derived from LSP parents (file + nesting).
-    /// Example: "lib/app_routing.dart::AppRouting::config".
+    /// Example: "src/routing.ts::Router::config".
     pub fqn: Option<String>,
     /// Stable content-based symbol identifier (e.g., sha256 of file:line:signature head).
     pub stable_id: Option<String>,
@@ -231,22 +251,23 @@ pub struct LspEnrichment {
 
     /// Freeform string flags (legacy; still populated by some providers).
     pub flags: Vec<String>,
-    /// Freeform tags (e.g., "pkg:go_router", "sdk:dart:async", "kind:Class").
+    /// Freeform tags (e.g., "pkg:lodash", "sdk:python:asyncio", "kind:Class").
     pub tags: Vec<String>,
 }
 
 //
 // ──────────────────────────────────────────────────────────────────────────
-//  Primary chunk and micro-chunk
+//  Primary chunk and micro-chunk (language-agnostic)
 // ──────────────────────────────────────────────────────────────────────────
 //
 
-/// Primary indexable unit for code RAG.
+/// Primary indexable unit for code RAG (language-agnostic).
 ///
 /// Design:
-/// - Keep one record per *addressable* entity (class, function, method, etc.).
-/// - Avoid micro-entities like single identifiers; store them as `identifiers`.
-/// - Use `anchors` for precise highlighting instead of splitting the chunk.
+/// - One record per *addressable* entity (class, function, method, etc.).
+/// - Avoid micro-entities like single local identifiers; store them in `identifiers`.
+/// - Use `anchors` for precise highlighting instead of splitting by tokens.
+/// - Per-language extras should be placed in `extras` (JSON), namespaced keys advised.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeChunk {
     /// Globally unique chunk ID (e.g., "<repo_rev>/<file>#<start_byte>-<end_byte>").
@@ -254,17 +275,17 @@ pub struct CodeChunk {
     /// Language of the source file.
     pub language: LanguageKind,
 
-    /// Repo-relative file path (e.g., "packages/home_feature/lib/.../base_home_page.dart").
+    /// Repo-relative file path (e.g., "packages/.../base_home_page.dart").
     pub file: String,
     /// Short symbol name (e.g., "BaseHomePage", "build", "_onItemTapped").
     pub symbol: String,
-    /// Canonical symbol path within the file (e.g., "file::Class::Method").
+    /// Canonical symbol path (e.g., "<file>::Class::Method").
     pub symbol_path: String,
     /// Symbol kind (Class/Method/Function/...).
     pub kind: SymbolKind,
     /// Absolute file span for the symbol.
     pub span: Span,
-    /// Owner chain from outer to inner (e.g., ["BaseHomePage"] for a method).
+    /// Owner chain from outer to inner (e.g., ["Router", "State"] for a method).
     pub owner_path: Vec<String>,
 
     /// Optional documentation attached to the symbol (cleaned).
@@ -295,16 +316,23 @@ pub struct CodeChunk {
     pub identifiers: Vec<String>,
     /// Fine-grained anchors for highlighting (absolute byte ranges).
     pub anchors: Vec<Anchor>,
-    /// Cross-code relations and domain facts (e.g., routes).
+    /// Cross-code relations and domain facts (e.g., routes in a router, endpoints in a service).
     pub graph: Option<GraphEdges>,
     /// Flattened hints for hybrid retrieval (BM25 + dense).
     pub hints: Option<RetrievalHints>,
 
     /// Optional LSP enrichment (hover, defs, refs, semantics).
     pub lsp: Option<LspEnrichment>,
+
+    /// Opaque per-language extras encoded as JSON.
+    ///
+    /// Conventions:
+    /// - Use namespaced keys, e.g., "dart.is_widget", "rust.unsafe_blocks", "python.decorators".
+    /// - Keep it small and essential for retrieval/explainability.
+    pub extras: Option<serde_json::Value>,
 }
 
-/// Secondary slicing for long bodies (optional).
+/// Secondary slicing for long bodies (optional, language-agnostic).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MicroChunk {
     /// Unique micro-chunk ID.
@@ -329,7 +357,7 @@ pub struct MicroChunk {
 
 //
 // ──────────────────────────────────────────────────────────────────────────
-//  Snippet clamping helpers
+//  Snippet clamping helpers (language-agnostic)
 // ──────────────────────────────────────────────────────────────────────────
 //
 
@@ -343,23 +371,14 @@ pub struct MicroChunk {
 ///
 /// # Parameters
 /// - `s`: Input string.
-/// - `max_chars`: Maximum number of UTF-8 bytes to keep (approximate char budget).
+/// - `max_chars`: Maximum UTF-8 byte budget (approximate).
 /// - `max_lines`: Maximum number of lines to keep.
 /// - `add_ellipsis`: Whether to append `…` on truncation.
 ///
 /// # Returns
 /// Clamped string without trailing newline; may include `…` if truncated.
-///
-/// # Examples
-/// ```
-/// let s = "a\nb\nc";
-/// assert_eq!(clamp_snippet_ex("a\nb\nc", 3, 2, true), "a\nb");
-/// ```
 pub fn clamp_snippet_ex(s: &str, max_chars: usize, max_lines: usize, add_ellipsis: bool) -> String {
-    if s.is_empty() {
-        return String::new();
-    }
-    if max_chars == 0 || max_lines == 0 {
+    if s.is_empty() || max_chars == 0 || max_lines == 0 {
         return String::new();
     }
 
@@ -414,9 +433,7 @@ pub fn clamp_snippet_ex(s: &str, max_chars: usize, max_lines: usize, add_ellipsi
 }
 
 /// Backward-compatible clamping helper with fixed behavior (no ellipsis).
-///
-/// This preserves your original signature and routes to `clamp_snippet_ex`
-/// with `add_ellipsis = false`.
+#[inline]
 pub fn clamp_snippet(s: &str, max_chars: usize, max_lines: usize) -> String {
     clamp_snippet_ex(s, max_chars, max_lines, false)
 }

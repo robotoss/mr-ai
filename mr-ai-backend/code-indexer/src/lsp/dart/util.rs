@@ -1,12 +1,10 @@
 //! Utilities: paths/URIs, import parsing, string helpers, and overlap picking.
 
-use crate::errors::Error;
 use crate::types::{OriginKind, Span};
 use serde_json::json;
 use std::cmp::{max, min};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tracing::trace;
 use url::Url;
 
 /// Absolute normalized path.

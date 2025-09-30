@@ -6,11 +6,13 @@
 //! - Collapse micro-entities (identifiers) into `identifiers`/`anchors` on the parent chunk.
 //! - Detect Flutter widgets (simple inheritance rule) and GoRouter routes (best-effort).
 //! - Normalize imports and produce retrieval hints/graph facts.
+//! - Attach Dart-specific extras into `CodeChunk.extras` as JSON (see `dart_extras.rs`).
 //!
 //! Robustness:
 //! - Patterns are orchard/legacy tolerant; unsupported ones are skipped silently.
 //! - Utilities are kept tree-sitter-light to tolerate grammar drift.
 
+use super::dart_extras::DartChunkExtras;
 use super::lang::language as dart_language;
 use super::query::run_query_if_supported;
 use super::util::{
@@ -27,12 +29,13 @@ use tree_sitter::Node;
 /// barrel files indexable. If you add a dedicated kind later, switch to it here.
 const EMIT_BARREL_FILE_CHUNK: bool = true;
 
-/// Extract `CodeChunk`s from the parsed tree.
+/// Extract `CodeChunk`s from a parsed Dart tree.
 ///
-/// - Collect imports **and exports** and store them in the chunk.
-/// - Collect declarations (class/mixin/extension/enum/functions/methods/ctors/variables).
-/// - Populate `identifiers`, `anchors`, `graph`, `hints`.
-/// - Detect Flutter widgets (class inheritance) and GoRouter routes.
+/// - Collect imports **and exports** and store them into each emitted chunk;
+/// - Collect declarations (class/mixin/extension/enum/functions/methods/ctors/variables);
+/// - Populate `identifiers`, `anchors`, `graph`, `hints`;
+/// - Detect Flutter widgets (classes) and GoRouter routes (methods/functions/classes);
+/// - Build `DartChunkExtras` and attach it into `CodeChunk.extras` as JSON.
 ///
 /// Returns all chunks found in the file (possibly just one "barrel" chunk).
 pub fn extract_chunks(
@@ -506,7 +509,8 @@ pub fn extract_chunks(
 /// - `identifiers` + `anchors` collected from the node subtree;
 /// - Flutter widget detection (for classes);
 /// - GoRouter route extraction (for class methods/functions);
-/// - `graph` and `hints` computed from identifiers/imports/routes.
+/// - `graph` and `hints` computed from identifiers/imports/routes;
+/// - `DartChunkExtras` serialized into `CodeChunk.extras`.
 fn emit_symbol_chunk(
     out: &mut Vec<CodeChunk>,
     code: &str,
@@ -535,11 +539,11 @@ fn emit_symbol_chunk(
     let (identifiers, mut anchors) = collect_identifiers_and_anchors(node, code);
 
     // Widget detection for classes.
-    let is_widget = matches!(kind, SymbolKind::Class) && super::util::class_is_widget(node, code);
+    let is_widget = matches!(kind, SymbolKind::Class) && class_is_widget(node, code);
 
     // GoRouter route extraction (best-effort) for functions/methods/classes.
     let routes = if collect_routes_and_idents {
-        super::util::extract_go_router_routes(node, code)
+        extract_go_router_routes(node, code)
     } else {
         Vec::new()
     };
@@ -547,9 +551,8 @@ fn emit_symbol_chunk(
     // Enrich graph/hints using identifiers/imports and widget/routes facts.
     let (graph, hints) = build_graph_and_hints(&identifiers, imports, is_widget, &routes);
 
-    // Add explicit anchors for detected route string literals (if we didn't find any).
+    // Add explicit anchors for detected route string literals (fallback).
     if !routes.is_empty() && anchors.iter().all(|a| a.kind != "string") {
-        // Very rough additional anchor at the end of node to hint UI; optional.
         anchors.push(Anchor {
             kind: "string".to_string(),
             start_byte: span.start_byte,
@@ -557,6 +560,18 @@ fn emit_symbol_chunk(
             name: None,
         });
     }
+
+    // --- Build Dart extras and serialize to JSON ---
+    let extras = serde_json::to_value(DartChunkExtras {
+        is_widget: if matches!(kind, SymbolKind::Class) {
+            Some(is_widget)
+        } else {
+            None
+        },
+        routes: routes.clone(),
+        flags: Vec::new(),
+    })
+    .ok();
 
     out.push(CodeChunk {
         id: make_id(file, &symbol_path, &span),
@@ -577,16 +592,20 @@ fn emit_symbol_chunk(
         features,
         content_sha256: sha_hex(text.as_bytes()),
         neighbors: None,
-        // New structured enrichment:
+        // Structured enrichment:
         identifiers,
         anchors,
         graph: Some(graph),
         hints: Some(hints),
         lsp: None,
+        // Dart-specific extras packed as JSON
+        extras,
     });
 }
 
 /// Emit one chunk per identifier found within a variable list node.
+///
+/// For variables we do not compute widget/routes; extras remain empty.
 fn emit_varlist_chunks(
     out: &mut Vec<CodeChunk>,
     code: &str,
@@ -641,6 +660,8 @@ fn emit_varlist_chunks(
             graph: Some(graph),
             hints: Some(hints),
             lsp: None,
+            // No Dart-specific extras for plain variables by default.
+            extras: None,
         });
     }
 }
@@ -686,6 +707,7 @@ fn emit_barrel_file_chunk(out: &mut Vec<CodeChunk>, code: &str, file: &str, impo
         graph: Some(graph),
         hints: Some(hints),
         lsp: None,
+        extras: None,
     });
 }
 
