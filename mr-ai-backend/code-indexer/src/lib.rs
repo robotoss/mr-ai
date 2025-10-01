@@ -84,7 +84,7 @@ pub fn index_project_to_jsonl(project_name: &str, enable_lsp: bool) -> Result<Pa
     let out_path = out_dir.join("code_chunks.jsonl");
 
     // Build chunks and export
-    let chunks = index_project(&base_dir, enable_lsp)?;
+    let chunks: Vec<CodeChunk> = index_project(&base_dir, enable_lsp)?;
     let mut w = util::jsonl::JsonlWriter::open(&out_path)?;
     for c in &chunks {
         w.write_obj(c)?;

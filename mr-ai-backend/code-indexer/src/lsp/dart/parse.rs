@@ -11,6 +11,7 @@ pub struct ByteRange {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LspSymbolInfo {
     pub name: String,
     pub signature: Option<String>,

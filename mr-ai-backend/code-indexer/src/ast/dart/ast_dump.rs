@@ -13,6 +13,7 @@ use std::path::Path;
 
 /// Controls when AST dumps are printed to stderr.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AstDumpMode {
     /// Do not print any AST dumps.
     None,

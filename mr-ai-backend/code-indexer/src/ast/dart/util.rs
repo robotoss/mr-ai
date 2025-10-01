@@ -539,7 +539,7 @@ pub fn extract_gorouter_config_paths(node: Node, code: &str) -> Vec<String> {
     out
 }
 
-pub fn collect_parameter_anchors(node: Node, code: &str) -> (u8, Vec<Anchor>) {
+pub fn collect_parameter_anchors(node: Node, _code: &str) -> (u8, Vec<Anchor>) {
     let mut count: u8 = 0;
     let mut anchors = Vec::<Anchor>::new();
     let mut st = vec![node];
