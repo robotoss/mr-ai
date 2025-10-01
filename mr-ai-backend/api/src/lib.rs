@@ -3,7 +3,6 @@ use std::{env, sync::Arc};
 mod core;
 mod error_handler;
 mod middleware_layer;
-mod models;
 mod routes;
 
 use ai_llm_service::service_profiles::LlmServiceProfiles;
@@ -20,8 +19,7 @@ use crate::{
     error_handler::{AppError, AppResult},
     middleware_layer::json_extractor::json_error_mapper,
     routes::{
-        ask::ask_question_route::ask_question, prepare_graph_route::prepare_graph,
-        prepare_qdrant_route::prepare_qdrant,
+        ask::ask_question_route::ask_question, prepare_qdrant_route::prepare_qdrant,
         project_indexer::project_indexer_route::project_indexer_route,
         sync_git::sync_git_route::sync_git_route,
         trigger_gitlab_mr::trigger_gitlab_mr_route::trigger_gitlab_mr,
@@ -50,7 +48,6 @@ pub async fn start(svc: Arc<LlmServiceProfiles>) -> AppResult<()> {
     let app = Router::new()
         .route("/sync_git", post(sync_git_route))
         .route("/project_indexer", get(project_indexer_route))
-        .route("/prepare_graph", get(prepare_graph))
         .route("/prepare_qdrant", get(prepare_qdrant))
         .route("/ask_question", post(ask_question))
         .route("/trigger_git_mr", post(trigger_gitlab_mr))
