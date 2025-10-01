@@ -105,7 +105,7 @@ fn scan_vars_and_fields<'tree>(root: Node<'tree>, code: &str) -> Vec<VarHit> {
         if is_decl_root(n.kind()) {
             // Filter out declarations nested inside methods/blocks.
             if !is_inside_fn_or_block(&n) {
-                let owner = owner_chain_for(&n, code);
+                let owner: Vec<String> = owner_chain_for(&n, code);
                 let kind = if owner.is_empty() {
                     AstKind::Variable
                 } else {

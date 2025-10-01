@@ -1,0 +1,26 @@
+[package]
+name = "code-indexer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+sha2 = "0.10"
+walkdir = "2.5"
+# LSP model types
+lsp-types = "0.97"
+url = "2.5"
+regex = "1.11"
+
+# Tree-sitter core
+tree-sitter = "0.25"
+
+# Grammars
+tree-sitter-rust = "0.24"
+tree-sitter-dart-orchard = "0.1"
+tree-sitter-python = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
