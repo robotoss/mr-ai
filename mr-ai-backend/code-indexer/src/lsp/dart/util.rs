@@ -1,25 +1,29 @@
-//! Utilities: paths/URIs, import parsing, string helpers, and overlap picking.
+//! Utilities: paths/URIs, strings, and overlap picking with structured tracing.
 
-use crate::types::{OriginKind, Span};
+use crate::types::Span;
 use serde_json::json;
 use std::cmp::{max, min};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tracing::{debug, instrument, trace, warn};
 use url::Url;
 
-/// Absolute normalized path.
+#[instrument(level = "trace", skip_all, fields(in_path=%p.display()))]
 pub fn abs_path(p: &Path) -> PathBuf {
     if p.is_absolute() {
+        trace!("already absolute");
         return p.to_path_buf();
     }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(p)
-        .components()
-        .collect()
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        warn!(error=%e, "current_dir failed; fallback '.'");
+        PathBuf::from(".")
+    });
+    let out: PathBuf = cwd.join(p).components().collect();
+    trace!(cwd=%cwd.display(), out_path=%out.display(), "normalized");
+    out
 }
 
-/// Build `workspaceFolders` from absolute folders with proper file:// URIs.
+#[instrument(level = "debug", skip_all, fields(folders=?folders.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()))]
 pub fn build_workspace_folders_json_abs(folders: &[PathBuf]) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(folders.len());
     for p in folders {
@@ -30,15 +34,22 @@ pub fn build_workspace_folders_json_abs(folders: &[PathBuf]) -> Vec<serde_json::
             .unwrap_or("pkg")
             .to_string();
         let uri = file_uri_abs(&abs);
+        debug!(folder=%abs.display(), %uri, %name, "workspace folder added");
         out.push(json!({ "name": name, "uri": uri }));
     }
+    debug!(count = out.len(), "workspace folders built");
     out
 }
 
-/// Compute a common parent directory across absolute file paths.
+#[instrument(level = "debug", skip_all, fields(count = files_abs.len()))]
 pub fn common_parent_dir(files_abs: &[PathBuf]) -> PathBuf {
     if files_abs.is_empty() {
-        return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|e| {
+            warn!(error=%e, "current_dir failed; fallback '.'");
+            PathBuf::from(".")
+        });
+        debug!(root=%cwd.display(), "empty set → cwd");
+        return cwd;
     }
     let mut it = files_abs.iter().cloned();
     let mut prefix = it.next().unwrap();
@@ -49,64 +60,150 @@ pub fn common_parent_dir(files_abs: &[PathBuf]) -> PathBuf {
             }
         }
     }
+    debug!(parent=%prefix.display(), "computed");
     prefix
 }
 
-/// Return a deduped set of immediate parent folders from absolute file list (bounded to 64).
+#[instrument(level = "debug", skip_all, fields(files=?files_abs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()))]
 pub fn parent_folder_set(files_abs: &[PathBuf]) -> Vec<PathBuf> {
     let mut set: HashSet<PathBuf> = HashSet::new();
     for f in files_abs {
         if let Some(parent) = f.parent() {
             set.insert(abs_path(parent));
+        } else {
+            trace!(file=%f.display(), "no parent");
         }
     }
     let mut v: Vec<PathBuf> = set.into_iter().collect();
     v.sort();
+    let before = v.len();
     v.truncate(64);
+    debug!(unique = before, truncated = v.len(), "parent folders");
     v
 }
 
-/// Convert absolute path to `file://` URI.
+#[instrument(level = "trace", skip_all, fields(in_path=%p.display()))]
 pub fn file_uri_abs(p: &Path) -> String {
-    if let Ok(u) = Url::from_file_path(p) {
-        return u.to_string();
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        abs_path(p)
+    };
+    match Url::from_file_path(&abs) {
+        Ok(u) => {
+            trace!(path=%abs.display(), uri=%u, "ok");
+            u.to_string()
+        }
+        Err(_) => {
+            let uri = format!("file:///{}", abs.display());
+            warn!(path=%abs.display(), %uri, "from_file_path failed, fallback");
+            uri
+        }
     }
-    // Fallback best-effort
-    format!("file://{}", p.display())
 }
 
-/// Return the best-overlapping symbol index for a chunk span (by byte overlap).
+/// Converts file:// URI to absolute path (if possible).
+#[instrument(level = "trace", skip_all, fields(uri))]
+pub fn uri_to_abs_path(uri: &str) -> Option<PathBuf> {
+    if let Ok(url) = Url::parse(uri) {
+        if url.scheme() == "file" {
+            return url.to_file_path().ok().map(|p| abs_path(&p));
+        }
+    }
+    None
+}
+
+/// Returns best-overlapping symbol index for a chunk span (by byte overlap).
+#[instrument(level = "trace", skip_all, fields(chunk_bytes=%format!("{}..{}", span.start_byte, span.end_byte), syms=syms.len()))]
 pub fn best_overlap_index(
     span: &Span,
     syms: &[crate::lsp::dart::parse::LspSymbolInfo],
 ) -> Option<usize> {
-    let mut best: Option<(usize, usize)> = None; // (idx, overlap)
+    let eps: usize = 1;
+    let a0 = span.start_byte;
+    let a1 = span.end_byte;
+
+    let mut best: Option<(usize, usize)> = None;
+    let mut overlaps: Vec<(usize, usize)> = Vec::new();
+    let mut nearest: Vec<(usize, usize)> = Vec::new();
+
     for (i, s) in syms.iter().enumerate() {
-        let ov = overlap_bytes(
-            span.start_byte,
-            span.end_byte,
-            s.range.start_byte,
-            s.range.end_byte,
-        );
-        if ov == 0 {
+        if s.range.end_byte < s.range.start_byte {
+            warn!(
+                sym_idx = i,
+                start = s.range.start_byte,
+                end = s.range.end_byte,
+                "invalid symbol range"
+            );
             continue;
         }
-        match best {
-            None => best = Some((i, ov)),
-            Some((_, cur)) if ov > cur => best = Some((i, ov)),
-            _ => {}
+        let b0 = s.range.start_byte;
+        let b1 = s.range.end_byte;
+
+        let lo = max(a0, b0);
+        let hi = min(a1, b1);
+        let ov = hi.saturating_sub(lo);
+
+        let touches = (a0 <= b1 && b0 <= a1)
+            && (ov == 0)
+            && (a0.abs_diff(b1) <= eps || b0.abs_diff(a1) <= eps);
+
+        if ov > 0 || touches {
+            let eff = if ov > 0 { ov } else { 1 };
+            overlaps.push((i, eff));
+            match best {
+                None => best = Some((i, eff)),
+                Some((_, cur)) if eff > cur => best = Some((i, eff)),
+                _ => {}
+            }
+        } else {
+            let dist = if a1 < b0 {
+                b0 - a1
+            } else if b1 < a0 {
+                a0 - b1
+            } else {
+                0
+            };
+            nearest.push((i, dist));
         }
     }
-    best.map(|(i, _)| i)
+
+    if overlaps.is_empty() {
+        nearest.sort_by_key(|&(_, d)| d);
+        let preview = nearest
+            .iter()
+            .take(5)
+            .map(|(i, d)| {
+                format!(
+                    "#{i}:dist={d} (sym {}..{})",
+                    syms[*i].range.start_byte, syms[*i].range.end_byte
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        trace!(nearest=?preview, "no overlap; nearest candidates");
+    } else {
+        overlaps.sort_by_key(|&(_, ov)| std::cmp::Reverse(ov));
+        let top = overlaps
+            .iter()
+            .take(5)
+            .map(|(i, ov)| {
+                format!(
+                    "#{i}:ov={ov} (sym {}..{})",
+                    syms[*i].range.start_byte, syms[*i].range.end_byte
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        trace!(candidates=?top, "overlap candidates");
+    }
+
+    let out = best.map(|(i, _)| i);
+    trace!(best_idx=?out, "result");
+    out
 }
 
-fn overlap_bytes(a0: usize, a1: usize, b0: usize, b1: usize) -> usize {
-    let lo = max(a0, b0);
-    let hi = min(a1, b1);
-    hi.saturating_sub(lo)
-}
-
-/// First line limited to `max_chars`.
+#[instrument(level = "trace", skip_all, fields(max_chars))]
 pub fn first_line(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for ch in s.chars() {
@@ -118,142 +215,22 @@ pub fn first_line(s: &str, max_chars: usize) -> String {
             break;
         }
     }
-    out.trim().to_string()
+    let trimmed = out.trim().to_string();
+    trace!(orig_len = s.len(), out_len = trimmed.len(), "first_line");
+    trimmed
 }
 
-/// Truncate string to `max` bytes (safe for UTF-8 boundaries by slicing).
+#[instrument(level = "trace", skip_all, fields(orig_len = s.len(), max))]
 pub fn truncate(s: String, max: usize) -> String {
     if s.len() <= max {
+        trace!("no-op");
         return s;
     }
     let mut end = max;
-    while !s.is_char_boundary(end) && end > 0 {
+    while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    s[..end].to_string()
-}
-
-/* ===== Import parsing (Dart) ============================================== */
-
-/// Parsed Dart import/export statement.
-#[derive(Debug, Clone)]
-pub struct DartImport {
-    pub uri: String,          // raw quoted URI (dart:, package:, relative)
-    pub r#as: Option<String>, // alias (if any)
-    pub show: Vec<String>,    // explicit symbols
-    pub hide: Vec<String>,    // hidden symbols (unused here, but parsed)
-}
-
-impl DartImport {
-    pub fn label(&self) -> String {
-        // label used in ImportUse.label: normalize to "dart:async", "pkg:<name>", "file:<path>"
-        if self.uri.starts_with("dart:") {
-            return self.uri.clone();
-        }
-        if self.uri.starts_with("package:") {
-            // Keep "package:<name>/<path>"
-            return self.uri.clone();
-        }
-        // treat as local file path normalized
-        format!("file:{}", self.uri)
-    }
-}
-
-/// Heuristic parser for Dart `import` and `export` lines.
-pub fn parse_imports_in_dart(code: &str) -> Vec<DartImport> {
-    let mut out = Vec::<DartImport>::new();
-    for line in code.lines() {
-        let l = line.trim();
-        if !(l.starts_with("import ") || l.starts_with("export ")) {
-            continue;
-        }
-        // Expect: import 'uri' [as X] [show A, B] [hide C, D];
-        // A very small hand-rolled parser is enough for our enrichment needs.
-        let mut uri = String::new();
-        let mut alias: Option<String> = None;
-        let mut show: Vec<String> = Vec::new();
-        let mut hide: Vec<String> = Vec::new();
-
-        // Extract quoted URI
-        if let Some(start) = l.find('\'') {
-            if let Some(end) = l[start + 1..].find('\'') {
-                uri = l[start + 1..start + 1 + end].to_string();
-            }
-        } else if let Some(start) = l.find('"') {
-            if let Some(end) = l[start + 1..].find('"') {
-                uri = l[start + 1..start + 1 + end].to_string();
-            }
-        }
-
-        // `as` alias
-        if let Some(pos) = l.find(" as ") {
-            let rest = &l[pos + 4..];
-            let name = rest
-                .split(|c: char| c.is_whitespace() || c == ';' || c == 's' || c == 'h')
-                .next()
-                .unwrap_or("")
-                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
-                .to_string();
-            if !name.is_empty() {
-                alias = Some(name);
-            }
-        }
-
-        // `show`
-        if let Some(pos) = l.find(" show ") {
-            let rest = &l[pos + 6..];
-            let list = rest.split(|c| c == ';' || c == 'h').next().unwrap_or("");
-            for part in list.split(',') {
-                let name = part
-                    .trim()
-                    .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
-                    .to_string();
-                if !name.is_empty() {
-                    show.push(name);
-                }
-            }
-        }
-
-        // `hide`
-        if let Some(pos) = l.find(" hide ") {
-            let rest = &l[pos + 6..];
-            let list = rest.split(';').next().unwrap_or("");
-            for part in list.split(',') {
-                let name = part
-                    .trim()
-                    .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
-                    .to_string();
-                if !name.is_empty() {
-                    hide.push(name);
-                }
-            }
-        }
-
-        if !uri.is_empty() {
-            out.push(DartImport {
-                uri,
-                r#as: alias,
-                show,
-                hide,
-            });
-        }
-    }
+    let out = s[..end].to_string();
+    trace!(new_len=?out.len(), "sliced");
     out
-}
-
-/// Classify an import URI into OriginKind.
-pub fn classify_origin_from_import(uri: &str) -> OriginKind {
-    if uri.starts_with("dart:") {
-        return OriginKind::Sdk;
-    }
-    if uri.starts_with("package:") {
-        return OriginKind::Package;
-    }
-    // treat all others as local files
-    OriginKind::Local
-}
-
-/// Classify `pubspec` origin from folder (reserved for future use).
-pub fn classify_pub_origin(_folder: &Path) -> OriginKind {
-    OriginKind::Local
 }

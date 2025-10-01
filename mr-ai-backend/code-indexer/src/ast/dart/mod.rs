@@ -15,5 +15,4 @@ mod dart_extras;
 mod extract;
 mod lang;
 mod provider;
-mod query;
 mod util;

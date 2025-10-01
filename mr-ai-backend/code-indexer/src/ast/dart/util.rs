@@ -56,10 +56,7 @@ pub fn read_ident_opt(code: &str, n: Node) -> Option<String> {
 /// Rough check whether a string can be an identifier (Dart-like).
 pub fn is_ident_like(s: &str) -> bool {
     let mut it = s.chars();
-    match it.next() {
-        Some(c) if c == '_' || c == '$' || c.is_alphabetic() => true,
-        _ => false,
-    }
+    matches!(it.next(), Some(c) if c == '_' || c == '$' || c.is_alphabetic())
 }
 
 /// Return the first line of `s`, clamped to `max_chars`.
@@ -78,6 +75,9 @@ pub fn first_line(s: &str, max_chars: usize) -> String {
 }
 
 /// Compute sequential and hierarchical neighbors within the same file.
+///
+/// - Assign `prev_id`/`next_id` in lexical (byte) order.
+/// - Derive `parent_id`/`children_ids` from `symbol_path` hierarchy.
 pub fn compute_neighbors_in_file(chunks: &mut [CodeChunk]) {
     chunks.sort_by_key(|c| c.span.start_byte);
 
@@ -92,7 +92,7 @@ pub fn compute_neighbors_in_file(chunks: &mut [CodeChunk]) {
         } else {
             None
         };
-        let entry = chunks[i].neighbors.get_or_insert_with(Default::default);
+        let entry = chunks[i].neighbors.get_or_insert_default();
         entry.prev_id = prev;
         entry.next_id = next;
     }
@@ -105,9 +105,9 @@ pub fn compute_neighbors_in_file(chunks: &mut [CodeChunk]) {
         if let Some(pp) = parent_path_of(&chunks[i].symbol_path) {
             if let Some(&pi) = by_path.get(&pp) {
                 let pid = chunks[pi].id.clone();
-                let entry = chunks[i].neighbors.get_or_insert_with(Default::default);
+                let entry = chunks[i].neighbors.get_or_insert_default();
                 entry.parent_id = Some(pid.clone());
-                let pe = chunks[pi].neighbors.get_or_insert_with(Default::default);
+                let pe = chunks[pi].neighbors.get_or_insert_default();
                 pe.children_ids.push(chunks[i].id.clone());
             }
         }
@@ -144,14 +144,11 @@ pub fn features_for(span: &Span, doc: &Option<String>, annotations: &[String]) -
 /// - Walk backwards over previous siblings;
 /// - Collect consecutive documentation comments (`///...` or `/** ... */`);
 /// - Collect `metadata` nodes (annotations), extracting `@Name` up to `(`;
-/// - Stop when we encounter a non-meta, non-comment sibling.
+/// - Stop when encountering a non-meta, non-doc sibling.
 ///
 /// Returns:
 /// - `doc`: Joined documentation string (if any), preserving order top→bottom;
 /// - `annotations`: List of annotation names without the `@` prefix.
-///
-/// The function is robust to orchard/legacy grammar variants where comments
-/// may be represented with slightly different node kinds.
 pub fn leading_meta(code: &str, n: Node) -> (Option<String>, Vec<String>) {
     let mut doc_lines = Vec::<String>::new();
     let mut ann = Vec::<String>::new();
@@ -163,7 +160,6 @@ pub fn leading_meta(code: &str, n: Node) -> (Option<String>, Vec<String>) {
             "comment" | "documentation_comment" => {
                 let t = prev.utf8_text(code.as_bytes()).unwrap_or_default();
                 let tt = t.trim();
-                // Heuristic: keep rustdoc-like and block doc comments.
                 if tt.starts_with("///") || tt.starts_with("/**") {
                     doc_lines.push(tt.to_string());
                     cur = prev;
@@ -201,13 +197,13 @@ pub fn leading_meta(code: &str, n: Node) -> (Option<String>, Vec<String>) {
     (doc, ann)
 }
 
-/// Collect distinct identifier names inside a variable declaration list-like subtree.
+/// Collect distinct identifier names inside a variable-declaration-list-like subtree.
 ///
 /// The function walks the subtree rooted at `vdl` and gathers identifier nodes using a
 /// resilient set of kind names that covers orchard and legacy grammars.
-/// Duplicates are removed while preserving the first occurrence order.
+/// Duplicates are removed while preserving first occurrence order.
 ///
-/// This is used both for class fields and top-level variable declarations.
+/// Used for class fields and top-level variable declarations.
 pub fn collect_names_in_vdl(vdl: Node, code: &str) -> Vec<String> {
     let mut out = Vec::<String>::new();
     let mut st = vec![vdl];
@@ -283,9 +279,6 @@ pub fn collect_identifiers_and_anchors(node: Node, code: &str) -> (Vec<String>, 
 /// Detect if a class node is a Flutter widget (extends StatelessWidget/StatefulWidget).
 pub fn class_is_widget(class_node: Node, code: &str) -> bool {
     // Look for "extends <Identifier>" or "superclass" child with identifier text.
-    let mut is_widget = false;
-
-    // Try common field name first.
     if let Some(sup) = class_node.child_by_field_name("superclass") {
         let t = read_text(code, sup);
         if t.contains("StatelessWidget") || t.contains("StatefulWidget") || t.ends_with("Widget") {
@@ -302,12 +295,11 @@ pub fn class_is_widget(class_node: Node, code: &str) -> bool {
                 || text.contains("StatefulWidget")
                 || text.ends_with("Widget")
             {
-                is_widget = true;
-                break;
+                return true;
             }
         }
     }
-    is_widget
+    false
 }
 
 /// Extract GoRouter destinations from common call shapes:
@@ -321,7 +313,7 @@ pub fn extract_go_router_routes(node: Node, code: &str) -> Vec<String> {
         if k == "method_invocation" || k == "FunctionExpressionInvocation" {
             // Read node text and match `.go('...')` occurrences.
             let t = read_text(code, n);
-            // Very small regex-free parser for ".go('...')" and ".go(\"...\")".
+            // Tiny parser for ".go('...')" and ".go(\"...\")".
             for seg in t.split(".go(").skip(1) {
                 if let Some(rest) = seg.split(')').next() {
                     let inner = rest.trim();
@@ -344,15 +336,18 @@ pub fn extract_go_router_routes(node: Node, code: &str) -> Vec<String> {
 }
 
 /// Build `GraphEdges` and `RetrievalHints` for a chunk from identifiers/imports/facts.
+///
+/// - `imports` should be raw strings as they appeared in the source (Dart `import 'x';` etc.).
+/// - The function normalizes them for `graph.imports_out`.
 pub fn build_graph_and_hints(
     identifiers: &[String],
     imports: &[String],
     is_widget: bool,
     routes: &[String],
 ) -> (GraphEdges, RetrievalHints) {
-    // Normalize imports as "sdk:...", "package:...", "file:..." keywords.
+    // Normalize imports as "sdk:...", "package:...", "file:..." and add to keywords too.
     let mut imports_out = Vec::<String>::new();
-    let mut keywords = Vec::<String>::new();
+    let mut import_keywords = Vec::<String>::new();
 
     for raw in imports {
         let raw_trim = raw.trim_matches(&['\'', '"'][..]).trim();
@@ -361,33 +356,33 @@ pub fn build_graph_and_hints(
                 "sdk:{}",
                 raw_trim.strip_prefix("dart:").unwrap_or(raw_trim)
             ));
-            keywords.push(format!("sdk:{}", raw_trim));
+            import_keywords.push(format!("sdk:{}", raw_trim));
         } else if raw_trim.starts_with("package:") {
             imports_out.push(format!(
                 "package:{}",
                 raw_trim.strip_prefix("package:").unwrap_or(raw_trim)
             ));
-            // Also add a short `pkg:<name>` token if possible.
             if let Some(name) = raw_trim
                 .strip_prefix("package:")
                 .and_then(|s| s.split('/').next())
             {
-                keywords.push(format!("pkg:{}", name));
+                import_keywords.push(format!("pkg:{}", name));
             }
-            keywords.push(format!("package:{}", raw_trim));
+            import_keywords.push(format!("package:{}", raw_trim));
         } else {
             // Treat as file / relative import.
             imports_out.push(format!("file:{}", raw_trim));
-            keywords.push(format!("file:{}", raw_trim));
+            import_keywords.push(format!("file:{}", raw_trim));
         }
     }
 
-    // `calls_out` and `uses_types` are left empty in this AST-only pass. They may be filled later.
+    // Facts namespace: add routes if any.
     let mut facts = std::collections::BTreeMap::<String, serde_json::Value>::new();
     if !routes.is_empty() {
         facts.insert("routes".to_string(), serde_json::json!(routes));
     }
 
+    // Category hint for UI/ranking.
     let category = if is_widget {
         Some("flutter_widget".to_string())
     } else {
@@ -395,10 +390,10 @@ pub fn build_graph_and_hints(
     };
 
     // Keywords: identifiers + normalized import hints + route tags.
-    let mut kw = identifiers.to_vec();
-    kw.extend(keywords);
+    let mut keywords = identifiers.to_vec();
+    keywords.extend(import_keywords);
     for r in routes {
-        kw.push(format!("route:{}", r));
+        keywords.push(format!("route:{}", r));
     }
 
     (
@@ -406,11 +401,13 @@ pub fn build_graph_and_hints(
             calls_out: Vec::new(),
             uses_types: Vec::new(),
             imports_out,
+            defines_types: Vec::new(), // not derived in this pass
             facts,
         },
         RetrievalHints {
-            keywords: kw,
+            keywords,
             category,
+            title: None, // no obvious title in code; providers may fill it later
         },
     )
 }

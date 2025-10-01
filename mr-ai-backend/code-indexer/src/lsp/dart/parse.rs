@@ -1,198 +1,146 @@
-//! LSP parsing helpers for documentSymbol / semanticTokens.
+//! LSP parsers: DocumentSymbol → LspSymbolInfo, SemanticTokens → histogram.
 
-use crate::types::Span;
 use serde_json::Value;
-use std::cmp::min;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+use tracing::{debug, trace};
 
-use crate::lsp::dart::util::first_line;
+#[derive(Debug, Clone)]
+pub struct ByteRange {
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
 
-/// Minimal symbol info used to match/meld with chunks.
 #[derive(Debug, Clone)]
 pub struct LspSymbolInfo {
-    pub file: String,
-    pub range: Span,                                   // full span (bytes and rows)
-    pub signature: Option<String>,                     // one-line signature
-    pub flags: Vec<String>,                            // kind:<...> etc.
-    pub selection_range_lines: Option<(usize, usize)>, // outline in lines
-    pub semantic_hist: Option<BTreeMap<String, u32>>,  // optional symbol histogram
+    pub name: String,
+    pub signature: Option<String>,
+    pub range: ByteRange,                              // byte range in the file
+    pub selection_range_lines: Option<(usize, usize)>, // outline as (start_line, end_line)
+    pub semantic_hist: Option<HashMap<String, u32>>,   // unused here
+    pub flags: Vec<String>,
 }
 
-/// Convert LSP (UTF-16) position into byte offset.
-pub fn lsp_pos_to_byte(code: &str, line: usize, col_u16: usize) -> usize {
-    // naive but robust: walk line, then walk col in chars, mapping to bytes.
-    let mut off = 0usize;
-    for (i, l) in code.split_inclusive('\n').enumerate() {
+fn line_col_to_byte_offset(text: &str, line: usize, col: usize) -> usize {
+    // Convert (line, character) to byte offset (defensive over UTF-8)
+    let mut offs = 0usize;
+    for (i, l) in text.split_inclusive('\n').enumerate() {
         if i == line {
-            let mut c = 0usize;
-            for (byte_idx, _) in l.char_indices() {
-                if c == col_u16 {
-                    return off + byte_idx;
+            let mut cbytes = 0usize;
+            for (ci, ch) in l.chars().enumerate() {
+                if ci == col {
+                    break;
                 }
-                c += 1;
+                cbytes += ch.len_utf8();
             }
-            return off + l.len();
+            offs += cbytes;
+            return offs;
+        } else {
+            offs += l.as_bytes().len();
         }
-        off += l.len();
     }
-    code.len()
+    text.len()
 }
 
-/// Convert LSP range to our Span (byte-based, with rows/cols).
-pub fn lsp_range_to_span(code: &str, sl: usize, sc: usize, el: usize, ec: usize) -> Span {
-    let mut sb = lsp_pos_to_byte(code, sl, sc);
-    let mut eb = lsp_pos_to_byte(code, el, ec);
-    if eb < sb {
-        std::mem::swap(&mut sb, &mut eb);
-    }
-    Span {
-        start_byte: sb,
-        end_byte: eb,
-        start_row: sl,
-        start_col: sc,
-        end_row: el,
-        end_col: ec,
-    }
-}
-
-fn usize_at(v: &Value, ptr: &str) -> usize {
-    v.pointer(ptr).and_then(|x| x.as_u64()).unwrap_or(0) as usize
-}
-
-fn lsp_symbol_kind_to_str(k: u32) -> &'static str {
-    match k {
-        1 => "File",
-        2 => "Module",
-        3 => "Namespace",
-        4 => "Package",
-        5 => "Class",
-        6 => "Method",
-        7 => "Property",
-        8 => "Field",
-        9 => "Constructor",
-        10 => "Enum",
-        11 => "Interface",
-        12 => "Function",
-        13 => "Variable",
-        14 => "Constant",
-        15 => "String",
-        16 => "Number",
-        17 => "Boolean",
-        18 => "Array",
-        19 => "Object",
-        20 => "Key",
-        21 => "Null",
-        22 => "EnumMember",
-        23 => "Struct",
-        24 => "Event",
-        25 => "Operator",
-        26 => "TypeParameter",
-        _ => "Unknown",
-    }
-}
-
-/// Parse documentSymbol → flat list of LspSymbolInfo.
-pub fn collect_from_document_symbol(res: &Value, code: &str, file_key: &str) -> Vec<LspSymbolInfo> {
+/// Flatten DocumentSymbol result into a simple list.
+pub fn collect_from_document_symbol(res: &Value, text: &str, file_key: &str) -> Vec<LspSymbolInfo> {
     let mut out = Vec::<LspSymbolInfo>::new();
-    if let Some(arr) = res.as_array() {
-        for v in arr {
-            collect_recursive(v, code, file_key, &mut out);
-        }
-    }
-    out
-}
-
-fn collect_recursive(v: &Value, code: &str, file_key: &str, out: &mut Vec<LspSymbolInfo>) {
-    let r = v.get("range");
-    let sel = v.get("selectionRange");
-    if let (Some(r), Some(sr)) = (r, sel) {
-        let (sl, sc, el, ec) = (
-            usize_at(r, "/start/line"),
-            usize_at(r, "/start/character"),
-            usize_at(r, "/end/line"),
-            usize_at(r, "/end/character"),
-        );
-        let span = lsp_range_to_span(code, sl, sc, el, ec);
-
-        // Signature from selectionRange first line (or name).
-        let mut s_sl = usize_at(sr, "/start/line");
-        let mut s_sc = usize_at(sr, "/start/character");
-        let mut s_el = usize_at(sr, "/end/line");
-        let mut s_ec = usize_at(sr, "/end/character");
-        if s_el < s_sl || (s_el == s_sl && s_ec < s_sc) {
-            std::mem::swap(&mut s_sl, &mut s_el);
-            std::mem::swap(&mut s_sc, &mut s_ec);
-        }
-        let sb = min(lsp_pos_to_byte(code, s_sl, s_sc), code.len());
-        let eb = min(lsp_pos_to_byte(code, s_el, s_ec), code.len());
-        let mut sig = first_line(&code[sb..eb], 240);
-        if sig.is_empty() {
-            if let Some(name) = v.get("name").and_then(|x| x.as_str()) {
-                sig = name.to_string();
+    fn walk(node: &Value, text: &str, out: &mut Vec<LspSymbolInfo>) {
+        if let Some(arr) = node.as_array() {
+            for n in arr {
+                walk(n, text, out);
             }
+            return;
+        }
+        if !node.is_object() {
+            return;
         }
 
-        let mut flags = Vec::new();
-        if let Some(k) = v.get("kind").and_then(|x| x.as_u64()) {
-            flags.push(format!("kind:{}", lsp_symbol_kind_to_str(k as u32)));
-        }
+        let name = node
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let detail = node.get("detail").and_then(|v| v.as_str());
+        let selection = node.get("selectionRange");
+        let full = node.get("range");
+
+        let sig = detail.map(|d| crate::lsp::dart::util::first_line(d, 240));
+
+        // outline lines from selectionRange
+        let sel_lines = selection.and_then(|r| {
+            let sl = r.pointer("/start/line")?.as_u64()? as usize;
+            let el = r.pointer("/end/line")?.as_u64()? as usize;
+            Some((sl, el))
+        });
+
+        // byte range from range (line/character → byte offset)
+        let (start_b, end_b) = if let Some(rr) = full {
+            let sl = rr
+                .pointer("/start/line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let sc = rr
+                .pointer("/start/character")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let el = rr
+                .pointer("/end/line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(sl) as usize;
+            let ec = rr
+                .pointer("/end/character")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(sc);
+            let sb = line_col_to_byte_offset(text, sl as usize, sc as usize);
+            let eb = line_col_to_byte_offset(text, el, ec as usize);
+            (sb, eb)
+        } else {
+            (0, 0)
+        };
 
         out.push(LspSymbolInfo {
-            file: file_key.to_string(),
-            range: span,
-            signature: if sig.is_empty() { None } else { Some(sig) },
-            flags,
-            selection_range_lines: Some((sl, el)),
+            name,
+            signature: sig,
+            range: ByteRange {
+                start_byte: start_b,
+                end_byte: end_b,
+            },
+            selection_range_lines: sel_lines,
             semantic_hist: None,
+            flags: Vec::new(),
         });
-    }
-    if let Some(children) = v.get("children").and_then(|c| c.as_array()) {
-        for ch in children {
-            collect_recursive(ch, code, file_key, out);
+
+        if let Some(children) = node.get("children") {
+            walk(children, text, out);
         }
     }
+
+    if res.is_array() || res.is_object() {
+        walk(res, text, &mut out);
+    }
+    trace!(file=%file_key, collected = out.len(), "documentSymbol flatten done");
+    out
 }
 
-/// Decode `semanticTokens/full` and return a per-file histogram.
+/// Decode semanticTokens/full into { tokenKindName: count } histogram.
+///
+/// LSP returns "data": [deltaLine, deltaStart, length, tokenType, tokenModifiersBitset].
+/// We count 1 per token by `tokenType` using names from the legend.
 pub fn decode_semantic_tokens_hist(res: &Value, legend: &[String]) -> Option<HashMap<String, u32>> {
-    let data = res.get("data")?.as_array()?;
-    let mut raw = Vec::<u32>::with_capacity(data.len());
-    for v in data {
-        raw.push(v.as_u64().unwrap_or(0) as u32);
-    }
-    let decoded = decode_semantic_tokens(&raw);
-    let mut hist = HashMap::<String, u32>::new();
-    for (_l, _c, _len, ty) in decoded {
-        let name = legend
-            .get(ty)
-            .cloned()
-            .unwrap_or_else(|| format!("type#{ty}"));
-        *hist.entry(name).or_default() += 1;
-    }
-    Some(hist)
-}
+    let data = res.get("data").and_then(|d| d.as_array())?;
+    let mut hist: HashMap<String, u32> = HashMap::new();
 
-/// Decode LSP's compact relative semantic tokens layout.
-/// Each token: (line_delta, start_char_delta, length, token_type_index, token_modifiers)
-pub fn decode_semantic_tokens(data: &[u32]) -> Vec<(usize, usize, usize, usize)> {
-    let mut out = Vec::new();
-    let mut line = 0usize;
-    let mut col = 0usize;
     let mut i = 0usize;
     while i + 4 < data.len() {
-        let dl = data[i] as usize;
-        let dc = data[i + 1] as usize;
-        let len = data[i + 2] as usize;
-        let ty = data[i + 3] as usize;
-        // let _mods = data[i+4] as usize;
-        if dl > 0 {
-            line += dl;
-            col = dc;
-        } else {
-            col += dc;
-        }
-        out.push((line, col, len, ty));
+        let token_type_idx = data[i + 3].as_u64().unwrap_or(0) as usize;
+        let kind = legend
+            .get(token_type_idx)
+            .cloned()
+            .unwrap_or_else(|| format!("kind#{token_type_idx}"));
+        *hist.entry(kind).or_default() += 1;
         i += 5;
     }
-    out
+
+    debug!(kinds = hist.len(), "semanticTokens hist built");
+    Some(hist)
 }

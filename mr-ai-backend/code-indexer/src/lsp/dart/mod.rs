@@ -1,30 +1,28 @@
-//! Dart LSP enricher with lightweight AST.
+//! Dart LSP enricher (Dart ≥ 3.8.1), no custom AST.
 //!
-//! Pipeline (file-scoped; chunks-only):
-//! 1) Collect unique `.dart` files referenced by chunks.
-//! 2) Discover workspaces (folders with `pubspec.yaml`) from those files; run pub get.
-//! 3) Start Dart Analysis Server; initialize with root/workspace folders.
-//! 4) For each file: didOpen → documentSymbol + semanticTokens/full.
-//! 5) Parse LSP payloads, build per-file AST extras (imports/uses/tags).
-//! 6) Merge LSP + AST into chunk.lsp (signatures, outline, hovers/defs, hist, imports_used, tags).
+//! Pipeline (per file, only files referenced by chunks):
+//! 1) Collect unique `.dart` files from chunks and ensure they exist.
+//! 2) Discover workspaces (folders with `pubspec.yaml`) and run `pub get`.
+//! 3) Start Dart Analysis Server, initialize with `rootUri` + `workspaceFolders`.
+//! 4) For each file: `didOpen` → `documentSymbol` + `semanticTokens/full`.
+//!    While waiting for responses, collect `publishDiagnostics` notifications.
+//! 5) Parse responses into per-file symbols, semantic-token histograms,
+//!    collect per-file diagnostics.
+//! 6) Merge into `chunk.lsp`: signature, outline, semantic histogram/top-k,
+//!    plus `hover`, `definition`, `references`, and nearby diagnostics at the chunk head.
 //!
-//! Notes:
-//! - We only touch files referenced by incoming chunks; no AST persistence.
-//! - The merge step is language-agnostic and consumes `FileAstExtras`.
+//! No custom AST layer: imports/uses/tags are not produced here.
 
-mod ast;
 mod client;
-mod extras;
 mod merge;
 mod parse;
 mod util;
 
 use crate::errors::{Error, Result};
 use crate::lsp::interface::LspProvider;
-use crate::types::CodeChunk;
+use crate::types::{CodeChunk, LspDiagnostic};
 
 use client::LspProcess;
-use extras::FileAstExtras;
 use merge::merge_file_enrichment_into_chunks;
 use parse::{LspSymbolInfo, collect_from_document_symbol, decode_semantic_tokens_hist};
 use serde_json::{Value, json};
@@ -34,27 +32,19 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 use util::{
     abs_path, build_workspace_folders_json_abs, common_parent_dir, file_uri_abs, parent_folder_set,
+    uri_to_abs_path,
 };
 
-/// Public Dart LSP provider (workspace-aware, chunk-focused).
 pub struct DartLsp;
 
 impl LspProvider for DartLsp {
-    /// Enrich chunks using LSP responses (only for files present in the chunks) and a lightweight AST.
-    ///
-    /// Steps:
-    /// - Resolve and validate file set from chunks (only `.dart` files that exist).
-    /// - Discover workspaces (pubspec.yaml) and run `pub get`.
-    /// - Start LSP, initialize with rootUri + workspaceFolders, then `initialized`.
-    /// - For each file: send `didOpen`, then request `documentSymbol` and `semanticTokens/full`.
-    /// - Parse, build per-file AST extras, and merge into `chunk.lsp`. No disk writes.
     fn enrich(_root: &Path, chunks: &mut [CodeChunk]) -> Result<()> {
-        // ── 1) Collect unique .dart files and ensure they exist.
+        // 1) Unique `.dart` files from chunks
         let mut files: Vec<String> = chunks.iter().map(|c| c.file.clone()).collect();
         files.sort();
         files.dedup();
 
-        let before_cnt = files.len();
+        let requested = files.len();
         let mut files_abs: Vec<PathBuf> = Vec::with_capacity(files.len());
         files.retain(|file| {
             if !file.ends_with(".dart") {
@@ -72,38 +62,39 @@ impl LspProvider for DartLsp {
         });
         if files_abs.is_empty() {
             warn!(
-                requested_files = before_cnt,
+                requested_files = requested,
                 "no existing .dart files among chunk references"
             );
             return Ok(());
         }
         info!(
             unique_files = files_abs.len(),
-            requested_files = before_cnt,
+            requested_files = requested,
             "DartLsp: files ready"
         );
 
-        // ── 2) Discover workspaces (folders with pubspec.yaml)
+        // 2) Discover workspaces and run `pub get`
         let workspaces = discover_workspaces_from_files(&files_abs);
         if workspaces.is_empty() {
             warn!("No `pubspec.yaml` found near chunk files; LSP may lack full context");
         } else {
-            info!(workspaces = workspaces.len(), "workspaces discovered");
+            info!(count = workspaces.len(), "workspaces discovered");
             for ws in &workspaces {
                 debug!(workspace = %ws.display(), "workspace");
             }
         }
-
-        // ── 3) Run `pub get` per workspace (best-effort; error only if both tools fail)
         run_pub_get_all(&workspaces)?;
         info!(workspaces = workspaces.len(), "pub get finished");
 
-        // LSP root/workspaceFolders
+        // 3) Initialize LSP
         let root_abs = common_parent_dir(&files_abs);
         let root_uri = file_uri_abs(&root_abs);
+        info!(root=%root_abs.display(), %root_uri, "LSP root");
+        for f in &workspaces {
+            info!(ws=%f.display(), ws_uri=%file_uri_abs(f), "workspace folder");
+        }
         let ws_folders = build_workspace_folders_json_abs(&workspaces);
 
-        // ── 4) Start LSP and initialize
         let mut client = LspProcess::start()?;
         let legend = lsp_initialize_and_get_legend(&mut client, Some(root_uri), Some(ws_folders))?;
         info!(
@@ -111,22 +102,32 @@ impl LspProvider for DartLsp {
             "LSP initialized; semanticTokens legend ready"
         );
 
-        // Accumulators keyed by the exact file string used inside `chunks`.
+        // 4) didOpen + requests per file
         let mut per_file_syms: HashMap<String, Vec<LspSymbolInfo>> = HashMap::new();
         let mut per_file_hist: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        let mut per_file_diags: HashMap<String, Vec<LspDiagnostic>> = HashMap::new();
 
-        // Map chunk path string → absolute path for reuse.
+        // Build file <-> uri maps to match incoming diagnostics to canonical file keys.
         let mut path_map: HashMap<String, PathBuf> = HashMap::new();
+        let mut uri_for_file: HashMap<String, String> = HashMap::new();
+        let mut file_for_uri: HashMap<String, String> = HashMap::new();
+
         for file in &files {
-            path_map.insert(file.clone(), abs_path(Path::new(file)));
+            let abs = abs_path(Path::new(file));
+            let uri = file_uri_abs(&abs);
+            path_map.insert(file.clone(), abs.clone());
+            uri_for_file.insert(file.clone(), uri.clone());
+            file_for_uri.insert(uri.clone(), file.clone());
         }
 
-        // ── 5) didOpen + requests per file
         for file in &files {
             let Some(path) = path_map.get(file) else {
                 continue;
             };
-            let uri = file_uri_abs(path);
+            let uri = uri_for_file
+                .get(file)
+                .cloned()
+                .unwrap_or_else(|| file_uri_abs(path));
             let text = fs::read_to_string(path).map_err(Error::from)?;
 
             debug!(%file, uri = %uri, len = text.len(), "didOpen");
@@ -150,10 +151,10 @@ impl LspProvider for DartLsp {
                 "params":{"textDocument":{"uri":uri}}
             }))?;
 
-            // Await both responses
             let (mut got_doc, mut got_sem) = (false, false);
             let (mut doc_payload, mut sem_payload): (Option<Value>, Option<Value>) = (None, None);
 
+            // Read messages until both responses arrive. Collect diagnostics along the way.
             while !(got_doc && got_sem) {
                 match client.recv()? {
                     client::RpcMessage::Response { id, result, error } if id == doc_id => {
@@ -161,11 +162,9 @@ impl LspProvider for DartLsp {
                         if let Some(e) = error {
                             warn!(%file, error=?e, "documentSymbol error");
                         }
-                        if let Some(r) = result {
+                        doc_payload = result;
+                        if doc_payload.is_some() {
                             debug!(%file, "documentSymbol received");
-                            doc_payload = Some(r);
-                        } else {
-                            debug!(%file, "documentSymbol empty");
                         }
                     }
                     client::RpcMessage::Response { id, result, error } if id == sem_id => {
@@ -173,46 +172,40 @@ impl LspProvider for DartLsp {
                         if let Some(e) = error {
                             warn!(%file, error=?e, "semanticTokens error");
                         }
-                        if let Some(r) = result {
+                        sem_payload = result;
+                        if sem_payload.is_some() {
                             debug!(%file, "semanticTokens received");
-                            sem_payload = Some(r);
-                        } else {
-                            debug!(%file, "semanticTokens empty");
                         }
                     }
-                    client::RpcMessage::Notification { .. } => {}
+                    client::RpcMessage::Notification { method, params } => {
+                        if method == "textDocument/publishDiagnostics" {
+                            if let Some((target_file, diags)) =
+                                decode_publish_diagnostics(&params, &file_for_uri)
+                            {
+                                let e = per_file_diags.entry(target_file).or_default();
+                                e.extend(diags);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
 
-            // Parse document symbols → `LspSymbolInfo`
+            // Parse Document Symbols → per-file list (used for signature/outline + matching)
             if let Some(res) = &doc_payload {
-                let mut infos = collect_from_document_symbol(res, &text, file);
-
-                // Backfill signature from `detail` first line when signature is empty.
-                if let Some(arr) = res.as_array() {
-                    for (i, n) in arr.iter().enumerate() {
-                        if let Some(detail) = n.get("detail").and_then(|x| x.as_str()) {
-                            let line = util::first_line(detail, 240);
-                            if !line.is_empty() && i < infos.len() {
-                                let empty = infos[i]
-                                    .signature
-                                    .as_ref()
-                                    .map(|s| s.trim().is_empty())
-                                    .unwrap_or(true);
-                                if empty {
-                                    infos[i].signature = Some(line);
-                                }
-                            }
-                        }
-                    }
+                // NOTE: collect_from_document_symbol(res: &Value, text: &str, file_key: &str) -> Vec<LspSymbolInfo>
+                let list = collect_from_document_symbol(res, &text, file);
+                if !list.is_empty() {
+                    debug!(%file, symbols = list.len(), "documentSymbol parsed");
+                    per_file_syms.insert(file.clone(), list);
+                } else {
+                    debug!(%file, "documentSymbol empty");
                 }
-
-                debug!(%file, symbols = infos.len(), "documentSymbol parsed");
-                per_file_syms.insert(file.clone(), infos);
+            } else {
+                debug!(%file, "documentSymbol response missing or empty");
             }
 
-            // Parse semantic tokens histogram
+            // Parse Semantic Tokens → histogram
             if let Some(res) = &sem_payload {
                 if let Some(hist) = decode_semantic_tokens_hist(res, &legend) {
                     debug!(%file, token_kinds = hist.len(), "semanticTokens histogram parsed");
@@ -220,63 +213,31 @@ impl LspProvider for DartLsp {
                 } else {
                     debug!(%file, "semanticTokens histogram empty");
                 }
+            } else {
+                debug!(%file, "semanticTokens response missing or empty");
             }
         }
 
-        // ── 5b) Build file AST extras (imports/aliases/usage) for each file we touched
-        let mut per_file_ast: HashMap<String, FileAstExtras> = HashMap::new();
-        for file in &files {
-            if let Some(path) = path_map.get(file) {
-                let code = fs::read_to_string(path).map_err(Error::from)?;
-                let syms = per_file_syms.get(file).cloned().unwrap_or_default();
-
-                // build_file_ast возвращает AstFile → раскладываем в FileAstExtras
-                let ast_raw = ast::build_file_ast(file.clone(), &code, &syms);
-
-                let mut ast_extras = FileAstExtras {
-                    imports: ast_raw.imports,
-                    uses: ast_raw.uses,
-                    tags: Vec::new(),
-                    facts: std::collections::BTreeMap::new(),
-                };
-
-                ast_extras.normalize();
-                debug!(
-                    %file,
-                    imports = ast_extras.imports.len(),
-                    uses = ast_extras.uses.len(),
-                    "AST extras built"
-                );
-                per_file_ast.insert(file.clone(), ast_extras);
-            }
-        }
-
-        // ── 6) Merge per-file enrichment into chunks
+        // 5) Merge into chunks (inject hover/defs/refs + diagnostics)
         merge_file_enrichment_into_chunks(
             &mut client,
             chunks,
             &per_file_syms,
             &per_file_hist,
-            &per_file_ast,
+            &per_file_diags,
+            &legend,
         )?;
         info!("merge pass completed");
 
-        // Shutdown (best-effort)
+        // 6) Shutdown
         let _ = client.shutdown();
         info!("DartLsp enrichment finished");
         Ok(())
     }
 }
 
-/* ===== Workspace helpers (local) ========================================== */
+/* ===== Local helpers ====================================================== */
 
-/// Discover Dart workspaces (folders with `pubspec.yaml`) based on the given absolute files.
-///
-/// Strategy:
-/// - For each file, walk up from its parent to the filesystem root and record any folder
-///   that contains `pubspec.yaml`.
-/// - Deduplicate and sort the results.
-/// - If nothing found, return a set of distinct parents of the files as a fallback.
 fn discover_workspaces_from_files(files_abs: &[PathBuf]) -> Vec<PathBuf> {
     let mut found: BTreeSet<PathBuf> = BTreeSet::new();
     for f in files_abs {
@@ -300,9 +261,6 @@ fn discover_workspaces_from_files(files_abs: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-/// Run `flutter pub get` per workspace directory; fallback to `dart pub get` on failure.
-///
-/// Returns an error only if both attempts fail for any workspace.
 fn run_pub_get_all(workspaces: &[PathBuf]) -> Result<()> {
     if workspaces.is_empty() {
         return Ok(());
@@ -340,9 +298,6 @@ fn run_pub_get_all(workspaces: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// Initialize LSP and read semantic tokens legend.
-///
-/// Returns the legend's token kind list to decode `semanticTokens`.
 fn lsp_initialize_and_get_legend(
     client: &mut LspProcess,
     root_uri: Option<String>,
@@ -353,6 +308,7 @@ fn lsp_initialize_and_get_legend(
         "textDocument": {
             "hover": { "contentFormat": ["markdown","plaintext"] },
             "definition": { "dynamicRegistration": false },
+            "references": { "dynamicRegistration": false },
             "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
             "semanticTokens": {
                 "dynamicRegistration": false,
@@ -362,7 +318,8 @@ fn lsp_initialize_and_get_legend(
                 "formats": ["relative"],
                 "overlappingTokenSupport": false,
                 "multilineTokenSupport": true
-            }
+            },
+            // Some servers also support `textDocument/diagnostic`; Dart DAS usually uses publishDiagnostics.
         }
     });
 
@@ -371,7 +328,7 @@ fn lsp_initialize_and_get_legend(
         "jsonrpc":"2.0","id":init_id,"method":"initialize",
         "params":{
             "processId": std::process::id(),
-            "clientInfo": { "name": "code-indexer", "version": "1.0" },
+            "clientInfo": { "name": "mr-reviewer", "version": env!("CARGO_PKG_VERSION") },
             "rootUri": root_uri,
             "capabilities": caps,
             "workspaceFolders": workspace_folders,
@@ -412,4 +369,61 @@ fn lsp_initialize_and_get_legend(
     client.send(&json!({"jsonrpc":"2.0","method":"initialized","params":{}}))?;
     info!(legend_items = legend.len(), "LSP initialized");
     Ok(legend)
+}
+
+/// Decodes `publishDiagnostics` params to a (file, Vec<LspDiagnostic>) pair.
+/// Uses `file_for_uri` to resolve a canonical file key used in `chunks`.
+fn decode_publish_diagnostics(
+    params: &Value,
+    file_for_uri: &HashMap<String, String>,
+) -> Option<(String, Vec<LspDiagnostic>)> {
+    let uri = params.pointer("/uri").and_then(|x| x.as_str())?;
+    let file = file_for_uri.get(uri).cloned().or_else(|| {
+        // Fallback: convert URI to abs path and stringify it.
+        uri_to_abs_path(uri).map(|p| p.to_string_lossy().to_string())
+    })?;
+
+    let mut out: Vec<LspDiagnostic> = Vec::new();
+    if let Some(diags) = params.pointer("/diagnostics").and_then(|x| x.as_array()) {
+        for d in diags {
+            let severity = d.get("severity").and_then(|x| x.as_u64()).map(|v| v as u8);
+            // `code` may be number|string|object
+            let code = if let Some(s) = d.get("code").and_then(|x| x.as_str()) {
+                Some(s.to_string())
+            } else if let Some(n) = d.get("code").and_then(|x| x.as_i64()) {
+                Some(n.to_string())
+            } else if d.get("code").is_some() {
+                Some("obj".to_string())
+            } else {
+                None
+            };
+            let message = d
+                .get("message")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let source = d
+                .get("source")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+
+            let range = d.get("range").and_then(|rr| {
+                Some((
+                    rr.pointer("/start/line")?.as_u64()? as usize,
+                    rr.pointer("/start/character")?.as_u64()? as usize,
+                    rr.pointer("/end/line")?.as_u64()? as usize,
+                    rr.pointer("/end/character")?.as_u64()? as usize,
+                ))
+            });
+
+            out.push(LspDiagnostic {
+                severity,
+                code,
+                message,
+                range,
+                source,
+            });
+        }
+    }
+    Some((file, out))
 }

@@ -1,4 +1,9 @@
-//! Minimal JSON-RPC stdio client for `dart language-server`.
+//! Minimal JSON-RPC stdio client for Dart Analysis Server (Dart ≥ 3.8.1).
+//!
+//! This client logs every request/response and transparently yields both
+//! responses (with matching `id`) and server notifications (e.g. diagnostics).
+//! We keep it blocking and simple; higher-level code is responsible for
+//! deciding when to stop reading.
 
 use crate::errors::{Error, Result};
 use serde::Deserialize;
@@ -8,7 +13,6 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use tracing::debug;
 
-/// JSON-RPC message (response or notification).
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum RpcMessage {
@@ -26,7 +30,6 @@ pub enum RpcMessage {
     },
 }
 
-/// Stdio wrapper over Dart Analysis Server.
 pub struct LspProcess {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
@@ -35,7 +38,6 @@ pub struct LspProcess {
 }
 
 impl LspProcess {
-    /// Spawn `dart language-server`.
     pub fn start() -> Result<Self> {
         let mut child = Command::new("dart")
             .arg("language-server")
@@ -54,14 +56,14 @@ impl LspProcess {
         })
     }
 
-    /// Acquire next JSON-RPC id.
+    /// Returns next JSON-RPC id as a JSON value.
     pub fn next_id(&mut self) -> Value {
         let id = self.next_id;
         self.next_id += 1;
         Value::from(id)
     }
 
-    /// Send a JSON-RPC message with `Content-Length` header.
+    /// Sends a JSON-RPC message with `Content-Length` header.
     pub fn send(&mut self, json: &Value) -> Result<()> {
         let body = serde_json::to_vec(json)?;
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
@@ -72,9 +74,10 @@ impl LspProcess {
         Ok(())
     }
 
-    /// Blocking receive of a single JSON-RPC message.
+    /// Receives a single message (response or notification).
+    /// Blocks until a complete LSP frame is read.
     pub fn recv(&mut self) -> Result<RpcMessage> {
-        // Read header up to CRLFCRLF.
+        // Read header until CRLFCRLF
         let mut header = Vec::<u8>::new();
         let mut last4 = [0u8; 4];
         let mut b = [0u8; 1];
@@ -90,7 +93,8 @@ impl LspProcess {
                 return Err(Error::LspProtocol("header too large"));
             }
         }
-        // Parse content length.
+
+        // Parse Content-Length
         let s = String::from_utf8(header).map_err(Error::from)?;
         let mut content_len = 0usize;
         for line in s.split("\r\n") {
@@ -101,7 +105,8 @@ impl LspProcess {
         if content_len == 0 {
             return Err(Error::LspProtocol("missing content length"));
         }
-        // Read body.
+
+        // Read body
         let mut body = vec![0u8; content_len];
         self.stdout.read_exact(&mut body)?;
         debug!("LSP ← {}", String::from_utf8_lossy(&body));
@@ -109,16 +114,17 @@ impl LspProcess {
         Ok(msg)
     }
 
-    /// Shutdown + exit (best effort).
+    /// Best-effort graceful shutdown.
     pub fn shutdown(&mut self) -> Result<()> {
         let id = self.next_id();
         self.send(&json!({"jsonrpc":"2.0","id":id,"method":"shutdown"}))?;
         let deadline = std::time::Instant::now() + Duration::from_millis(400);
         while std::time::Instant::now() < deadline {
             if let Ok(msg) = self.recv() {
-                match msg {
-                    RpcMessage::Response { id: rid, .. } if rid == id => break,
-                    _ => {}
+                if let RpcMessage::Response { id: rid, .. } = msg {
+                    if rid == id {
+                        break;
+                    }
                 }
             } else {
                 break;
