@@ -12,14 +12,21 @@
 //! - Accepts orchard/legacy kind names; uses defensive child lookups.
 //! - Import URIs are parsed with a lightweight regex (works across grammar variants).
 
+use std::collections::BTreeMap;
+
 use super::dart_extras::DartChunkExtras;
 use super::util::{
     build_graph_and_hints, class_is_widget, collect_identifiers_and_anchors, collect_names_in_vdl,
     extract_go_router_routes, features_for, first_line, is_ident_like, leading_meta, make_id,
     read_ident, read_ident_opt, sha_hex, span_of,
 };
+use crate::ast::dart::util::{
+    collect_calls_and_types, collect_parameter_anchors, extract_gorouter_config_paths,
+};
 use crate::errors::Result;
-use crate::types::{Anchor, CodeChunk, LanguageKind, Span, SymbolKind};
+use crate::types::{
+    Anchor, CodeChunk, LanguageKind, LspEnrichment, Span, SymbolKind, SymbolMetrics,
+};
 use regex::Regex;
 use tree_sitter::Node;
 
@@ -501,10 +508,6 @@ fn emit_symbol_chunk(
         format!("{}::{}::{}", file, owner.join("::"), symbol)
     };
 
-    if !owner.is_empty() {
-        return;
-    }
-
     let span = span_of(node);
     let text = &code[span.start_byte..span.end_byte];
     let (doc, annotations) = leading_meta(code, node);
@@ -517,14 +520,36 @@ fn emit_symbol_chunk(
     let is_widget = matches!(kind, SymbolKind::Class) && class_is_widget(node, code);
 
     // Route extraction (best-effort)
-    let routes = if collect_routes_and_idents {
+    let mut routes = if collect_routes_and_idents {
         extract_go_router_routes(node, code)
     } else {
         Vec::new()
     };
 
+    if collect_routes_and_idents {
+        let mut cfg = extract_gorouter_config_paths(node, code);
+        routes.append(&mut cfg);
+        routes.sort();
+        routes.dedup();
+    }
+
+    // extract.rs → emit_symbol_chunk(...)
+    // Calls & Types
+    let (calls_out, uses_types, call_type_anchors) = collect_calls_and_types(node, code);
+    anchors.extend(call_type_anchors);
+
     // Graph + retrieval hints
-    let (graph, hints) = build_graph_and_hints(&identifiers, imports, is_widget, &routes);
+    let (mut graph, hints) = build_graph_and_hints(&identifiers, imports, is_widget, &routes);
+    graph.calls_out = calls_out;
+    graph.uses_types = uses_types;
+
+    // defines_types
+    if matches!(
+        kind,
+        SymbolKind::Class | SymbolKind::Enum | SymbolKind::Mixin | SymbolKind::Extension
+    ) {
+        graph.defines_types.push(symbol.clone());
+    }
 
     // Add a coarse string anchor if we found routes but no string anchors were captured.
     if !routes.is_empty() && anchors.iter().all(|a| a.kind != "string") {
@@ -547,6 +572,34 @@ fn emit_symbol_chunk(
         flags: Vec::new(),
     })
     .ok();
+
+    let mut params_count: Option<u8> = None;
+    if matches!(
+        kind,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor
+    ) {
+        let (pc, param_anchors) = collect_parameter_anchors(node, code);
+        if pc > 0 {
+            params_count = Some(pc);
+        }
+        anchors.extend(param_anchors);
+    }
+
+    let mut lsp_enr = LspEnrichment::default();
+
+    lsp_enr.metrics = Some(SymbolMetrics {
+        is_async: false,
+        loc: None,
+        params_count,
+        custom: {
+            let mut m = BTreeMap::new();
+
+            if matches!(kind, SymbolKind::Class) {
+                m.insert("dart.is_widget".to_string(), serde_json::json!(is_widget));
+            }
+            m
+        },
+    });
 
     out.push(CodeChunk {
         id: make_id(file, &symbol_path, &span),
@@ -571,7 +624,7 @@ fn emit_symbol_chunk(
         anchors,
         graph: Some(graph),
         hints: Some(hints),
-        lsp: None,
+        lsp: Some(lsp_enr),
         extras,
     });
 }
@@ -595,9 +648,6 @@ fn emit_varlist_chunks(
     }
 
     let owner: Vec<String> = owner_chain_for(decl_node);
-    if !owner.is_empty() {
-        return;
-    }
 
     let span = span_of(decl_node);
     let text = &code[span.start_byte..span.end_byte];

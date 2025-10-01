@@ -389,6 +389,31 @@ pub fn build_graph_and_hints(
         None
     };
 
+    let mut facts = std::collections::BTreeMap::<String, serde_json::Value>::new();
+    if !routes.is_empty() {
+        facts.insert("routes".to_string(), serde_json::json!(routes));
+    }
+
+    let mut import_tags = Vec::<String>::new();
+    for raw in imports {
+        let (alias, show, hide) = parse_import_modifiers(raw);
+        if let Some(a) = alias {
+            import_tags.push(format!("alias:{}", a));
+        }
+        for s in show {
+            import_tags.push(format!("show:{}", s));
+        }
+        for h in hide {
+            import_tags.push(format!("hide:{}", h));
+        }
+    }
+    if !import_tags.is_empty() {
+        facts.insert(
+            "dart.import_modifiers".to_string(),
+            serde_json::json!(import_tags),
+        );
+    }
+
     // Keywords: identifiers + normalized import hints + route tags.
     let mut keywords = identifiers.to_vec();
     keywords.extend(import_keywords);
@@ -410,4 +435,164 @@ pub fn build_graph_and_hints(
             title: None, // no obvious title in code; providers may fill it later
         },
     )
+}
+
+pub fn collect_calls_and_types(root: Node, code: &str) -> (Vec<String>, Vec<String>, Vec<Anchor>) {
+    use std::collections::BTreeSet;
+    let mut calls = BTreeSet::<String>::new();
+    let mut types = BTreeSet::<String>::new();
+    let mut extra_anchors = Vec::<Anchor>::new();
+
+    let mut st = vec![root];
+    while let Some(n) = st.pop() {
+        let k = n.kind();
+
+        // 2.1 Вызовы: method_invocation / FunctionExpressionInvocation
+        if k == "method_invocation" || k == "FunctionExpressionInvocation" {
+            let text = read_text(code, n);
+            // Naively, we'll pull out the “candidate” to the left of ‘(’ and set the anchor
+            if let Some(head) = text.split('(').next() {
+                // Example: "context.go", "router.push", "doWork"
+                let name = head
+                    .trim()
+                    .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
+                if !name.is_empty() {
+                    calls.insert(name.to_string());
+                    let sp = span_of(n);
+                    extra_anchors.push(Anchor {
+                        kind: "call".to_string(),
+                        start_byte: sp.start_byte,
+                        end_byte: sp.end_byte,
+                        name: Some(name.to_string()),
+                    });
+                }
+            }
+        }
+
+        // 2.2 Types: extends/implements/with, annotations, generic args
+        match k {
+            "extends_clause" | "implements_clause" | "with_clause" | "type_annotation"
+            | "TypeAnnotation" | "metadata" => {
+                let t = read_text(code, n);
+                // very rough: split by non-letters, take identifiers with uppercase/underscore
+                for tok in t.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.') {
+                    if !tok.is_empty()
+                        && (tok.chars().next().unwrap().is_uppercase() || tok == tok.to_uppercase())
+                    {
+                        types.insert(tok.to_string());
+                        let sp = span_of(n);
+                        extra_anchors.push(Anchor {
+                            kind: "type".to_string(),
+                            start_byte: sp.start_byte,
+                            end_byte: sp.end_byte,
+                            name: Some(tok.to_string()),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let mut w = n.walk();
+        for ch in n.children(&mut w) {
+            st.push(ch);
+        }
+    }
+
+    (
+        calls.into_iter().collect(),
+        types.into_iter().collect(),
+        extra_anchors,
+    )
+}
+
+pub fn extract_gorouter_config_paths(node: Node, code: &str) -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    let mut st = vec![node];
+    while let Some(n) = st.pop() {
+        let t = read_text(code, n);
+        // Searching for templates: path: ‘...’, initialLocation: '...'
+        for key in ["path", "initialLocation"] {
+            let pat = format!("{key}:");
+            if let Some(idx) = t.find(&pat) {
+                let after = &t[idx + pat.len()..];
+                // rough parser for string literals
+                let after = after.trim_start();
+                if after.starts_with('\'') || after.starts_with('\"') {
+                    let quote = after.chars().next().unwrap();
+                    if let Some(end) = after[1..].find(quote) {
+                        let val = &after[1..1 + end];
+                        if val.starts_with('/') {
+                            out.push(val.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let mut w = n.walk();
+        for ch in n.children(&mut w) {
+            st.push(ch);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+pub fn collect_parameter_anchors(node: Node, code: &str) -> (u8, Vec<Anchor>) {
+    let mut count: u8 = 0;
+    let mut anchors = Vec::<Anchor>::new();
+    let mut st = vec![node];
+    while let Some(n) = st.pop() {
+        if n.kind() == "formal_parameter" || n.kind() == "NormalFormalParameter" {
+            count = count.saturating_add(1);
+            let sp = span_of(n);
+            anchors.push(Anchor {
+                kind: "parameter".to_string(),
+                start_byte: sp.start_byte,
+                end_byte: sp.end_byte,
+                name: None,
+            });
+        }
+        let mut w = n.walk();
+        for ch in n.children(&mut w) {
+            st.push(ch);
+        }
+    }
+    (count, anchors)
+}
+
+pub fn parse_import_modifiers(raw: &str) -> (Option<String>, Vec<String>, Vec<String>) {
+    // returns (alias, show, hide)
+    // примеры: "import 'x' as foo show Bar, Baz hide Qux;"
+    let mut alias = None;
+    let mut show = Vec::new();
+    let mut hide = Vec::new();
+    let s = raw.replace('\n', " ");
+    if let Some(i) = s.find(" as ") {
+        let after = &s[i + 4..];
+        alias = after
+            .split_whitespace()
+            .next()
+            .map(|t| t.trim_matches(';').to_string());
+    }
+    if let Some(i) = s.find(" show ") {
+        let after = &s[i + 6..];
+        let list = after.split(|c| c == ';' || c == 'h').next().unwrap_or("");
+        show = list
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+    }
+    if let Some(i) = s.find(" hide ") {
+        let after = &s[i + 6..];
+        let list = after.split(';').next().unwrap_or("");
+        hide = list
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+    }
+    (alias, show, hide)
 }
