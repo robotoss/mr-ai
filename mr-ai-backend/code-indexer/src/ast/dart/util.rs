@@ -447,7 +447,7 @@ pub fn collect_calls_and_types(root: Node, code: &str) -> (Vec<String>, Vec<Stri
     while let Some(n) = st.pop() {
         let k = n.kind();
 
-        // 2.1 Вызовы: method_invocation / FunctionExpressionInvocation
+        // 2.1 Calls: method_invocation / FunctionExpressionInvocation
         if k == "method_invocation" || k == "FunctionExpressionInvocation" {
             let text = read_text(code, n);
             // Naively, we'll pull out the “candidate” to the left of ‘(’ and set the anchor
@@ -539,32 +539,9 @@ pub fn extract_gorouter_config_paths(node: Node, code: &str) -> Vec<String> {
     out
 }
 
-pub fn collect_parameter_anchors(node: Node, _code: &str) -> (u8, Vec<Anchor>) {
-    let mut count: u8 = 0;
-    let mut anchors = Vec::<Anchor>::new();
-    let mut st = vec![node];
-    while let Some(n) = st.pop() {
-        if n.kind() == "formal_parameter" || n.kind() == "NormalFormalParameter" {
-            count = count.saturating_add(1);
-            let sp = span_of(n);
-            anchors.push(Anchor {
-                kind: "parameter".to_string(),
-                start_byte: sp.start_byte,
-                end_byte: sp.end_byte,
-                name: None,
-            });
-        }
-        let mut w = n.walk();
-        for ch in n.children(&mut w) {
-            st.push(ch);
-        }
-    }
-    (count, anchors)
-}
-
 pub fn parse_import_modifiers(raw: &str) -> (Option<String>, Vec<String>, Vec<String>) {
     // returns (alias, show, hide)
-    // примеры: "import 'x' as foo show Bar, Baz hide Qux;"
+    // Example: "import 'x' as foo show Bar, Baz hide Qux;"
     let mut alias = None;
     let mut show = Vec::new();
     let mut hide = Vec::new();

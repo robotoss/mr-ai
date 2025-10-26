@@ -6,7 +6,7 @@ use std::cmp::{max, min};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, instrument, trace, warn};
+use tracing::{instrument, warn};
 use url::Url;
 
 #[instrument(level = "trace", skip_all, fields(in_path=%p.display()))]
@@ -80,26 +80,6 @@ pub fn build_workspace_folders_json_abs(folders: &[PathBuf]) -> Vec<serde_json::
         out.push(json!({ "name": name, "uri": uri }));
     }
     out
-}
-
-#[instrument(level = "debug", skip_all, fields(count = files_abs.len()))]
-pub fn common_parent_dir(files_abs: &[PathBuf]) -> PathBuf {
-    if files_abs.is_empty() {
-        return std::env::current_dir().unwrap_or_else(|e| {
-            warn!(error=%e, "current_dir failed; fallback '.'");
-            PathBuf::from(".")
-        });
-    }
-    let mut it = files_abs.iter().cloned();
-    let mut prefix = it.next().unwrap();
-    for p in it {
-        while !p.starts_with(&prefix) {
-            if !prefix.pop() {
-                break;
-            }
-        }
-    }
-    prefix
 }
 
 #[instrument(level = "debug", skip_all, fields(files=?files_abs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()))]

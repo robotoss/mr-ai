@@ -18,7 +18,7 @@ use crate::lsp::dart::util::{
 use crate::lsp::interface::LspProvider;
 use crate::types::CodeChunk;
 use serde_json::{Value, json};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
