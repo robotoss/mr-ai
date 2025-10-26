@@ -54,6 +54,7 @@ use structs::rag_store::{IndexStats, SearchHit};
 /// # Ok(()) }
 /// ```
 pub async fn load_fresh_index(project_name: &str) -> Result<IndexStats, RagBaseError> {
+    println!("[RagBase]: load_fresh_index");
     let _cfg: RagConfig = RagConfig::from_env(Some(project_name))?;
     // TODO:
     // 1) Initialize embedding backend according to cfg.embedding.
@@ -98,6 +99,7 @@ pub async fn search_project_top_k(
     query: &str,
     k: Option<usize>,
 ) -> Result<Vec<SearchHit>, RagBaseError> {
+    println!("[RagBase]: search_project_top_k");
     let _cfg: RagConfig = RagConfig::from_env(Some(project_name))?;
     // TODO:
     // 1) Initialize embedding backend according to cfg.embedding.

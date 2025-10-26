@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::RagBaseError;
+use crate::errors::rag_base_error::RagBaseError;
 
 /// Distance metric supported by Qdrant for primary vector space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

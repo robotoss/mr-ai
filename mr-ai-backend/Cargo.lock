@@ -95,6 +95,7 @@ dependencies = [
  "contextor",
  "mr-reviewer",
  "project-code-store",
+ "rag-base",
  "rag-store",
  "serde",
  "serde_json",
@@ -1876,6 +1877,13 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 [[package]]
 name = "rag-base"
 version = "0.1.0"
+dependencies = [
+ "qdrant-client",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
 
 [[package]]
 name = "rag-store"

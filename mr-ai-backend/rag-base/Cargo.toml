@@ -5,8 +5,7 @@ edition = "2024"
 
 [dependencies]
 
-# Qdrant Rust client (we will use gRPC in the implementation phase)
-qdrant-client = { version = "1.15", default-features = false, features = ["grpc"] }
+qdrant-client = "1.15"
 
 tokio = { workspace = true }
 thiserror = { workspace = true }
