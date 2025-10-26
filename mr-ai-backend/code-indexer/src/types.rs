@@ -14,7 +14,7 @@
 //! `LspEnrichment.col_unit` and prefer byte offsets for ground-truth navigation.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 //
 // ──────────────────────────────────────────────────────────────────────────
@@ -258,86 +258,43 @@ pub struct RetrievalHints {
 //
 
 /// LSP enrichment attached to a chunk (hover, defs, refs, semantic tokens).
+/// Minimal LSP enrichment attached to a chunk, optimized for retrieval.
 ///
-/// Backward compatibility:
-/// - `definition_uri` and `flags` are legacy; prefer `definition`/`definitions` and `tags`.
+/// Keep only high-signal fields used by search/ranking and explanations.
+/// Everything else (semantic histograms, legends, outlines, verbose diagnostics,
+/// legacy URIs/flags, etc.) is intentionally omitted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LspEnrichment {
-    /// One-line signature extracted from hover (legacy).
-    pub signature_lsp: Option<String>,
-    /// Total number of references to this symbol (if requested).
-    pub references_count: Option<u32>,
+    /// Fully-qualified name resolved from LSP parents (file + nesting).
+    /// Example: "lib/main.dart::AppRouter::goToHome".
+    pub fqn: Option<String>,
 
-    /// Legacy flat URI of the primary definition (kept for compatibility).
-    /// Prefer `definition`.
-    pub definition_uri: Option<String>,
+    /// Short human-readable signature (from hover/detail).
+    /// Example: "Widget build(BuildContext context)".
+    pub signature: Option<String>,
+
+    /// One-line hover summary/type line (first line only).
+    pub hover_one_liner: Option<String>,
+
     /// Primary definition target with origin classification.
     pub definition: Option<DefLocation>,
-    /// All discovered definition targets (multi-target scenarios).
-    pub definitions: Vec<DefLocation>,
 
-    /// Per-file or per-symbol semantic token histogram (raw counts).
-    pub semantic_token_hist: Option<BTreeMap<String, u32>>,
-    /// Optional top-K normalized semantic tokens derived from the histogram.
-    pub semantic_top_k: Vec<SemanticTopToken>,
-    /// Optional source legend for semantic tokens (names in order).
-    pub semantic_legend: Option<Vec<String>>,
+    /// Total number of references to this symbol (0 if unknown or none).
+    pub references_count: u32,
 
-    /// Optional code outline range (start_line, end_line) for quick snippet slicing.
-    pub outline_code_range: Option<(usize, usize)>,
+    /// Small reference sample for previews/ranking (bounded, e.g. up to 16).
+    pub references_sample: Vec<DefLocation>,
 
-    /// Short type line and trimmed hover Markdown doc (if available).
-    pub hover_type: Option<String>,
-    pub hover_doc_md: Option<String>,
-
-    /// Column units for (row,col) coordinates: "utf8" | "utf16".
-    /// If absent, the consumer must know the source convention (default "utf8").
-    pub col_unit: Option<String>,
-
-    /// Fully-qualified name derived from LSP parents (file + nesting).
-    /// Example: "src/routing.ts::Router::config".
-    pub fqn: Option<String>,
-    /// Stable content-based symbol identifier (e.g., sha256 of file:line:signature head).
-    pub stable_id: Option<String>,
-
-    /// Collapsed import-driven usages for retrieval/ranking.
+    /// Imports actually used near the chunk head (deduped, high-signal only).
     pub imports_used: Vec<ImportUse>,
-    /// Lightweight metrics for filters and ranking.
-    pub metrics: Option<SymbolMetrics>,
 
-    /// Diagnostics summary (optional).
-    pub diagnostics_count: Option<u32>,
-    pub has_errors: Option<bool>,
+    /// Aggregated diagnostics for ranking/filters (no verbose lists).
+    pub diagnostics_errors: u32,
+    pub diagnostics_warnings: u32,
 
-    /// Freeform string flags (legacy; still populated by some providers).
-    pub flags: Vec<String>,
-    /// Freeform tags (e.g., "pkg:lodash", "sdk:python:asyncio", "kind:Class").
-    pub tags: Vec<String>,
-
-    /// Optional structured modifiers (language-neutral), e.g. "public", "static".
-    /// Use only very common booleans; richer details go to `extras` or `tags`.
-    pub modifiers: Option<BTreeMap<String, bool>>,
-
-    /// Keep this list reasonably bounded (e.g., top 50 by severity/recency).
-    pub diagnostics: Vec<LspDiagnostic>,
-
-    /// Keep bounded (e.g., first 32), rely on `references_count` for the true total.
-    pub references: Vec<DefLocation>,
-}
-
-// New: concrete diagnostic item captured from LSP `publishDiagnostics`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LspDiagnostic {
-    /// 1=Error, 2=Warning, 3=Information, 4=Hint (LSP spec).
-    pub severity: Option<u8>,
-    /// String form (handles servers that send number-or-string).
-    pub code: Option<String>,
-    /// Human-readable message (trimmed if needed).
-    pub message: String,
-    /// (start_line, start_col, end_line, end_col); units = LspEnrichment.col_unit.
-    pub range: Option<(usize, usize, usize, usize)>,
-    /// Optional source (server/tool), e.g. "dart", "analyzer".
-    pub source: Option<String>,
+    /// Stable content-based symbol id (for dedupe/cross-links) and lightweight tags.
+    pub stable_id: Option<String>,
+    pub tags: BTreeSet<String>,
 }
 
 //

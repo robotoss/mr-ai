@@ -1,10 +1,11 @@
+// ast/dart/util.rs
 //! Small utilities shared by the Dart extractor.
 //!
 //! These helpers are intentionally tree-sitter-light and robust to grammar drift.
 
 use crate::types::{Anchor, ChunkFeatures, CodeChunk, GraphEdges, RetrievalHints, Span};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tree_sitter::Node;
 
 /// Build a `Span` from a node.
@@ -156,7 +157,7 @@ pub fn leading_meta(code: &str, n: Node) -> (Option<String>, Vec<String>) {
 
     while let Some(prev) = cur.prev_sibling() {
         match prev.kind() {
-            // Documentation comments we want to keep.
+            // Keep only doc-comments.
             "comment" | "documentation_comment" => {
                 let t = prev.utf8_text(code.as_bytes()).unwrap_or_default();
                 let tt = t.trim();
@@ -165,11 +166,10 @@ pub fn leading_meta(code: &str, n: Node) -> (Option<String>, Vec<String>) {
                     cur = prev;
                     continue;
                 } else {
-                    // Non-doc comments break the doc group.
                     break;
                 }
             }
-            // Annotations block.
+            // Collect annotations.
             "metadata" => {
                 let t = prev
                     .utf8_text(code.as_bytes())
@@ -198,18 +198,11 @@ pub fn leading_meta(code: &str, n: Node) -> (Option<String>, Vec<String>) {
 }
 
 /// Collect distinct identifier names inside a variable-declaration-list-like subtree.
-///
-/// The function walks the subtree rooted at `vdl` and gathers identifier nodes using a
-/// resilient set of kind names that covers orchard and legacy grammars.
-/// Duplicates are removed while preserving first occurrence order.
-///
-/// Used for class fields and top-level variable declarations.
 pub fn collect_names_in_vdl(vdl: Node, code: &str) -> Vec<String> {
     let mut out = Vec::<String>::new();
     let mut st = vec![vdl];
     while let Some(n) = st.pop() {
         match n.kind() {
-            // Accept several identifier spellings to be resilient.
             "identifier" | "simple_identifier" | "Identifier" | "SimpleIdentifier" => {
                 let t = read_ident(code, n);
                 if is_ident_like(&t) {
@@ -311,9 +304,7 @@ pub fn extract_go_router_routes(node: Node, code: &str) -> Vec<String> {
     while let Some(n) = st.pop() {
         let k = n.kind();
         if k == "method_invocation" || k == "FunctionExpressionInvocation" {
-            // Read node text and match `.go('...')` occurrences.
             let t = read_text(code, n);
-            // Tiny parser for ".go('...')" and ".go(\"...\")".
             for seg in t.split(".go(").skip(1) {
                 if let Some(rest) = seg.split(')').next() {
                     let inner = rest.trim();
@@ -352,59 +343,42 @@ pub fn build_graph_and_hints(
     for raw in imports {
         let raw_trim = raw.trim_matches(&['\'', '"'][..]).trim();
         if raw_trim.starts_with("dart:") {
-            imports_out.push(format!(
-                "sdk:{}",
-                raw_trim.strip_prefix("dart:").unwrap_or(raw_trim)
-            ));
-            import_keywords.push(format!("sdk:{}", raw_trim));
+            let suffix = raw_trim.strip_prefix("dart:").unwrap_or(raw_trim);
+            imports_out.push(format!("sdk:{suffix}"));
+            import_keywords.push(format!("sdk:{raw_trim}"));
         } else if raw_trim.starts_with("package:") {
-            imports_out.push(format!(
-                "package:{}",
-                raw_trim.strip_prefix("package:").unwrap_or(raw_trim)
-            ));
-            if let Some(name) = raw_trim
-                .strip_prefix("package:")
-                .and_then(|s| s.split('/').next())
-            {
-                import_keywords.push(format!("pkg:{}", name));
+            let without_prefix = raw_trim.strip_prefix("package:").unwrap_or(raw_trim);
+            imports_out.push(format!("package:{without_prefix}"));
+            if let Some(name) = without_prefix.split('/').next() {
+                import_keywords.push(format!("pkg:{name}"));
             }
-            import_keywords.push(format!("package:{}", raw_trim));
+            // Keep a single "package:<...>" keyword (no double "package:package:")
+            import_keywords.push(raw_trim.to_string());
         } else {
             // Treat as file / relative import.
-            imports_out.push(format!("file:{}", raw_trim));
-            import_keywords.push(format!("file:{}", raw_trim));
+            imports_out.push(format!("file:{raw_trim}"));
+            import_keywords.push(format!("file:{raw_trim}"));
         }
     }
 
-    // Facts namespace: add routes if any.
-    let mut facts = std::collections::BTreeMap::<String, serde_json::Value>::new();
+    // Facts: add routes if any.
+    let mut facts = BTreeMap::<String, serde_json::Value>::new();
     if !routes.is_empty() {
         facts.insert("routes".to_string(), serde_json::json!(routes));
     }
 
-    // Category hint for UI/ranking.
-    let category = if is_widget {
-        Some("flutter_widget".to_string())
-    } else {
-        None
-    };
-
-    let mut facts = std::collections::BTreeMap::<String, serde_json::Value>::new();
-    if !routes.is_empty() {
-        facts.insert("routes".to_string(), serde_json::json!(routes));
-    }
-
+    // Import modifiers facts (alias/show/hide) for explainability.
     let mut import_tags = Vec::<String>::new();
     for raw in imports {
         let (alias, show, hide) = parse_import_modifiers(raw);
         if let Some(a) = alias {
-            import_tags.push(format!("alias:{}", a));
+            import_tags.push(format!("alias:{a}"));
         }
         for s in show {
-            import_tags.push(format!("show:{}", s));
+            import_tags.push(format!("show:{s}"));
         }
         for h in hide {
-            import_tags.push(format!("hide:{}", h));
+            import_tags.push(format!("hide:{h}"));
         }
     }
     if !import_tags.is_empty() {
@@ -418,25 +392,34 @@ pub fn build_graph_and_hints(
     let mut keywords = identifiers.to_vec();
     keywords.extend(import_keywords);
     for r in routes {
-        keywords.push(format!("route:{}", r));
+        keywords.push(format!("route:{r}"));
     }
+
+    // Optional category hint.
+    let category = if is_widget {
+        Some("flutter_widget".to_string())
+    } else {
+        None
+    };
 
     (
         GraphEdges {
             calls_out: Vec::new(),
             uses_types: Vec::new(),
             imports_out,
-            defines_types: Vec::new(), // not derived in this pass
+            defines_types: Vec::new(),
             facts,
         },
         RetrievalHints {
             keywords,
             category,
-            title: None, // no obvious title in code; providers may fill it later
+            title: None,
         },
     )
 }
 
+/// Collect calls and types in a subtree.
+/// Extended to be resilient to orchard/legacy node kinds.
 pub fn collect_calls_and_types(root: Node, code: &str) -> (Vec<String>, Vec<String>, Vec<Anchor>) {
     use std::collections::BTreeSet;
     let mut calls = BTreeSet::<String>::new();
@@ -447,12 +430,18 @@ pub fn collect_calls_and_types(root: Node, code: &str) -> (Vec<String>, Vec<Stri
     while let Some(n) = st.pop() {
         let k = n.kind();
 
-        // 2.1 Вызовы: method_invocation / FunctionExpressionInvocation
-        if k == "method_invocation" || k == "FunctionExpressionInvocation" {
+        // Calls: method/function invocations and constructor calls.
+        if matches!(
+            k,
+            "method_invocation"
+                | "FunctionExpressionInvocation"
+                | "constructor_invocation"
+                | "SuperConstructorInvocation"
+                | "InstanceCreationExpression"
+        ) {
             let text = read_text(code, n);
-            // Naively, we'll pull out the “candidate” to the left of ‘(’ and set the anchor
             if let Some(head) = text.split('(').next() {
-                // Example: "context.go", "router.push", "doWork"
+                // Normalize a candidate like "context.go" or "router.push"
                 let name = head
                     .trim()
                     .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
@@ -469,16 +458,20 @@ pub fn collect_calls_and_types(root: Node, code: &str) -> (Vec<String>, Vec<Stri
             }
         }
 
-        // 2.2 Types: extends/implements/with, annotations, generic args
+        // Types: extends/implements/with, annotations, generics, parameters, returns.
         match k {
             "extends_clause" | "implements_clause" | "with_clause" | "type_annotation"
-            | "TypeAnnotation" | "metadata" => {
+            | "TypeAnnotation" | "return_type" | "formal_parameter" | "typed_identifier"
+            | "metadata" | "Annotation" | "type_arguments" | "type_parameter"
+            | "type_parameters" => {
                 let t = read_text(code, n);
-                // very rough: split by non-letters, take identifiers with uppercase/underscore
+                // Very rough: split by non-letters, take identifiers likely to be types.
                 for tok in t.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.') {
-                    if !tok.is_empty()
-                        && (tok.chars().next().unwrap().is_uppercase() || tok == tok.to_uppercase())
-                    {
+                    if tok.is_empty() {
+                        continue;
+                    }
+                    let first = tok.chars().next().unwrap();
+                    if first.is_uppercase() || tok == tok.to_uppercase() {
                         types.insert(tok.to_string());
                         let sp = span_of(n);
                         extra_anchors.push(Anchor {
@@ -506,17 +499,16 @@ pub fn collect_calls_and_types(root: Node, code: &str) -> (Vec<String>, Vec<Stri
     )
 }
 
+/// Extract GoRouter config paths from object literals/options blocks.
 pub fn extract_gorouter_config_paths(node: Node, code: &str) -> Vec<String> {
     let mut out = Vec::<String>::new();
     let mut st = vec![node];
     while let Some(n) = st.pop() {
         let t = read_text(code, n);
-        // Searching for templates: path: ‘...’, initialLocation: '...'
         for key in ["path", "initialLocation"] {
             let pat = format!("{key}:");
             if let Some(idx) = t.find(&pat) {
                 let after = &t[idx + pat.len()..];
-                // rough parser for string literals
                 let after = after.trim_start();
                 if after.starts_with('\'') || after.starts_with('\"') {
                     let quote = after.chars().next().unwrap();
@@ -539,32 +531,10 @@ pub fn extract_gorouter_config_paths(node: Node, code: &str) -> Vec<String> {
     out
 }
 
-pub fn collect_parameter_anchors(node: Node, _code: &str) -> (u8, Vec<Anchor>) {
-    let mut count: u8 = 0;
-    let mut anchors = Vec::<Anchor>::new();
-    let mut st = vec![node];
-    while let Some(n) = st.pop() {
-        if n.kind() == "formal_parameter" || n.kind() == "NormalFormalParameter" {
-            count = count.saturating_add(1);
-            let sp = span_of(n);
-            anchors.push(Anchor {
-                kind: "parameter".to_string(),
-                start_byte: sp.start_byte,
-                end_byte: sp.end_byte,
-                name: None,
-            });
-        }
-        let mut w = n.walk();
-        for ch in n.children(&mut w) {
-            st.push(ch);
-        }
-    }
-    (count, anchors)
-}
-
+/// Parse import modifiers like `as`, `show`, `hide` from a raw import/export line.
 pub fn parse_import_modifiers(raw: &str) -> (Option<String>, Vec<String>, Vec<String>) {
     // returns (alias, show, hide)
-    // примеры: "import 'x' as foo show Bar, Baz hide Qux;"
+    // Example: "import 'x' as foo show Bar, Baz hide Qux;"
     let mut alias = None;
     let mut show = Vec::new();
     let mut hide = Vec::new();
@@ -578,7 +548,14 @@ pub fn parse_import_modifiers(raw: &str) -> (Option<String>, Vec<String>, Vec<St
     }
     if let Some(i) = s.find(" show ") {
         let after = &s[i + 6..];
-        let list = after.split(|c| c == ';' || c == 'h').next().unwrap_or("");
+        // take until ';' or ' hide '
+        let list = after
+            .split(";")
+            .next()
+            .unwrap_or("")
+            .split(" hide ")
+            .next()
+            .unwrap_or("");
         show = list
             .split(',')
             .map(|t| t.trim().to_string())

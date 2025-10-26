@@ -14,33 +14,6 @@ use crate::types::{MicroChunk, Span};
 use sha2::{Digest, Sha256};
 use tracing::{debug, trace};
 
-/// Compute a lowercase hex SHA-256 of a string.
-fn sha_hex(s: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(s.as_bytes());
-    format!("{:x}", h.finalize())
-}
-
-/// Build a stable micro-chunk ID from parent, order, and absolute span bytes.
-fn micro_id(parent: &str, order: u32, start_byte: usize, end_byte: usize) -> String {
-    let mut h = Sha256::new();
-    h.update(parent.as_bytes());
-    h.update(order.to_le_bytes());
-    h.update(start_byte.to_le_bytes());
-    h.update(end_byte.to_le_bytes());
-    format!("{:x}", h.finalize())
-}
-
-/// Infer the end column (UTF-8 bytes) of the last line in a slice of lines.
-/// The input `last_line_inclusive` **may** end with '\n'; we trim it when computing `end_col`.
-fn last_line_end_col(last_line_inclusive: &str) -> usize {
-    // Remove the trailing newline (if any) to get a visible column length.
-    let no_nl = last_line_inclusive
-        .strip_suffix('\n')
-        .unwrap_or(last_line_inclusive);
-    no_nl.len()
-}
-
 /// Split a snippet into overlapping windows by lines (extended API).
 ///
 /// Window boundaries are aligned to source lines, and spans are absolute
@@ -62,7 +35,7 @@ fn last_line_end_col(last_line_inclusive: &str) -> usize {
 ///
 /// # Panics
 /// Never panics; invalid inputs (e.g., `max_lines == 0`) return an empty vector.
-pub fn split_by_lines_ex<F>(
+fn split_by_lines_ex<F>(
     parent_chunk_id: &str,
     file: &str,
     symbol_path: &str,
@@ -169,7 +142,7 @@ where
 /// - `start_row` is assumed to be 0 (rows in `Span` will be relative to the snippet).
 /// - No role inference.
 /// - Same absolute byte math via `parent_start_byte`.
-pub fn split_by_lines(
+fn split_by_lines(
     parent_chunk_id: &str,
     file: &str,
     symbol_path: &str,
@@ -241,4 +214,31 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].role.as_deref(), Some("if_arm"));
     }
+}
+
+/// Compute a lowercase hex SHA-256 of a string.
+fn sha_hex(s: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Build a stable micro-chunk ID from parent, order, and absolute span bytes.
+fn micro_id(parent: &str, order: u32, start_byte: usize, end_byte: usize) -> String {
+    let mut h = Sha256::new();
+    h.update(parent.as_bytes());
+    h.update(order.to_le_bytes());
+    h.update(start_byte.to_le_bytes());
+    h.update(end_byte.to_le_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Infer the end column (UTF-8 bytes) of the last line in a slice of lines.
+/// The input `last_line_inclusive` **may** end with '\n'; we trim it when computing `end_col`.
+fn last_line_end_col(last_line_inclusive: &str) -> usize {
+    // Remove the trailing newline (if any) to get a visible column length.
+    let no_nl = last_line_inclusive
+        .strip_suffix('\n')
+        .unwrap_or(last_line_inclusive);
+    no_nl.len()
 }

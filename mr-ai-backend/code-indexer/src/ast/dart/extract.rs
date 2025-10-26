@@ -1,3 +1,4 @@
+// ast/dart/extract.rs
 //! High-level extraction for Dart without Tree-sitter queries.
 //!
 //! Strategy:
@@ -11,8 +12,11 @@
 //! Robustness:
 //! - Accepts orchard/legacy kind names; uses defensive child lookups.
 //! - Import URIs are parsed with a lightweight regex (works across grammar variants).
-
-use std::collections::BTreeMap;
+//!
+//! Fixes in this version:
+//! - Prevent duplicate chunks for the same class members (e.g., function_declaration vs method_declaration).
+//! - Expand symbol span to include the body, so calls/types inside the body are captured.
+//! - Keep traversal version-agnostic and resilient.
 
 use super::dart_extras::DartChunkExtras;
 use super::util::{
@@ -20,14 +24,11 @@ use super::util::{
     extract_go_router_routes, features_for, first_line, is_ident_like, leading_meta, make_id,
     read_ident, read_ident_opt, sha_hex, span_of,
 };
-use crate::ast::dart::util::{
-    collect_calls_and_types, collect_parameter_anchors, extract_gorouter_config_paths,
-};
+use crate::ast::dart::util::{collect_calls_and_types, extract_gorouter_config_paths};
 use crate::errors::Result;
-use crate::types::{
-    Anchor, CodeChunk, LanguageKind, LspEnrichment, Span, SymbolKind, SymbolMetrics,
-};
+use crate::types::{Anchor, CodeChunk, LanguageKind, LspEnrichment, Span, SymbolKind};
 use regex::Regex;
+use std::collections::HashSet;
 use tree_sitter::Node;
 
 /// Emit a synthetic chunk for files that only contain import/export directives.
@@ -141,30 +142,23 @@ pub fn extract_chunks(
                 );
             }
 
-            // ----- top-level functions
+            // ----- top-level functions (and class methods misexposed as functions)
             "function_declaration" => {
-                let name = child_ident_by_field_or_first(n, code, "name")
-                    .unwrap_or_else(|| "<anonymous>".to_string());
-                emit_symbol_chunk(
-                    &mut out,
-                    code,
-                    file,
-                    &imports,
-                    is_generated,
-                    n,
-                    name,
-                    SymbolKind::Function,
-                    &owner_chain_for,
-                    &signature_of,
-                    true,
-                );
-            }
-            // Orchard sometimes exposes `function_signature` without a surrounding
-            // `function_declaration`. Emit only if there is no such ancestor.
-            "function_signature" => {
-                if !has_ancestor_kind(n, "function_declaration") {
-                    let name =
-                        first_identifier_in(n, code).unwrap_or_else(|| "<anonymous>".to_string());
+                let is_inside_class = has_ancestor_kind(n, "class_declaration")
+                    || has_ancestor_kind(n, "class_definition");
+
+                // If inside a class and there is an overlapping method_declaration for the same range,
+                // skip this function_declaration to avoid duplicates.
+                if is_inside_class && has_overlapping_method_decl(n) {
+                    // no-op
+                } else {
+                    let name = child_ident_by_field_or_first(n, code, "name")
+                        .unwrap_or_else(|| "<anonymous>".to_string());
+                    let as_kind = if is_inside_class {
+                        SymbolKind::Method
+                    } else {
+                        SymbolKind::Function
+                    };
                     emit_symbol_chunk(
                         &mut out,
                         code,
@@ -173,7 +167,36 @@ pub fn extract_chunks(
                         is_generated,
                         n,
                         name,
-                        SymbolKind::Function,
+                        as_kind,
+                        &owner_chain_for,
+                        &signature_of,
+                        true,
+                    );
+                }
+            }
+            // Orchard sometimes exposes `function_signature` without a surrounding `function_declaration`.
+            "function_signature" => {
+                if !has_ancestor_kind(n, "function_declaration")
+                    && !has_ancestor_kind(n, "method_declaration")
+                {
+                    let name =
+                        first_identifier_in(n, code).unwrap_or_else(|| "<anonymous>".to_string());
+                    let is_inside_class = has_ancestor_kind(n, "class_declaration")
+                        || has_ancestor_kind(n, "class_definition");
+                    let as_kind = if is_inside_class {
+                        SymbolKind::Method
+                    } else {
+                        SymbolKind::Function
+                    };
+                    emit_symbol_chunk(
+                        &mut out,
+                        code,
+                        file,
+                        &imports,
+                        is_generated,
+                        n,
+                        name,
+                        as_kind,
                         &owner_chain_for,
                         &signature_of,
                         true,
@@ -201,7 +224,9 @@ pub fn extract_chunks(
             }
             // Orchard variant
             "method_signature" => {
-                if !has_ancestor_kind(n, "method_declaration") {
+                if !has_ancestor_kind(n, "method_declaration")
+                    && !has_ancestor_kind(n, "function_declaration")
+                {
                     let name =
                         first_identifier_in(n, code).unwrap_or_else(|| "<anonymous>".to_string());
                     emit_symbol_chunk(
@@ -345,7 +370,23 @@ pub fn extract_chunks(
         }
     }
 
-    // 3) Optional: synthesize a "barrel file" chunk when the file has only directives.
+    // 3) Robust de-duplication:
+    //    - Primary by (symbol_path, start, end)
+    //    - Secondary by (owner_path_joined, start_byte, signature_head)
+    {
+        let mut seen_se = HashSet::<(String, usize, usize)>::new();
+        out.retain(|c| seen_se.insert((c.symbol_path.clone(), c.span.start_byte, c.span.end_byte)));
+
+        let mut seen_sig = HashSet::<(String, usize, String)>::new();
+        out.retain(|c| {
+            let owner = c.owner_path.join("::");
+            let sig = c.signature.clone().unwrap_or_default();
+            let head = sig.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+            seen_sig.insert((owner, c.span.start_byte, head))
+        });
+    }
+
+    // 4) Optional: synthesize a "barrel file" chunk when the file has only directives.
     if out.is_empty() && EMIT_BARREL_FILE_CHUNK && !imports.is_empty() {
         emit_barrel_file_chunk(&mut out, code, file, &imports);
     }
@@ -501,6 +542,11 @@ fn emit_symbol_chunk(
     signature_of: &dyn Fn(Node) -> Option<String>,
     collect_routes_and_idents: bool,
 ) {
+    // Upgrade to the declaration node that actually holds the body (if any)
+    // and expand the span to include the body to capture calls/types inside.
+    let decl = upgrade_to_decl_with_body(node);
+    let span = span_including_body(decl);
+
     let owner: Vec<String> = owner_chain_for(node);
     let symbol_path = if owner.is_empty() {
         format!("{file}::{symbol}")
@@ -508,42 +554,41 @@ fn emit_symbol_chunk(
         format!("{}::{}::{}", file, owner.join("::"), symbol)
     };
 
-    let span = span_of(node);
+    // Base text slice for hashing.
     let text = &code[span.start_byte..span.end_byte];
     let (doc, annotations) = leading_meta(code, node);
     let features = features_for(&span, &doc, &annotations);
 
-    // Identifiers + anchors
-    let (identifiers, mut anchors) = collect_identifiers_and_anchors(node, code);
+    // Identifiers + anchors (use decl to include the body).
+    let (identifiers, mut anchors) = collect_identifiers_and_anchors(decl, code);
 
-    // Widget detection (classes only)
+    // Widget detection (classes only).
     let is_widget = matches!(kind, SymbolKind::Class) && class_is_widget(node, code);
 
-    // Route extraction (best-effort)
+    // Route extraction (best-effort).
     let mut routes = if collect_routes_and_idents {
-        extract_go_router_routes(node, code)
+        extract_go_router_routes(decl, code)
     } else {
         Vec::new()
     };
 
     if collect_routes_and_idents {
-        let mut cfg = extract_gorouter_config_paths(node, code);
+        let mut cfg = extract_gorouter_config_paths(decl, code);
         routes.append(&mut cfg);
         routes.sort();
         routes.dedup();
     }
 
-    // extract.rs → emit_symbol_chunk(...)
-    // Calls & Types
-    let (calls_out, uses_types, call_type_anchors) = collect_calls_and_types(node, code);
+    // Calls & Types (scan decl to include method/function body).
+    let (calls_out, uses_types, call_type_anchors) = collect_calls_and_types(decl, code);
     anchors.extend(call_type_anchors);
 
-    // Graph + retrieval hints
+    // Graph + retrieval hints.
     let (mut graph, hints) = build_graph_and_hints(&identifiers, imports, is_widget, &routes);
     graph.calls_out = calls_out;
     graph.uses_types = uses_types;
 
-    // defines_types
+    // defines_types for type-like kinds.
     if matches!(
         kind,
         SymbolKind::Class | SymbolKind::Enum | SymbolKind::Mixin | SymbolKind::Extension
@@ -561,7 +606,7 @@ fn emit_symbol_chunk(
         });
     }
 
-    // Dart-specific extras packed as JSON
+    // Dart-specific extras packed as JSON.
     let extras = serde_json::to_value(DartChunkExtras {
         is_widget: if matches!(kind, SymbolKind::Class) {
             Some(is_widget)
@@ -573,33 +618,7 @@ fn emit_symbol_chunk(
     })
     .ok();
 
-    let mut params_count: Option<u8> = None;
-    if matches!(
-        kind,
-        SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor
-    ) {
-        let (pc, param_anchors) = collect_parameter_anchors(node, code);
-        if pc > 0 {
-            params_count = Some(pc);
-        }
-        anchors.extend(param_anchors);
-    }
-
-    let mut lsp_enr = LspEnrichment::default();
-
-    lsp_enr.metrics = Some(SymbolMetrics {
-        is_async: false,
-        loc: None,
-        params_count,
-        custom: {
-            let mut m = BTreeMap::new();
-
-            if matches!(kind, SymbolKind::Class) {
-                m.insert("dart.is_widget".to_string(), serde_json::json!(is_widget));
-            }
-            m
-        },
-    });
+    let lsp_enr = LspEnrichment::default();
 
     out.push(CodeChunk {
         id: make_id(file, &symbol_path, &span),
@@ -742,4 +761,82 @@ fn root_span(code: &str) -> Span {
         end_row: 0,
         end_col: 0,
     }
+}
+
+// =====================================================================
+// Span/body utilities and duplicate suppression helpers
+// =====================================================================
+
+/// If the node is a signature child, upgrade to the declaration that owns the body.
+/// This helps to include the function/method body when computing spans and anchors.
+fn upgrade_to_decl_with_body(n: Node) -> Node {
+    let mut cur = n;
+    while let Some(p) = cur.parent() {
+        match p.kind() {
+            "method_declaration" | "function_declaration" | "constructor_declaration" => {
+                return p;
+            }
+            _ => cur = p,
+        }
+    }
+    n
+}
+
+/// Return a span that includes the body if available.
+fn span_including_body(n: Node) -> Span {
+    let mut sp = span_of(n);
+
+    if let Some(body) = n.child_by_field_name("body") {
+        let bsp = span_of(body);
+        if bsp.end_byte > sp.end_byte {
+            sp.end_byte = bsp.end_byte;
+            sp.end_row = bsp.end_row;
+            sp.end_col = bsp.end_col;
+        }
+        return sp;
+    }
+
+    if let Some(body_like) =
+        find_descendant_of_kinds(n, &["function_body", "block", "FunctionBody", "body"])
+    {
+        let bsp = span_of(body_like);
+        if bsp.end_byte > sp.end_byte {
+            sp.end_byte = bsp.end_byte;
+            sp.end_row = bsp.end_row;
+            sp.end_col = bsp.end_col;
+        }
+    }
+
+    sp
+}
+
+/// Check if there is a sibling method_declaration with exactly the same range.
+/// This prevents emitting duplicates when the grammar exposes both
+/// function_declaration and method_declaration for the same class member.
+fn has_overlapping_method_decl(n: Node) -> bool {
+    let start = n.start_byte();
+    let end = n.end_byte();
+
+    // Walk up to the nearest member container (class/extension/mixin).
+    let mut cur = n;
+    while let Some(p) = cur.parent() {
+        match p.kind() {
+            "class_declaration"
+            | "class_definition"
+            | "extension_declaration"
+            | "mixin_declaration" => {
+                let mut w = p.walk();
+                for ch in p.children(&mut w) {
+                    if ch.kind() == "method_declaration" {
+                        if ch.start_byte() == start && ch.end_byte() == end {
+                            return true;
+                        }
+                    }
+                }
+                break;
+            }
+            _ => cur = p,
+        }
+    }
+    false
 }
