@@ -12,6 +12,7 @@ use crate::lsp::dart::util::{
 use crate::types::{CodeChunk, DefLocation, LspEnrichment, OriginKind};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, trace, warn};
 use url::Url;
@@ -400,16 +401,43 @@ fn classify_origin(uri: &str) -> OriginKind {
     OriginKind::Unknown
 }
 
+// Assumes `repo_rel_key(path, repo_root_abs)` exists elsewhere.
+// Assumes `repo_rel_key(path, repo_root_abs)` exists elsewhere.
 fn normalize_target_rel(uri: &str, repo_root_abs: &Path) -> String {
+    // Helper: stringify a path with forward slashes on all platforms
+    fn norm_slashes(p: &Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
     if let Ok(u) = Url::parse(uri) {
         if u.scheme() == "file" {
             if let Ok(abs) = u.to_file_path() {
+                // Case 1: path is inside the repo -> keep the original behavior
                 if abs.starts_with(repo_root_abs) {
                     return repo_rel_key(&abs, repo_root_abs);
+                }
+
+                // Case 2: Flutter SDK special cases
+                // If the absolute path contains ".../flutter/bin/..." or ".../flutter/packages/...",
+                // drop everything before that segment and prefix with "flutter_sdk/".
+                let parts: Vec<&OsStr> = abs.iter().collect();
+                for i in 0..parts.len().saturating_sub(1) {
+                    if parts[i] == OsStr::new("flutter") {
+                        let next = parts[i + 1];
+                        if next == OsStr::new("bin") || next == OsStr::new("packages") {
+                            // Build "flutter_sdk/<next>/..." from the "<next>/..." suffix
+                            let suffix: PathBuf = parts[i + 1..].iter().collect();
+                            let mut new_rel = PathBuf::from("flutter_sdk");
+                            new_rel.push(suffix);
+                            return norm_slashes(&new_rel);
+                        }
+                    }
                 }
             }
         }
     }
+
+    // Fallback: return the original URI as-is
     uri.to_string()
 }
 
