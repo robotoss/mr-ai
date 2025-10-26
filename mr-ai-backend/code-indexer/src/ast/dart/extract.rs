@@ -12,21 +12,15 @@
 //! - Accepts orchard/legacy kind names; uses defensive child lookups.
 //! - Import URIs are parsed with a lightweight regex (works across grammar variants).
 
-use std::collections::BTreeMap;
-
 use super::dart_extras::DartChunkExtras;
 use super::util::{
     build_graph_and_hints, class_is_widget, collect_identifiers_and_anchors, collect_names_in_vdl,
     extract_go_router_routes, features_for, first_line, is_ident_like, leading_meta, make_id,
     read_ident, read_ident_opt, sha_hex, span_of,
 };
-use crate::ast::dart::util::{
-    collect_calls_and_types, collect_parameter_anchors, extract_gorouter_config_paths,
-};
+use crate::ast::dart::util::{collect_calls_and_types, extract_gorouter_config_paths};
 use crate::errors::Result;
-use crate::types::{
-    Anchor, CodeChunk, LanguageKind, LspEnrichment, Span, SymbolKind, SymbolMetrics,
-};
+use crate::types::{Anchor, CodeChunk, LanguageKind, LspEnrichment, Span, SymbolKind};
 use regex::Regex;
 use tree_sitter::Node;
 
@@ -573,33 +567,7 @@ fn emit_symbol_chunk(
     })
     .ok();
 
-    let mut params_count: Option<u8> = None;
-    if matches!(
-        kind,
-        SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor
-    ) {
-        let (pc, param_anchors) = collect_parameter_anchors(node, code);
-        if pc > 0 {
-            params_count = Some(pc);
-        }
-        anchors.extend(param_anchors);
-    }
-
-    let mut lsp_enr = LspEnrichment::default();
-
-    lsp_enr.metrics = Some(SymbolMetrics {
-        is_async: false,
-        loc: None,
-        params_count,
-        custom: {
-            let mut m = BTreeMap::new();
-
-            if matches!(kind, SymbolKind::Class) {
-                m.insert("dart.is_widget".to_string(), serde_json::json!(is_widget));
-            }
-            m
-        },
-    });
+    let lsp_enr = LspEnrichment::default();
 
     out.push(CodeChunk {
         id: make_id(file, &symbol_path, &span),

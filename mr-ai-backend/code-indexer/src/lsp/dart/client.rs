@@ -2,8 +2,7 @@
 //!
 //! This client logs every request/response and transparently yields both
 //! responses (with matching `id`) and server notifications (e.g. diagnostics).
-//! We keep it blocking and simple; higher-level code is responsible for
-//! deciding when to stop reading.
+//! It is intentionally blocking and simple.
 
 use crate::errors::{Error, Result};
 use serde::Deserialize;
@@ -74,8 +73,7 @@ impl LspProcess {
         Ok(())
     }
 
-    /// Receives a single message (response or notification).
-    /// Blocks until a complete LSP frame is read.
+    /// Receives a single message (response or notification). Blocks until a full frame.
     pub fn recv(&mut self) -> Result<RpcMessage> {
         // Read header until CRLFCRLF
         let mut header = Vec::<u8>::new();

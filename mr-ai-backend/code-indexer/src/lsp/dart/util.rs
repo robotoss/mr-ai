@@ -1,9 +1,10 @@
-//! Utilities: paths/URIs, strings, and overlap picking with structured tracing.
+//! Utilities: paths/URIs, strings, overlap picking, and path normalization.
 
 use crate::types::Span;
 use serde_json::json;
 use std::cmp::{max, min};
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, instrument, trace, warn};
 use url::Url;
@@ -11,7 +12,6 @@ use url::Url;
 #[instrument(level = "trace", skip_all, fields(in_path=%p.display()))]
 pub fn abs_path(p: &Path) -> PathBuf {
     if p.is_absolute() {
-        trace!("already absolute");
         return p.to_path_buf();
     }
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
@@ -19,8 +19,51 @@ pub fn abs_path(p: &Path) -> PathBuf {
         PathBuf::from(".")
     });
     let out: PathBuf = cwd.join(p).components().collect();
-    trace!(cwd=%cwd.display(), out_path=%out.display(), "normalized");
     out
+}
+
+#[instrument(level = "trace", skip_all, fields(in_path=%p.display()))]
+pub fn abs_canonical(p: &Path) -> PathBuf {
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p)
+    };
+    fs::canonicalize(&abs).unwrap_or(abs)
+}
+
+/// Make repo-relative forward-slash key from an absolute path.
+pub fn repo_rel_key(abs: &Path, repo_root_abs: &Path) -> String {
+    let rel = pathdiff::diff_paths(abs, repo_root_abs).unwrap_or_else(|| abs.to_path_buf());
+    rel.to_string_lossy().replace('\\', "/")
+}
+
+/// Given any `file_str` (relative or absolute), normalize to (repo-relative key, absolute path).
+/// Returns `None` if the absolute path does not start with `repo_root_abs`.
+pub fn normalize_to_repo_key(repo_root_abs: &Path, file_str: &str) -> Option<(String, PathBuf)> {
+    let p = Path::new(file_str);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        abs_canonical(p)
+    };
+    let abs = if abs.starts_with(repo_root_abs) {
+        abs
+    } else {
+        let candidate = abs_canonical(&repo_root_abs.join(file_str));
+        if candidate.starts_with(repo_root_abs) && candidate.exists() {
+            candidate
+        } else {
+            abs
+        }
+    };
+    if !abs.starts_with(repo_root_abs) {
+        return None;
+    }
+    let key = repo_rel_key(&abs, repo_root_abs);
+    Some((key, abs))
 }
 
 #[instrument(level = "debug", skip_all, fields(folders=?folders.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()))]
@@ -34,22 +77,18 @@ pub fn build_workspace_folders_json_abs(folders: &[PathBuf]) -> Vec<serde_json::
             .unwrap_or("pkg")
             .to_string();
         let uri = file_uri_abs(&abs);
-        debug!(folder=%abs.display(), %uri, %name, "workspace folder added");
         out.push(json!({ "name": name, "uri": uri }));
     }
-    debug!(count = out.len(), "workspace folders built");
     out
 }
 
 #[instrument(level = "debug", skip_all, fields(count = files_abs.len()))]
 pub fn common_parent_dir(files_abs: &[PathBuf]) -> PathBuf {
     if files_abs.is_empty() {
-        let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        return std::env::current_dir().unwrap_or_else(|e| {
             warn!(error=%e, "current_dir failed; fallback '.'");
             PathBuf::from(".")
         });
-        debug!(root=%cwd.display(), "empty set → cwd");
-        return cwd;
     }
     let mut it = files_abs.iter().cloned();
     let mut prefix = it.next().unwrap();
@@ -60,7 +99,6 @@ pub fn common_parent_dir(files_abs: &[PathBuf]) -> PathBuf {
             }
         }
     }
-    debug!(parent=%prefix.display(), "computed");
     prefix
 }
 
@@ -70,15 +108,11 @@ pub fn parent_folder_set(files_abs: &[PathBuf]) -> Vec<PathBuf> {
     for f in files_abs {
         if let Some(parent) = f.parent() {
             set.insert(abs_path(parent));
-        } else {
-            trace!(file=%f.display(), "no parent");
         }
     }
     let mut v: Vec<PathBuf> = set.into_iter().collect();
     v.sort();
-    let before = v.len();
     v.truncate(64);
-    debug!(unique = before, truncated = v.len(), "parent folders");
     v
 }
 
@@ -90,15 +124,8 @@ pub fn file_uri_abs(p: &Path) -> String {
         abs_path(p)
     };
     match Url::from_file_path(&abs) {
-        Ok(u) => {
-            trace!(path=%abs.display(), uri=%u, "ok");
-            u.to_string()
-        }
-        Err(_) => {
-            let uri = format!("file:///{}", abs.display());
-            warn!(path=%abs.display(), %uri, "from_file_path failed, fallback");
-            uri
-        }
+        Ok(u) => u.to_string(),
+        Err(_) => format!("file:///{}", abs.display()),
     }
 }
 
@@ -113,7 +140,6 @@ pub fn uri_to_abs_path(uri: &str) -> Option<PathBuf> {
     None
 }
 
-/// Returns best-overlapping symbol index for a chunk span (by byte overlap).
 #[instrument(level = "trace", skip_all, fields(chunk_bytes=%format!("{}..{}", span.start_byte, span.end_byte), syms=syms.len()))]
 pub fn best_overlap_index(
     span: &Span,
@@ -129,12 +155,6 @@ pub fn best_overlap_index(
 
     for (i, s) in syms.iter().enumerate() {
         if s.range.end_byte < s.range.start_byte {
-            warn!(
-                sym_idx = i,
-                start = s.range.start_byte,
-                end = s.range.end_byte,
-                "invalid symbol range"
-            );
             continue;
         }
         let b0 = s.range.start_byte;
@@ -170,37 +190,13 @@ pub fn best_overlap_index(
 
     if overlaps.is_empty() {
         nearest.sort_by_key(|&(_, d)| d);
-        let preview = nearest
-            .iter()
-            .take(5)
-            .map(|(i, d)| {
-                format!(
-                    "#{i}:dist={d} (sym {}..{})",
-                    syms[*i].range.start_byte, syms[*i].range.end_byte
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        trace!(nearest=?preview, "no overlap; nearest candidates");
+        best = nearest.first().cloned();
     } else {
         overlaps.sort_by_key(|&(_, ov)| std::cmp::Reverse(ov));
-        let top = overlaps
-            .iter()
-            .take(5)
-            .map(|(i, ov)| {
-                format!(
-                    "#{i}:ov={ov} (sym {}..{})",
-                    syms[*i].range.start_byte, syms[*i].range.end_byte
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        trace!(candidates=?top, "overlap candidates");
+        best = overlaps.first().cloned();
     }
 
-    let out = best.map(|(i, _)| i);
-    trace!(best_idx=?out, "result");
-    out
+    best.map(|(i, _)| i)
 }
 
 #[instrument(level = "trace", skip_all, fields(max_chars))]
@@ -215,22 +211,17 @@ pub fn first_line(s: &str, max_chars: usize) -> String {
             break;
         }
     }
-    let trimmed = out.trim().to_string();
-    trace!(orig_len = s.len(), out_len = trimmed.len(), "first_line");
-    trimmed
+    out.trim().to_string()
 }
 
 #[instrument(level = "trace", skip_all, fields(orig_len = s.len(), max))]
 pub fn truncate(s: String, max: usize) -> String {
     if s.len() <= max {
-        trace!("no-op");
         return s;
     }
     let mut end = max;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    let out = s[..end].to_string();
-    trace!(new_len=?out.len(), "sliced");
-    out
+    s[..end].to_string()
 }

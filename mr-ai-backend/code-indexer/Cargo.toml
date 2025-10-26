@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 sha2 = "0.10"
 walkdir = "2.5"
+pathdiff = "0.2"
 # LSP model types
 lsp-types = "0.97"
 url = "2.5"
