@@ -9,6 +9,7 @@
 //!
 //! Implementation is intentionally left as `todo!()` per step requirements.
 
+mod embedding;
 pub mod errors;
 pub mod structs;
 mod vector_db;
