@@ -11,6 +11,7 @@
 
 mod embedding;
 pub mod errors;
+mod jsonl_reader;
 pub mod structs;
 mod vector_db;
 
