@@ -11,6 +11,7 @@
 
 pub mod errors;
 pub mod structs;
+mod vector_db;
 
 use errors::rag_base_error::RagBaseError;
 use structs::rag_base_config::RagConfig;
