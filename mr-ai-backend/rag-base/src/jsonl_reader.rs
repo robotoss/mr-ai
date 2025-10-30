@@ -15,7 +15,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use tokio::fs::File;
-use tokio::io::{self, AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::embedding::build_embedding_text;
 use crate::errors::rag_base_error::RagBaseError;
