@@ -156,6 +156,8 @@ pub async fn search_project_top_k(
         .next()
         .ok_or_else(|| RagBaseError::Embedding("empty embedding response".into()))?;
 
+    println!("top_k: {:?}", k);
+
     // Run vector search.
     let top_k = k.unwrap_or(cfg.search.top_k);
     let hits = db_search_top_k(&client, &cfg, query_vec, top_k, cfg.search.min_score).await?;

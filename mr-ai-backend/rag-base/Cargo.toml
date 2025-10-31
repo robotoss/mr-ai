@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 
 qdrant-client = "1.15"
+blake3 = "1.8"
 
 tokio = { workspace = true }
 thiserror = { workspace = true }

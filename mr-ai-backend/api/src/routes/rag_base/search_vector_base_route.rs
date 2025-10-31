@@ -1,4 +1,4 @@
-use rag_base::search_project_top_k;
+use rag_base::{search_project_top_k, structs::rag_store::SearchHit};
 use std::sync::Arc;
 
 use axum::{
@@ -26,10 +26,13 @@ pub async fn search_vector_base_route(
         debug!(%id, "request id attached");
     }
 
-    let result = search_project_top_k(&state.config.project_name, &p.query, p.k).await;
+    let result: Result<Vec<SearchHit>, rag_base::errors::rag_base_error::RagBaseError> =
+        search_project_top_k(&state.config.project_name, &p.query, p.k).await;
 
     match result {
-        Ok(_) => {}
+        Ok(result) => {
+            println!("Result: {:?}", result);
+        }
         Err(ex) => println!("Failed {:?}", ex),
     }
 

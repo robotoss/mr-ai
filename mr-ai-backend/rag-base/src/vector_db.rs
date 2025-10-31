@@ -125,19 +125,21 @@ pub async fn upsert_batch(
             )));
         }
 
+        let numeric_id = hash_to_u64(&id);
+
         let q_payload = payload_to_qdrant(&payload)?;
         // `PointStruct::new` supports numeric and UUID/string IDs.
-        let point = PointStruct::new(id, vector, q_payload);
+        let point = PointStruct::new(numeric_id, vector, q_payload);
         points.push(point);
     }
 
     let point_len = points.len();
 
     client
-        .upsert_points(qdrant_client::qdrant::UpsertPointsBuilder::new(
-            &cfg.qdrant.collection,
-            points,
-        ))
+        .upsert_points(
+            qdrant_client::qdrant::UpsertPointsBuilder::new(&cfg.qdrant.collection, points)
+                .wait(true),
+        )
         .await
         .map_err(|e| RagBaseError::Qdrant(format!("upsert_points: {e}")))?;
 
@@ -193,16 +195,28 @@ pub async fn search_top_k(
 
 /// Helper: map a `ScoredPoint` into our [`SearchHit`], extracting payload best-effort.
 fn map_scored_point_to_hit(sp: qdrant_client::qdrant::ScoredPoint) -> SearchHit {
-    // Extract ID in a stable string form.
-    let id = if let Some(pid) = sp.id {
+    // Let's first try to extract the original ID from the payload.
+    let mut original_id_from_payload: Option<String> = None;
+    if !sp.payload.is_empty() {
+        if let Some(v) = sp.payload.get("id") {
+            if let Some(s) = v.clone().into_json().as_str() {
+                original_id_from_payload = Some(s.to_owned());
+            }
+        }
+    }
+
+    // If not, we use the point ID from Qdrant (numeric).
+    let fallback_id = if let Some(pid) = sp.id {
         match pid.point_id_options {
-            Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(s)) => s,
             Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(n)) => n.to_string(),
+            Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(s)) => s, // in case there will ever be UUIDs
             None => String::new(),
         }
     } else {
         String::new()
     };
+
+    let id = original_id_from_payload.unwrap_or(fallback_id);
 
     // Extract preview fields from payload if present.
     let mut file = String::new();
@@ -260,4 +274,12 @@ fn map_scored_point_to_hit(sp: qdrant_client::qdrant::ScoredPoint) -> SearchHit 
         signature,
         snippet,
     }
+}
+
+/// Deterministically hash an arbitrary string to a u64 ID.
+/// Using BLAKE3 and taking the first 8 bytes (little-endian) is fast and stable.
+fn hash_to_u64(s: &str) -> u64 {
+    let digest = blake3::hash(s.as_bytes());
+    let bytes = &digest.as_bytes()[..8];
+    u64::from_le_bytes(bytes.try_into().expect("slice with incorrect length"))
 }

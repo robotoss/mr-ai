@@ -96,7 +96,7 @@ impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             disabled: false,
-            top_k: 8,
+            top_k: 20,
             min_score: Some(0.50),
             take_per_target: Some(3),
             memo_cap: Some(64),
