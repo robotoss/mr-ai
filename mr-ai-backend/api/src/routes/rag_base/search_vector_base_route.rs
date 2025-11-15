@@ -1,4 +1,3 @@
-use rag_base::{search_project_top_k, structs::rag_store::SearchHit};
 use std::sync::Arc;
 
 use axum::{
@@ -7,7 +6,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Response,
 };
-use tracing::debug;
+use rag_base::{errors::rag_base_error::RagBaseError, search_code};
+use tracing::{debug, error};
 
 use crate::{
     core::{app_state::AppState, http::response_envelope::ApiResponse},
@@ -22,22 +22,48 @@ pub async fn search_vector_base_route(
     headers: HeaderMap,
     Json(p): Json<SearchVectorBaseRequest>,
 ) -> Response {
-    if let Some(id) = headers.get("X-Request-Id").and_then(|h| h.to_str().ok()) {
-        debug!(%id, "request id attached");
-    }
+    let request_id = headers
+        .get("X-Request-Id")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("-");
 
-    let result: Result<Vec<SearchHit>, rag_base::errors::rag_base_error::RagBaseError> =
-        search_project_top_k(&state.config.project_name, &p.query, p.k).await;
+    debug!(
+        request_id = %request_id,
+        query = %p.query,
+        "search_vector_base_route: start"
+    );
+
+    let result: Result<_, RagBaseError> =
+        search_code(&state.config.project_name, &p.query, p.k).await;
 
     match result {
-        Ok(result) => {
-            println!("Result: {:?}", result);
-        }
-        Err(ex) => println!("Failed {:?}", ex),
-    }
+        Ok(results) => {
+            debug!(
+                request_id = %request_id,
+                hits = results.len(),
+                "search_vector_base_route: success"
+            );
 
-    ApiResponse::success(SearchVectorBaseResponse {
-        message: format!("Success indexed project"),
-    })
-    .into_response_with_status(StatusCode::OK)
+            let body = SearchVectorBaseResponse {
+                message: "Search completed successfully".to_string(),
+                query: p.query,
+                results,
+            };
+
+            ApiResponse::success(body).into_response_with_status(StatusCode::OK)
+        }
+        Err(err) => {
+            error!(
+                request_id = %request_id,
+                error = %format!("{err}"),
+                "search_vector_base_route: search failed"
+            );
+
+            let msg = format!("Search failed: {err}");
+
+            let resp: ApiResponse<()> = ApiResponse::error("RAG_SEARCH_FAILED", msg, Vec::new());
+
+            resp.into_response_with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
