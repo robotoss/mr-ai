@@ -1,18 +1,4 @@
-//! Text helpers and **Ollama-based** embedding utilities.
-//!
-//! This module keeps the embedding concern isolated from storage and parsing:
-//! - Build compact, high-signal text inputs for embedding.
-//! - Call **Ollama** `/api/embeddings` endpoint and return dense vectors.
-//! - Validate vector dimensionality against `RagConfig.embedding.dim`.
-//!
-//! ## Environment
-//! - `OLLAMA_URL` (default: `http://localhost:11434`)
-//!
-//! ## Notes
-//! - Requests are executed **sequentially** for simplicity. If you need higher
-//!   throughput, call `embed_texts_ollama` from multiple tasks or extend it to
-//!   run multiple in-flight requests capped by `cfg.embedding.concurrency`.
-//! - Errors are mapped to `RagBaseError::Embedding` with descriptive messages.
+//! Text helpers and Ollama-based embedding utilities.
 
 use std::time::Duration;
 
@@ -23,14 +9,6 @@ use crate::errors::rag_base_error::RagBaseError;
 use crate::structs::rag_base_config::RagConfig;
 
 /// Returns a clamped copy of `s` limited by `max_chars` and `max_lines`.
-///
-/// Rules:
-/// - Stops at the earliest limit (lines or chars).
-/// - Preserves line boundaries up to the limit.
-/// - Appends an ellipsis `…` if truncation occurred and `add_ellipsis` is true.
-/// - Keeps UTF-8 boundary correctness when trimming.
-///
-/// This helper is safe to use for preview snippets and embedding inputs.
 pub fn clamp_snippet_ex(s: &str, max_chars: usize, max_lines: usize, add_ellipsis: bool) -> String {
     if s.is_empty() || max_chars == 0 {
         return String::new();
@@ -65,10 +43,8 @@ pub fn clamp_snippet_ex(s: &str, max_chars: usize, max_lines: usize, add_ellipsi
         if total + ell_len <= max_chars {
             out.push(ell);
         } else {
-            // Trim until we can safely place the ellipsis and keep UTF-8 intact.
             while out.len() + ell_len > max_chars && !out.is_empty() {
                 out.pop();
-                // Pop continuation bytes (10xxxxxx) until reaching a char boundary.
                 while !out.is_empty()
                     && (out.as_bytes()[out.len() - 1] & 0b1100_0000) == 0b1000_0000
                 {
@@ -84,13 +60,7 @@ pub fn clamp_snippet_ex(s: &str, max_chars: usize, max_lines: usize, add_ellipsi
     out
 }
 
-/// Build a compact, high-signal text for embeddings.
-///
-/// The intent is to keep the representation short yet informative for k-NN search.
-/// Include language, kind, symbol path, optional signature/doc, a clamped snippet,
-/// and imports (normalized as comma-separated list).
-///
-/// `max_chars` controls the budget for the snippet part (before ellipsis).
+/// Build compact, high-signal text for embeddings.
 pub fn build_embedding_text(
     language: &str,
     kind: &str,
@@ -98,12 +68,15 @@ pub fn build_embedding_text(
     signature: Option<&str>,
     doc: Option<&str>,
     snippet: Option<&str>,
-    imports: &[String],
-    max_chars: usize,
+    imports_top: &[String],
+    routes: &[String],
+    keywords: &[String],
+    max_snippet_chars: usize,
 ) -> String {
-    let mut parts = Vec::with_capacity(6);
-    parts.push(format!("{language} | {kind} | {symbol_path}"));
+    // 1) Structural header
+    let mut parts: Vec<String> = vec![format!("{language} | {kind} | {symbol_path}")];
 
+    // 2) Signature and first doc line
     if let Some(sig) = signature {
         if !sig.is_empty() {
             parts.push(format!("Signature: {sig}"));
@@ -111,48 +84,57 @@ pub fn build_embedding_text(
     }
     if let Some(d) = doc {
         if !d.is_empty() {
-            let first = d.lines().next().unwrap_or(d);
-            parts.push(format!("Doc: {first}"));
+            if let Some(first) = d.lines().next() {
+                parts.push(format!("Doc: {first}"));
+            }
         }
     }
-    if !imports.is_empty() {
-        parts.push(format!("Imports: {}", imports.join(", ")));
+
+    // 3) Top imports
+    if !imports_top.is_empty() {
+        parts.push(format!("Imports: {}", imports_top.join(", ")));
     }
+
+    // 4) Routes
+    if !routes.is_empty() {
+        parts.push(format!("Routes: {}", routes.join(", ")));
+    }
+
+    // 5) Keywords (small top slice)
+    if !keywords.is_empty() {
+        let keep = keywords
+            .iter()
+            .take(16)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("Keywords: {keep}"));
+    }
+
+    // 6) Clamped snippet
     if let Some(sn) = snippet {
-        let clamp = clamp_snippet_ex(sn, max_chars, 50, true);
+        let clamp = clamp_snippet_ex(sn, max_snippet_chars, 50, true);
         if !clamp.is_empty() {
             parts.push("Snippet:".into());
             parts.push(clamp);
         }
     }
+
     parts.join("\n")
 }
 
-/// Request shape for Ollama embeddings API.
 #[derive(Debug, Serialize)]
 struct OllamaEmbedRequest<'a> {
     model: &'a str,
     prompt: &'a str,
-    // Ollama also supports options; omitted for simplicity.
 }
 
-/// Response shape for Ollama embeddings API.
 #[derive(Debug, Deserialize)]
 struct OllamaEmbedResponse {
     embedding: Vec<f32>,
 }
 
-/// Embed a batch of texts using **Ollama** `/api/embeddings`.
-///
-/// Each text is sent as an individual request. This keeps memory stable and
-/// simplifies error handling. To scale throughput, call this function from
-/// multiple async tasks or adapt it to dispatch multiple in-flight requests
-/// up to `cfg.embedding.concurrency`.
-///
-/// # Errors
-/// - Returns `RagBaseError::Embedding` if the HTTP call fails, server returns
-///   non-success status, JSON parsing fails, or the resulting vector dimension
-///   does not match `cfg.embedding.dim`.
+/// Embed texts via Ollama `/api/embeddings`.
 pub async fn embed_texts_ollama(
     cfg: &RagConfig,
     texts: &[String],

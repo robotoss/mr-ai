@@ -4,36 +4,52 @@
 use serde::{Deserialize, Serialize};
 
 /// Minimal payload stored alongside the vector in Qdrant.
-/// Tailored for preview/filters during search results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorPayload {
-    pub id: String,
-    pub file: String,
-    pub language: String, // snake_case language name
-    pub kind: String,     // snake_case symbol kind
-    pub symbol: String,
-    pub symbol_path: String,
-    pub signature: Option<String>,
-    pub doc: Option<String>,     // first line if available
-    pub snippet: Option<String>, // clamped snippet for preview
-    pub content_sha256: String,
-    pub imports: Vec<String>,
-    pub lsp_fqn: Option<String>,
-    pub tags: Vec<String>,
+    // Identification and light filters
+    pub id: String,       // unique chunk id for hydration from JSONL
+    pub file: String,     // file path for grouping / simple filtering
+    pub language: String, // snake_case language
+    pub kind: String,     // snake_case symbol kind (class/method/etc)
+
+    // Preview and ranking context
+    pub symbol: String,            // short symbol name
+    pub symbol_path: String,       // <file>::Class::method
+    pub signature: Option<String>, // short signature (hover/AST)
+    pub doc: Option<String>,       // first doc line only
+    pub snippet: Option<String>,   // clamped preview, ~300-600 chars max
+
+    // Dedup / consistency
+    pub content_sha256: String, // same chunks collapse when merging content
+
+    // Light semantic & filter signals
+    pub imports_top: Vec<String>, // top-N normalized imports (up to 8)
+    pub tags: Vec<String>,        // short LSP tags (kind:file etc)
+    pub lsp_fqn: Option<String>,  // optional FQN for explainability
+
+    // Noise control
+    pub is_definition: bool, // filter: drop reference-only slices
+
+    // Domain-specific signals
+    pub routes: Vec<String>, // normalized routes like "/games", "/splash_page"
+    pub search_terms: Vec<String>, // compact token bag for lexical rerank
+
+    // Full-text searchable blob (FTS index at Qdrant)
+    pub search_blob: String,
 }
 
 /// A single semantic search hit (ranked by similarity).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
-    /// Similarity score (Cosine) as returned by Qdrant.
     pub score: f32,
-    /// The original chunk id / Qdrant point id.
     pub id: String,
-    /// Short preview fields for UI.
+
+    // Lightweight preview fields for UI
     pub file: String,
     pub language: String,
     pub kind: String,
     pub symbol_path: String,
+    pub symbol: String,
     pub signature: Option<String>,
     pub snippet: Option<String>,
 }
@@ -41,10 +57,7 @@ pub struct SearchHit {
 /// Summary statistics for a full reindex operation.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct IndexStats {
-    /// Number of JSONL records successfully indexed.
     pub indexed: usize,
-    /// Number of records skipped due to deserialization/embedding errors.
     pub skipped: usize,
-    /// Total wall-clock time in milliseconds.
     pub duration_ms: u128,
 }

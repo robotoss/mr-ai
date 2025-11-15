@@ -80,11 +80,11 @@ impl Default for QdrantConfig {
 /// Search behavior knobs (top-k, thresholds, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
-    /// Disable RAG (skip indexing/search); useful for feature-gating.
+    /// Disable RAG completely.
     pub disabled: bool,
     /// Default top-k results to return.
     pub top_k: usize,
-    /// Optional minimum score threshold for results (0.0..=1.0).
+    /// Optional minimum score threshold for results (0.0..=1.0). Default 0.0 (soft).
     pub min_score: Option<f32>,
     /// Optional “take per target” cap when aggregating by target (not enforced here).
     pub take_per_target: Option<usize>,
@@ -97,7 +97,8 @@ impl Default for SearchConfig {
         Self {
             disabled: false,
             top_k: 20,
-            min_score: Some(0.50),
+            // IMPORTANT: soft threshold for hybrid, otherwise exact text may be filtered out.
+            min_score: Some(0.0),
             take_per_target: Some(3),
             memo_cap: Some(64),
         }
@@ -107,16 +108,25 @@ impl Default for SearchConfig {
 /// Snippet clamping boundaries for payload & embedding inputs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkClampConfig {
-    /// Maximum characters to keep from a snippet.
-    pub max_chars: usize,
-    /// Ignore ultra-short chunks below this many characters.
+    /// Max chars for embedding text (large budget).
+    pub embed_max_chars: usize,
+    /// Max lines for embedding text.
+    pub embed_max_lines: usize,
+    /// Max chars for preview snippet in payload (small budget).
+    pub preview_max_chars: usize,
+    /// Max lines for preview snippet in payload.
+    pub preview_max_lines: usize,
+    /// Ignore ultra-short chunks below this many characters (applies to both).
     pub min_chars: usize,
 }
 
 impl Default for ChunkClampConfig {
     fn default() -> Self {
         Self {
-            max_chars: 4000,
+            embed_max_chars: 1200, // sensible default
+            embed_max_lines: 80,
+            preview_max_chars: 320,
+            preview_max_lines: 50,
             min_chars: 16,
         }
     }
@@ -152,11 +162,14 @@ impl RagConfig {
     /// - `EMBEDDING_DIM` (default: 1024)
     /// - `EMBEDDING_CONCURRENCY` (default: 4)
     /// - `RAG_DISABLE` (default: false)
-    /// - `RAG_TOP_K` (default: 8)
-    /// - `RAG_MIN_SCORE` (default: 0.50)
+    /// - `RAG_TOP_K` (default: 20)
+    /// - `RAG_MIN_SCORE` (default: 0.0)
     /// - `RAG_TAKE_PER_TARGET` (optional)
     /// - `RAG_MEMO_CAP` (optional)
-    /// - `CHUNK_MAX_CHARS` (default: 4000)
+    /// - `CLAMP_PREVIEW_MAX_CHARS` (default: 320; fallback to CHUNK_MAX_CHARS)
+    /// - `CLAMP_EMBED_MAX_CHARS` (default: 1200; fallback to CHUNK_MAX_CHARS)
+    /// - `CLAMP_PREVIEW_MAX_LINES` (default: 50)
+    /// - `CLAMP_EMBED_MAX_LINES` (default: 80)
     /// - `CHUNK_MIN_CHARS` (default: 16)
     /// - `INDEX_JSONL_PATH` (default: `code_data/out/<PROJECT_NAME>/code_chunks.jsonl`)
     pub fn from_env(project_name: Option<&str>) -> Result<Self, RagBaseError> {
@@ -187,16 +200,34 @@ impl RagConfig {
         // Search
         let search = SearchConfig {
             disabled: read_bool_env("RAG_DISABLE").unwrap_or(false),
-            top_k: read_usize_env("RAG_TOP_K").unwrap_or(8),
-            min_score: read_f32_env("RAG_MIN_SCORE").ok(),
+            top_k: read_usize_env("RAG_TOP_K").unwrap_or(20),
+            min_score: Some(read_f32_env("RAG_MIN_SCORE").unwrap_or(0.0)),
             take_per_target: read_usize_env("RAG_TAKE_PER_TARGET").ok(),
             memo_cap: read_usize_env("RAG_MEMO_CAP").ok(),
         };
 
         // Clamp
-        let clamp = ChunkClampConfig {
-            max_chars: read_usize_env("CHUNK_MAX_CHARS").unwrap_or(4000),
-            min_chars: read_usize_env("CHUNK_MIN_CHARS").unwrap_or(16),
+        let clamp = {
+            let preview_max_chars = read_usize_env("CLAMP_PREVIEW_MAX_CHARS")
+                .or_else(|_| read_usize_env("CHUNK_MAX_CHARS"))
+                .unwrap_or(320);
+
+            let embed_max_chars = read_usize_env("CLAMP_EMBED_MAX_CHARS")
+                .or_else(|_| read_usize_env("CHUNK_MAX_CHARS"))
+                .unwrap_or(1200);
+
+            ChunkClampConfig {
+                // Embedding budgets
+                embed_max_chars,
+                embed_max_lines: read_usize_env("CLAMP_EMBED_MAX_LINES").unwrap_or(80),
+
+                // Preview budgets (payload)
+                preview_max_chars,
+                preview_max_lines: read_usize_env("CLAMP_PREVIEW_MAX_LINES").unwrap_or(50),
+
+                // Minimum useful chunk size
+                min_chars: read_usize_env("CHUNK_MIN_CHARS").unwrap_or(16),
+            }
         };
 
         // Basic validations

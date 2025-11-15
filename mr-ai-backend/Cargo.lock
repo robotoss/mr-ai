@@ -1910,12 +1910,15 @@ name = "rag-base"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "code-indexer",
  "qdrant-client",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

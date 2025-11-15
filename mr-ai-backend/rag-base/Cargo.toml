@@ -7,9 +7,13 @@ edition = "2024"
 
 qdrant-client = "1.15"
 blake3 = "1.8"
+regex = "1"
 
 tokio = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-reqwest   = { workspace = true, features = ["json", "brotli"] }
+reqwest = { workspace = true, features = ["json", "brotli"] }
+tracing = { workspace = true }
+
+code-indexer = { path = "../code-indexer" }
