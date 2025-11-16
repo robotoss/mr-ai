@@ -412,3 +412,17 @@ Run docker for ollama and qdrant:
 
 Install embedding model:
 `docker exec -it ollama ollama pull bge-m3`
+
+
+Refactor libs structure:
+ - ai-llm-service (New)
+ - api (New)
+ - code-indexer (New)
+ - code-date (New)
+ - codegraph-prep (Old)
+ - contextor (Old)
+ - mr-reviewer (Old)
+ - project-code-store (New)
+ - rag-base (New)
+ - rag-store (Old)
+ - rules (New)
