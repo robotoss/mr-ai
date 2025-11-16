@@ -389,7 +389,7 @@ docker exec -it ollama ollama pull qwen3:32b
 # Validate embedding dimensionality (EMBEDDING_DIM)
 curl -s http://localhost:11434/api/embed \
   -H 'Content-Type: application/json' \
-  -d '{"model":"dengcao/Qwen3-Embedding-0.6B:Q8_0","input":"hello"}'
+  -d '{"model":"bge-m3","input":"hello"}'
 ```
 
 ---
@@ -405,3 +405,24 @@ curl -s http://localhost:11434/api/embed \
 
 Contributions welcome: language support, performance tweaks, bug fixes.
 License: **FSL-1.1**.
+
+
+Run docker for ollama and qdrant:
+` docker-compose up -d`
+
+Install embedding model:
+`docker exec -it ollama ollama pull bge-m3`
+
+
+Refactor libs structure:
+ - ai-llm-service (New)
+ - api (New)
+ - code-indexer (New)
+ - code-date (New)
+ - codegraph-prep (Old)
+ - contextor (Old)
+ - mr-reviewer (Old)
+ - project-code-store (New)
+ - rag-base (New)
+ - rag-store (Old)
+ - rules (New)

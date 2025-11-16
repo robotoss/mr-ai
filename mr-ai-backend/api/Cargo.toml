@@ -20,6 +20,7 @@ rag-store = { path = "../rag-store" }
 contextor = {path = "../contextor"}
 mr-reviewer = {path = "../mr-reviewer"}
 project-code-store = { path = "../project_code_store" }
+rag-base = { path = "../rag-base" }
 
 
 serde = { workspace = true }
