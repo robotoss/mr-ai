@@ -18,9 +18,10 @@ services = { path = "../services" }
 codegraph-prep = { path = "../codegraph-prep" }
 rag-store = { path = "../rag-store" }
 contextor = {path = "../contextor"}
-mr-reviewer = {path = "../mr-reviewer"}
+# mr-reviewer = {path = "../mr-reviewer"}
 project-code-store = { path = "../project_code_store" }
 rag-base = { path = "../rag-base" }
+git-context-engine = { path = "../git-context-engine" }
 
 
 serde = { workspace = true }

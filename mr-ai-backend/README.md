@@ -426,3 +426,4 @@ Refactor libs structure:
  - rag-base (New)
  - rag-store (Old)
  - rules (New)
+ - git-context-engine (New)
