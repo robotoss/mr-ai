@@ -1,5 +1,3 @@
-//! Text templates and helpers for building AI prompts.
-
 use std::fmt::Write;
 
 use crate::ast_context::AstContext;
@@ -56,10 +54,14 @@ pub fn render_context_section(context: &AstContext) -> String {
 pub fn render_rules_section(rule_set: &RuleSet) -> String {
     let mut out = String::new();
 
-    let _ = writeln!(out, "=== Review rules (profile: {}) ===", rule_set.name);
+    let _ = writeln!(
+        out,
+        "=== Review rules (profile: {}) ===",
+        rule_set.profile_name
+    );
 
-    for rule in &rule_set.rules {
-        let _ = writeln!(out, "- {}: {}", rule.title, rule.body);
+    for bullet in &rule_set.bullets {
+        let _ = writeln!(out, "- {}", bullet);
     }
 
     out
