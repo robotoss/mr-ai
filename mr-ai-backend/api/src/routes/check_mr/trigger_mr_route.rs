@@ -89,7 +89,7 @@ pub async fn trigger_mr_route(
 
     // --- Run review pipeline ----------------------------------------------------
 
-    let result = get_ai_request_data(cfg, id).await;
+    let result = get_ai_request_data(&state.config.project_name, cfg, id).await;
 
     match result {
         Ok(_) => ApiResponse::success(TriggerMrResponse {

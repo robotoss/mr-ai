@@ -26,7 +26,7 @@ use structs::rag_base_config::RagConfig;
 use structs::rag_store::IndexStats;
 use vector_db::{connect, reset_collection, upsert_batch};
 
-use crate::structs::search_result::CodeSearchResult;
+pub use crate::structs::search_result::CodeSearchResult;
 
 /// Rebuild Qdrant index for the given project:
 /// - drop collection;

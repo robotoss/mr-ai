@@ -4,6 +4,7 @@ pub mod git_providers;
 pub mod ast_context;
 pub mod diff_model;
 pub mod prompt;
+mod rag_layer;
 pub mod rules;
 
 mod parser; // already used by git_providers; left as-is
@@ -15,7 +16,6 @@ use std::{
 
 use tracing::{debug, info, warn};
 
-use crate::ast_context::NoopAstContextProvider;
 use crate::diff_model::build_review_targets;
 use crate::errors::GitContextEngineResult;
 use crate::git_providers::types::{ChangeRequestId, CrBundle};
@@ -23,6 +23,7 @@ use crate::git_providers::{ProviderClient, ProviderConfig};
 use crate::prompt::LlmReviewRequest;
 use crate::prompt::builder::build_llm_review_request;
 use crate::rules::builtin::default_rule_set;
+use crate::{ast_context::NoopAstContextProvider, rag_layer::build_rag_contexts_for_targets};
 
 /// Builds AI request data for a single change request.
 ///
@@ -37,6 +38,7 @@ use crate::rules::builtin::default_rule_set;
 /// The returned value can be passed to any AI provider layer to
 /// actually run the model and turn model responses into comments.
 pub async fn get_ai_request_data(
+    project_name: &str,
     cfg: ProviderConfig,
     id: ChangeRequestId,
 ) -> GitContextEngineResult<LlmReviewRequest> {
@@ -69,6 +71,9 @@ pub async fn get_ai_request_data(
         );
     }
 
+    // Build RAG contexts for each diff hunk.
+    let rag_contexts = build_rag_contexts_for_targets(project_name, &targets, Some(5)).await;
+
     // By default use a no-op AST context provider.
     // The host application can later construct a real provider
     // (for example backed by a vector index) and call the lower-level
@@ -77,9 +82,11 @@ pub async fn get_ai_request_data(
 
     let rules = default_rule_set();
 
-    let request = build_llm_review_request(&bundle, &targets, &ast_provider, &rules)?;
+    // TODO: extend `build_llm_review_request` to accept `&rag_contexts`
+    // and include them into per-target prompts.
+    let request =
+        build_llm_review_request(&bundle, &targets, &ast_provider, &rules, &rag_contexts)?;
 
-    // Persist the final LLM request to ./temp for inspection.
     dump_llm_request_to_temp(&request, &bundle.meta.id);
 
     info!(

@@ -911,6 +911,7 @@ dependencies = [
  "ai-llm-service",
  "chrono",
  "code-indexer",
+ "rag-base",
  "reqwest",
  "serde",
  "serde_json",

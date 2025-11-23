@@ -8,6 +8,7 @@ license = "FSL-1.1"
 [dependencies]
 ai-llm-service = { path = "../ai-llm-service" }
 code-indexer = { path = "../code-indexer" }
+rag-base = { path = "../rag-base" }
 
 reqwest = { workspace = true }
 serde = { workspace = true }
