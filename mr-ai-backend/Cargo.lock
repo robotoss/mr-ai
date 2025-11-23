@@ -908,7 +908,9 @@ checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 name = "git-context-engine"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "chrono",
+ "code-indexer",
  "reqwest",
  "serde",
  "serde_json",

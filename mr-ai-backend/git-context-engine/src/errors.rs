@@ -31,6 +31,10 @@ pub enum GitContextEngineError {
     /// Generic catch-all error when nothing else fits.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Errors coming from the `code-indexer` crate.
+    #[error("code-indexer error: {0}")]
+    CodeIndexer(String),
 }
 
 /// Provider-specific error used inside the provider layer.
@@ -137,6 +141,12 @@ impl From<std::io::Error> for GitContextEngineError {
 impl From<serde_json::Error> for GitContextEngineError {
     fn from(e: serde_json::Error) -> Self {
         GitContextEngineError::Cache(GitContextEngineCacheError::Serde(e))
+    }
+}
+
+impl From<code_indexer::Error> for GitContextEngineError {
+    fn from(err: code_indexer::Error) -> Self {
+        GitContextEngineError::CodeIndexer(err.to_string())
     }
 }
 

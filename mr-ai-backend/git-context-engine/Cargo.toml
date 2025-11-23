@@ -6,6 +6,9 @@ authors = ["Yeftifeyev Konstantin <zoxo@outlook.com>"]
 license = "FSL-1.1"
 
 [dependencies]
+ai-llm-service = { path = "../ai-llm-service" }
+code-indexer = { path = "../code-indexer" }
+
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

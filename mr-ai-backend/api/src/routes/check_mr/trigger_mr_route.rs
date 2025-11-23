@@ -6,8 +6,8 @@ use axum::{
     response::Response,
 };
 use git_context_engine::{
+    get_ai_request_data,
     git_providers::{ChangeRequestId, ProviderConfig, ProviderKind},
-    run_review,
 };
 use tracing::{debug, info, instrument};
 
@@ -89,7 +89,7 @@ pub async fn trigger_mr_route(
 
     // --- Run review pipeline ----------------------------------------------------
 
-    let result = run_review(cfg, id).await;
+    let result = get_ai_request_data(cfg, id).await;
 
     match result {
         Ok(_) => ApiResponse::success(TriggerMrResponse {
