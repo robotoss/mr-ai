@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use ai_review_engine::review_merge_request;
 use axum::{
     extract::{Json, State},
     http::{HeaderMap, StatusCode},
@@ -92,10 +93,14 @@ pub async fn trigger_mr_route(
     let result = get_ai_request_data(&state.config.project_name, cfg, id).await;
 
     match result {
-        Ok(_) => ApiResponse::success(TriggerMrResponse {
-            message: " MR review completed successfully.".to_string(),
-        })
-        .into_response_with_status(StatusCode::OK),
+        Ok(review_request) => {
+            review_merge_request(review_request);
+
+            ApiResponse::success(TriggerMrResponse {
+                message: " MR review completed successfully.".to_string(),
+            })
+            .into_response_with_status(StatusCode::OK)
+        }
         Err(err) => {
             let resp: ApiResponse<()> =
                 ApiResponse::error("RAG_SEARCH_FAILED", format!("{}", err), Vec::new());

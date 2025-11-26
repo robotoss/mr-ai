@@ -1,0 +1,17 @@
+[package]
+name = "ai-review-engine"
+version = "0.1.0"
+edition = "2024"
+authors = ["Yeftifeyev Konstantin <zoxo@outlook.com>"]
+license = "FSL-1.1"
+
+[dependencies]
+ai-llm-service = { path = "../ai-llm-service" }
+git-context-engine = { path = "../git-context-engine" }
+
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }

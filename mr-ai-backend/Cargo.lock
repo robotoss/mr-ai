@@ -41,6 +41,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai-review-engine"
+version = "0.1.0"
+dependencies = [
+ "ai-llm-service",
+ "git-context-engine",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -87,6 +101,7 @@ name = "api"
 version = "0.1.0"
 dependencies = [
  "ai-llm-service",
+ "ai-review-engine",
  "axum 0.8.4",
  "chrono",
  "code-indexer",
