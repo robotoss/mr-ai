@@ -19,7 +19,6 @@
 use std::fmt::Write as FmtWrite;
 
 pub mod builder;
-mod template;
 
 use serde::Serialize;
 use tracing::debug;
