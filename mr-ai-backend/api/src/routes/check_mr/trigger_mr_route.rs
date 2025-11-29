@@ -94,16 +94,24 @@ pub async fn trigger_mr_route(
 
     match result {
         Ok(review_request) => {
-            review_merge_request(review_request);
+            let result = review_merge_request(review_request, state.llm_profiles.clone()).await;
 
-            ApiResponse::success(TriggerMrResponse {
-                message: " MR review completed successfully.".to_string(),
-            })
-            .into_response_with_status(StatusCode::OK)
+            match result {
+                Ok(_) => ApiResponse::success(TriggerMrResponse {
+                    message: " MR review completed successfully.".to_string(),
+                })
+                .into_response_with_status(StatusCode::OK),
+                Err(err) => {
+                    let resp: ApiResponse<()> =
+                        ApiResponse::error("AI_REVIEW_FAILED", format!("{}", err), Vec::new());
+
+                    resp.into_response_with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
         }
         Err(err) => {
             let resp: ApiResponse<()> =
-                ApiResponse::error("RAG_SEARCH_FAILED", format!("{}", err), Vec::new());
+                ApiResponse::error("REVIW_CONTEXT_FAILED", format!("{}", err), Vec::new());
 
             resp.into_response_with_status(StatusCode::INTERNAL_SERVER_ERROR)
         }
