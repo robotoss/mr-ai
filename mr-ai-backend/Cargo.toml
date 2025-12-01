@@ -6,7 +6,7 @@ authors = ["Yeftifeyev Konstantin <zoxo@outlook.com>"]
 license = "FSL-1.1"
 
 [workspace]
-members = [".", "ai-llm-service", "ai-review-engine", "api", "code-indexer", "codegraph-prep", "contextor", "git-context-engine", "mr-reviewer", "project_code_store", "rag-base",  "rag-store", "services"]
+members = [".", "ai-llm-service", "ai-review-engine", "api", "code-indexer", "git-context-engine", "project_code_store", "rag-base", "services"]
 
 [dependencies]
 api = { path = "api" }
