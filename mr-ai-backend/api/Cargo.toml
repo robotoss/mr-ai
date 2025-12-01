@@ -15,9 +15,6 @@ axum = "0.8"
 ai-llm-service = { path = "../ai-llm-service" }
 code-indexer = { path = "../code-indexer" }
 services = { path = "../services" }
-codegraph-prep = { path = "../codegraph-prep" }
-rag-store = { path = "../rag-store" }
-contextor = {path = "../contextor"}
 ai-review-engine = {path = "../ai-review-engine"}
 project-code-store = { path = "../project_code_store" }
 rag-base = { path = "../rag-base" }

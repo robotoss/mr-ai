@@ -19,9 +19,7 @@ use crate::{
     error_handler::{AppError, AppResult},
     middleware_layer::json_extractor::json_error_mapper,
     routes::{
-        ask::ask_question_route::ask_question,
         check_mr::trigger_mr_route::trigger_mr_route,
-        prepare_qdrant_route::prepare_qdrant,
         project_indexer::project_indexer_route::project_indexer_route,
         rag_base::{
             search_vector_base_route::search_vector_base_route,
@@ -55,8 +53,6 @@ pub async fn start(svc: Arc<LlmServiceProfiles>) -> AppResult<()> {
         .route("/project_indexer", get(project_indexer_route))
         .route("/vector_base_index", get(vector_base_index_route))
         .route("/search_vector_base", post(search_vector_base_route))
-        .route("/prepare_qdrant", get(prepare_qdrant))
-        .route("/ask_question", post(ask_question))
         .route("/trigger_git_mr", axum::routing::post(trigger_mr_route))
         .fallback(handler_404)
         .layer(middleware::from_fn(json_error_mapper))
