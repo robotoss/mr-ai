@@ -1,15 +1,8 @@
-use std::{error::Error, str::FromStr, sync::Arc};
+use std::{error::Error, sync::Arc};
 
 use ai_llm_service::{config::default_config, service_profiles::LlmServiceProfiles};
 use api;
-use tracing::Level;
-use tracing_subscriber::{
-    EnvFilter, Layer,
-    filter::{Directive, Targets},
-    fmt,
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

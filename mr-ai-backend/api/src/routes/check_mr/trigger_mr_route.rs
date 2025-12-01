@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ai_review_engine::review_merge_request;
+use ai_review_engine::{publish::GitProviderKind, review_merge_request};
 use axum::{
     extract::{Json, State},
     http::{HeaderMap, StatusCode},
@@ -94,7 +94,14 @@ pub async fn trigger_mr_route(
 
     match result {
         Ok(review_request) => {
-            let result = review_merge_request(review_request, state.llm_profiles.clone()).await;
+            let config = ai_review_engine::publish::ProviderConfig {
+                kind: GitProviderKind::GitLab,
+                base_url: state.config.git_api_base.clone(),
+                token: state.config.git_token.clone(),
+            };
+
+            let result =
+                review_merge_request(review_request, state.llm_profiles.clone(), &config).await;
 
             match result {
                 Ok(_) => ApiResponse::success(TriggerMrResponse {
