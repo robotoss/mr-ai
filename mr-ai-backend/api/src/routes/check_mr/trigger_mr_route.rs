@@ -7,7 +7,7 @@ use axum::{
     response::Response,
 };
 use git_context_engine::{
-    build_two_phase_review, get_ai_request_data,
+    build_two_phase_review,
     git_providers::{ChangeRequestId, ProviderConfig, ProviderKind},
 };
 use tracing::{debug, info, instrument};
@@ -98,40 +98,40 @@ pub async fn trigger_mr_route(
         state.llm_profiles.clone(),
     )
     .await;
-    ApiResponse::success(TriggerMrResponse {
-        message: " MR review completed successfully.".to_string(),
-    })
-    .into_response_with_status(StatusCode::OK)
+    // ApiResponse::success(TriggerMrResponse {
+    //     message: " MR review completed successfully.".to_string(),
+    // })
+    // .into_response_with_status(StatusCode::OK)
 
-    // match result {
-    //     Ok(review_request) => {
-    //         let config = ai_review_engine::publish::ProviderConfig {
-    //             kind: GitProviderKind::GitLab,
-    //             base_url: state.config.git_api_base.clone(),
-    //             token: state.config.git_token.clone(),
-    //         };
+    match result {
+        Ok(review_request) => {
+            let config = ai_review_engine::publish::ProviderConfig {
+                kind: GitProviderKind::GitLab,
+                base_url: state.config.git_api_base.clone(),
+                token: state.config.git_token.clone(),
+            };
 
-    //         let result =
-    //             review_merge_request(review_request, state.llm_profiles.clone(), &config).await;
+            let result =
+                review_merge_request(review_request, state.llm_profiles.clone(), &config).await;
 
-    //         match result {
-    //             Ok(_) => ApiResponse::success(TriggerMrResponse {
-    //                 message: " MR review completed successfully.".to_string(),
-    //             })
-    //             .into_response_with_status(StatusCode::OK),
-    //             Err(err) => {
-    //                 let resp: ApiResponse<()> =
-    //                     ApiResponse::error("AI_REVIEW_FAILED", format!("{}", err), Vec::new());
+            match result {
+                Ok(_) => ApiResponse::success(TriggerMrResponse {
+                    message: " MR review completed successfully.".to_string(),
+                })
+                .into_response_with_status(StatusCode::OK),
+                Err(err) => {
+                    let resp: ApiResponse<()> =
+                        ApiResponse::error("AI_REVIEW_FAILED", format!("{}", err), Vec::new());
 
-    //                 resp.into_response_with_status(StatusCode::INTERNAL_SERVER_ERROR)
-    //             }
-    //         }
-    //     }
-    //     Err(err) => {
-    //         let resp: ApiResponse<()> =
-    //             ApiResponse::error("REVIW_CONTEXT_FAILED", format!("{}", err), Vec::new());
+                    resp.into_response_with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
+        Err(err) => {
+            let resp: ApiResponse<()> =
+                ApiResponse::error("REVIW_CONTEXT_FAILED", format!("{}", err), Vec::new());
 
-    //         resp.into_response_with_status(StatusCode::INTERNAL_SERVER_ERROR)
-    //     }
-    // }
+            resp.into_response_with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
