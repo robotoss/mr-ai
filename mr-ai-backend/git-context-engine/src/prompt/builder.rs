@@ -25,25 +25,24 @@
 
 use std::fmt::Write as FmtWrite;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::ast_context::{AstContext, AstContextProvider};
 use crate::diff_model::ReviewTarget;
 use crate::errors::GitContextEngineResult;
 use crate::git_providers::types::CrBundle;
-use crate::pre_review::PreReviewPlan;
 use crate::pre_review::utils::build_planned_anchors_for_target;
-use crate::prompt::{LlmReviewRequest, LlmReviewTarget};
+use crate::pre_review::{PreReviewHypothesis, PreReviewPlan};
+use crate::prompt::{LlmPlannedAnchor, LlmReviewRequest, LlmReviewTarget};
 use crate::rag_layer::TargetRagContext;
 use crate::rules::{RuleSet, compose_rules_for_file};
 
 /// Builds a full LLM review request from a provider bundle and review targets.
 ///
-/// For each `ReviewTarget` this function:
-///   * renders a diff-focused prompt;
-///   * injects AST and RAG context (if any);
-///   * merges built-in rules with file/language-specific markdown rules;
-///   * enforces a strict JSON output format with `anchor.lines` and severity/kind.
+/// Modes:
+/// - single-phase (no `prereview_plan`): 1 target = 1 diff hunk, no hypotheses.
+/// - two-phase  (with `prereview_plan`): 1 target = 1 hypothesis (H1/H2/...)
+///   from the plan, even если несколько гипотез относятся к одному hunk.
 pub fn build_llm_review_request(
     bundle: &CrBundle,
     targets: &[ReviewTarget],
@@ -52,34 +51,140 @@ pub fn build_llm_review_request(
     rag_contexts: &[TargetRagContext],
     prereview_plan: Option<&PreReviewPlan>,
 ) -> GitContextEngineResult<LlmReviewRequest> {
-    let mut out_targets = Vec::<LlmReviewTarget>::with_capacity(targets.len());
+    let mut out_targets = Vec::<LlmReviewTarget>::new();
 
-    for target in targets {
-        let ast_ctx: AstContext = ast_provider.lookup_context_for_target(target)?;
-
-        // Find matching RAG context (if any) for this target.
-        let rag_ctx = rag_contexts
+    // Helper: map (file_path, hunk_index) -> ReviewTarget.
+    fn find_target<'a>(
+        targets: &'a [ReviewTarget],
+        file_path: &str,
+        hunk_index: usize,
+    ) -> Option<&'a ReviewTarget> {
+        targets
             .iter()
-            .find(|ctx| ctx.file_path == target.file_path && ctx.hunk_index == target.hunk_index);
+            .find(|t| t.file_path == file_path && t.hunk_index == hunk_index)
+    }
 
-        let prompt_text = render_prompt_for_target(bundle, target, &ast_ctx, rules, rag_ctx)?;
+    // Helper: map (file_path, hunk_index) -> TargetRagContext.
+    fn find_rag_ctx<'a>(
+        rag_contexts: &'a [TargetRagContext],
+        file_path: &str,
+        hunk_index: usize,
+    ) -> Option<&'a TargetRagContext> {
+        rag_contexts
+            .iter()
+            .find(|ctx| ctx.file_path == file_path && ctx.hunk_index == hunk_index)
+    }
 
-        debug!(
-            file = %target.file_path,
-            hunk_index = target.hunk_index,
-            prompt_len = prompt_text.len(),
-            "prompt_builder: built prompt for target",
-        );
+    if let Some(plan) = prereview_plan {
+        // ---------------------------------------------------------------------
+        // TWO-PHASE MODE: 1 LlmReviewTarget per hypothesis.
+        // ---------------------------------------------------------------------
+        for tplan in &plan.targets {
+            let file_path = &tplan.file_path;
+            let hunk_index = tplan.hunk_index;
 
-        let planned_anchors =
-            build_planned_anchors_for_target(&target.file_path, target.hunk_index, prereview_plan);
+            let target = match find_target(targets, file_path, hunk_index) {
+                Some(t) => t,
+                None => {
+                    warn!(
+                        file = %file_path,
+                        hunk_index = hunk_index,
+                        "prompt_builder: target from pre-review plan not found in diff targets; skipping"
+                    );
+                    continue;
+                }
+            };
 
-        out_targets.push(LlmReviewTarget {
-            file_path: target.file_path.clone(),
-            hunk_index: target.hunk_index,
-            prompt_text,
-            planned_anchors,
-        });
+            let rag_ctx = find_rag_ctx(rag_contexts, file_path, hunk_index);
+
+            // Если по этому hunk вообще нет гипотез — просто пропускаем его.
+            if tplan.hypotheses.is_empty() {
+                debug!(
+                    file = %file_path,
+                    hunk_index = hunk_index,
+                    "prompt_builder: no hypotheses for target in two-phase mode; skipping"
+                );
+                continue;
+            }
+
+            // Для КАЖДОЙ гипотезы этого hunk строим отдельный LlmReviewTarget.
+            for hyp in &tplan.hypotheses {
+                let ast_ctx: AstContext = ast_provider.lookup_context_for_target(target)?;
+
+                // We want a prompt focused on this single hypothesis.
+                let single_hyp_vec = vec![hyp.clone()];
+
+                let prompt_text = render_prompt_for_target(
+                    bundle,
+                    target,
+                    &ast_ctx,
+                    rules,
+                    rag_ctx,
+                    &single_hyp_vec,
+                )?;
+
+                debug!(
+                    file = %target.file_path,
+                    hunk_index = target.hunk_index,
+                    prompt_len = prompt_text.len(),
+                    hyp_id = %hyp.id,
+                    "prompt_builder: built prompt for single hypothesis (two-phase mode)",
+                );
+
+                // Build anchors for this (file, hunk) and keep only the one for current hypothesis.
+                let all_anchors =
+                    build_planned_anchors_for_target(file_path, hunk_index, Some(plan));
+
+                let anchors_for_hyp: Vec<LlmPlannedAnchor> = all_anchors
+                    .into_iter()
+                    .filter(|a| a.hypothesis_id == hyp.id)
+                    .collect();
+
+                // If for some reason no anchor was inferred, keep it empty but still send prompt.
+                if anchors_for_hyp.is_empty() {
+                    debug!(
+                        file = %file_path,
+                        hunk_index = hunk_index,
+                        hyp_id = %hyp.id,
+                        "prompt_builder: no planned anchors for hypothesis; prompt will still be sent"
+                    );
+                }
+
+                out_targets.push(LlmReviewTarget {
+                    file_path: target.file_path.clone(),
+                    hunk_index: target.hunk_index,
+                    prompt_text,
+                    planned_anchors: anchors_for_hyp,
+                });
+            }
+        }
+    } else {
+        // ---------------------------------------------------------------------
+        // SINGLE-PHASE MODE: old behavior, 1 target = 1 hunk, без гипотез.
+        // ---------------------------------------------------------------------
+        for target in targets {
+            let ast_ctx: AstContext = ast_provider.lookup_context_for_target(target)?;
+            let rag_ctx = find_rag_ctx(rag_contexts, &target.file_path, target.hunk_index);
+
+            let empty_hyps: &[PreReviewHypothesis] = &[];
+
+            let prompt_text =
+                render_prompt_for_target(bundle, target, &ast_ctx, rules, rag_ctx, empty_hyps)?;
+
+            debug!(
+                file = %target.file_path,
+                hunk_index = target.hunk_index,
+                prompt_len = prompt_text.len(),
+                "prompt_builder: built prompt for target (single-phase mode)",
+            );
+
+            out_targets.push(LlmReviewTarget {
+                file_path: target.file_path.clone(),
+                hunk_index: target.hunk_index,
+                prompt_text,
+                planned_anchors: Vec::<LlmPlannedAnchor>::new(),
+            });
+        }
     }
 
     Ok(LlmReviewRequest {
@@ -118,6 +223,7 @@ fn render_prompt_for_target(
     ast_ctx: &AstContext,
     rules: &RuleSet,
     rag_ctx: Option<&TargetRagContext>,
+    hypotheses: &[PreReviewHypothesis],
 ) -> GitContextEngineResult<String> {
     let mut buf = String::new();
 
@@ -304,6 +410,39 @@ fn render_prompt_for_target(
     }
 
     // -------------------------------------------------------------------------
+    // PRE-REVIEW HYPOTHESES TO ADDRESS
+    // -------------------------------------------------------------------------
+    if !hypotheses.is_empty() {
+        buf.push_str(
+            "=== PRE-REVIEW HYPOTHESES TO ADDRESS ===\n\
+                The pre-review planning phase produced the following hypotheses\n\
+                and questions for this diff hunk. You MUST explicitly consider them\n\
+                when deciding which issues to report.\n\n",
+        );
+
+        for hyp in hypotheses {
+            let _ = writeln!(
+                &mut buf,
+                "- ID: {} | Priority: {:?} | Kind: {:?}",
+                hyp.id, hyp.priority, hyp.kind
+            );
+            if !hyp.title.trim().is_empty() {
+                let _ = writeln!(&mut buf, "  Title: {}", hyp.title.trim());
+            }
+            if !hyp.question.trim().is_empty() {
+                let _ = writeln!(&mut buf, "  Question: {}", hyp.question.trim());
+            }
+            if !hyp.anchor_lines.is_empty() {
+                buf.push_str("  Anchor lines (from PRIMARY DIFF):\n");
+                for line in &hyp.anchor_lines {
+                    let _ = writeln!(&mut buf, "    {}", line);
+                }
+            }
+            buf.push('\n');
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // REVIEW RULES (GLOBAL + LANGUAGE-SPECIFIC)
     // -------------------------------------------------------------------------
     let rules_text = compose_rules_for_file(&target.file_path, rules);
@@ -321,11 +460,16 @@ fn render_prompt_for_target(
     // -------------------------------------------------------------------------
     // FINAL INSTRUCTIONS + STRICT JSON SCHEMA
     // -------------------------------------------------------------------------
+
     buf.push_str(
         r#"=== FINAL INSTRUCTIONS ===
 Perform a focused review of this diff hunk.
 
 You MUST:
+- explicitly address the hypotheses listed in the section
+  "PRE-REVIEW HYPOTHESES TO ADDRESS":
+  - if a hypothesis is confirmed as a real issue, report it as an issue;
+  - if a hypothesis is disproved by the diff/context, do NOT report it;
 - keep all reasoning tied to the PRIMARY DIFF block between BEGIN_DIFF and END_DIFF;
 - treat AST and RAG sections strictly as helper context, never as the primary source of truth;
 - report only issues that clearly require changes in this diff;

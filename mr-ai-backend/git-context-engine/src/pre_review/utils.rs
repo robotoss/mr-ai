@@ -1,5 +1,5 @@
 use crate::{
-    pre_review::{PreReviewPlan, PreReviewTargetPlan},
+    pre_review::{PreReviewHypothesis, PreReviewPlan, PreReviewTargetPlan},
     prompt::LlmPlannedAnchor,
 };
 
@@ -45,6 +45,53 @@ pub fn build_planned_anchors_for_target(
     hunk_index: usize,
     plan_opt: Option<&PreReviewPlan>,
 ) -> Vec<LlmPlannedAnchor> {
+    let hyps = collect_hypotheses_for_target(plan_opt, file_path, hunk_index);
+
+    let mut anchors = Vec::<LlmPlannedAnchor>::new();
+
+    for hyp in &hyps {
+        let mut line_numbers: Vec<u32> = Vec::new();
+
+        for line in &hyp.anchor_lines {
+            if let Some(n) = parse_new_line_from_diff_line(line) {
+                line_numbers.push(n);
+            }
+        }
+
+        if line_numbers.is_empty() {
+            continue;
+        }
+
+        line_numbers.sort_unstable();
+        let start = *line_numbers.first().unwrap_or(&0);
+        let end = *line_numbers.last().unwrap_or(&start);
+
+        let priority: String = hyp.priority.as_str().to_string();
+        let kind: String = hyp.kind.as_str().to_string();
+
+        anchors.push(LlmPlannedAnchor {
+            hypothesis_id: hyp.id.clone(),
+            priority: priority,
+            kind: kind,
+            start_line: start,
+            end_line: end,
+            anchor_lines: hyp.anchor_lines.clone(),
+        });
+    }
+
+    anchors
+}
+
+/// Returns a cloned list of hypotheses for a given (file_path, hunk_index)
+/// from the optional pre-review plan.
+///
+/// If `plan_opt` is `None` or there is no plan entry for this target,
+/// returns an empty vector.
+pub fn collect_hypotheses_for_target(
+    plan_opt: Option<&PreReviewPlan>,
+    file_path: &str,
+    hunk_index: usize,
+) -> Vec<PreReviewHypothesis> {
     let plan = match plan_opt {
         Some(p) => p,
         None => return Vec::new(),
@@ -59,38 +106,5 @@ pub fn build_planned_anchors_for_target(
         None => return Vec::new(),
     };
 
-    let mut anchors = Vec::<LlmPlannedAnchor>::new();
-
-    for hyp in &target_plan.hypotheses {
-        let mut line_numbers: Vec<u32> = Vec::new();
-
-        for line in &hyp.anchor_lines {
-            if let Some(n) = parse_new_line_from_diff_line(line) {
-                line_numbers.push(n);
-            }
-        }
-
-        if line_numbers.is_empty() {
-            // If the model produced anchor_lines we cannot parse, skip this anchor.
-            continue;
-        }
-
-        line_numbers.sort_unstable();
-        let start = *line_numbers.first().unwrap_or(&0);
-        let end = *line_numbers.last().unwrap_or(&start);
-
-        let p: String = hyp.priority.as_str().to_string();
-        let k: String = hyp.kind.as_str().to_string();
-
-        anchors.push(LlmPlannedAnchor {
-            hypothesis_id: hyp.id.clone(),
-            priority: p,
-            kind: k,
-            start_line: start,
-            end_line: end,
-            anchor_lines: hyp.anchor_lines.clone(),
-        });
-    }
-
-    anchors
+    target_plan.hypotheses.clone()
 }
