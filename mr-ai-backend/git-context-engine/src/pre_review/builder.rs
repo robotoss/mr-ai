@@ -148,7 +148,7 @@ pub fn build_prereview_prompt(
     // OPTIONAL RAG CONTEXT
     // ---------------------------------------------------------------------
     if let Some(rag_ctx) = rag_ctx {
-        if !rag_ctx.results.is_empty() {
+        if !rag_ctx.general_results.is_empty() {
             buf.push_str(
                 "=== RAG CONTEXT (READ-ONLY, NON-AUTHORITATIVE) ===\n\
                  The following code snippets were retrieved via semantic search.\n\
@@ -157,7 +157,7 @@ pub fn build_prereview_prompt(
                  Do NOT use line numbers from this section in `anchor_lines`.\n\n",
             );
 
-            for (i, r) in rag_ctx.results.iter().enumerate() {
+            for (i, r) in rag_ctx.general_results.iter().enumerate() {
                 let _ = writeln!(
                     &mut buf,
                     "-- RAG[{i}] file={} (score: {:.3})",

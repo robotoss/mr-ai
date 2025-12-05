@@ -51,9 +51,36 @@ pub struct LlmReviewChangeMeta {
 /// Fully rendered prompt for a single review target (one hunk in one file).
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmReviewTarget {
+    /// Repository-relative file path for the changed file.
     pub file_path: String,
+    /// Zero-based hunk index inside the file.
     pub hunk_index: usize,
+    /// Final prompt text that will be sent to the LLM.
     pub prompt_text: String,
+    /// Optional pre-review anchor metadata derived from hypotheses.
+    ///
+    /// These anchors keep:
+    /// - exact diff lines (for vector search and traceability),
+    /// - normalized start/end line numbers (for provider API mapping),
+    /// - pre-review priority and hypothesis kind.
+    pub planned_anchors: Vec<LlmPlannedAnchor>,
+}
+
+/// Anchor span derived from a single pre-review hypothesis.
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmPlannedAnchor {
+    /// Hypothesis id from pre-review (e.g. "H1").
+    pub hypothesis_id: String,
+    /// Priority from pre-review ("High", "Medium", "Low").
+    pub priority: String,
+    /// Hypothesis kind ("MissingContext", "PossibleBug", "DesignQuestion").
+    pub kind: String,
+    /// Minimal line number covered by this anchor (new-side perspective).
+    pub start_line: u32,
+    /// Maximal line number covered by this anchor (new-side perspective).
+    pub end_line: u32,
+    /// Exact diff lines copied from PRIMARY DIFF block.
+    pub anchor_lines: Vec<String>,
 }
 
 /// Full review request: one logical change and multiple review targets.

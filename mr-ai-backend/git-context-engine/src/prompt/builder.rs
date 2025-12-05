@@ -31,6 +31,8 @@ use crate::ast_context::{AstContext, AstContextProvider};
 use crate::diff_model::ReviewTarget;
 use crate::errors::GitContextEngineResult;
 use crate::git_providers::types::CrBundle;
+use crate::pre_review::PreReviewPlan;
+use crate::pre_review::utils::build_planned_anchors_for_target;
 use crate::prompt::{LlmReviewRequest, LlmReviewTarget};
 use crate::rag_layer::TargetRagContext;
 use crate::rules::{RuleSet, compose_rules_for_file};
@@ -48,6 +50,7 @@ pub fn build_llm_review_request(
     ast_provider: &impl AstContextProvider,
     rules: &RuleSet,
     rag_contexts: &[TargetRagContext],
+    prereview_plan: Option<&PreReviewPlan>,
 ) -> GitContextEngineResult<LlmReviewRequest> {
     let mut out_targets = Vec::<LlmReviewTarget>::with_capacity(targets.len());
 
@@ -68,10 +71,14 @@ pub fn build_llm_review_request(
             "prompt_builder: built prompt for target",
         );
 
+        let planned_anchors =
+            build_planned_anchors_for_target(&target.file_path, target.hunk_index, prereview_plan);
+
         out_targets.push(LlmReviewTarget {
             file_path: target.file_path.clone(),
             hunk_index: target.hunk_index,
             prompt_text,
+            planned_anchors,
         });
     }
 
@@ -226,29 +233,72 @@ fn render_prompt_for_target(
     // RAG CONTEXT (READ-ONLY, NON-AUTHORITATIVE)
     // -------------------------------------------------------------------------
     if let Some(rag_ctx) = rag_ctx {
-        if !rag_ctx.results.is_empty() {
+        // 1) GENERAL
+        if !rag_ctx.general_results.is_empty() {
             buf.push_str(
-                "=== RAG CONTEXT (READ-ONLY, NON-AUTHORITATIVE) ===\n\
-                 The following code snippets were retrieved via semantic search over the repository.\n\
-                 Treat them as read-only and potentially slightly stale.\n\
-                 Use them only to recognize patterns or invariants.\n\
-                 Do NOT claim behavior that cannot be confirmed from the diff hunk and current file.\n\
+                "=== RAG CONTEXT (GENERAL; READ-ONLY, NON-AUTHORITATIVE) ===\n\
+                 These snippets were retrieved using a generic semantic query based on the diff.\n\
+                 Use them only as hints about surrounding project structure.\n\
                  Do NOT use line numbers from this section in anchors.\n\n",
             );
 
-            for (i, r) in rag_ctx.results.iter().enumerate() {
+            for (i, r) in rag_ctx.general_results.iter().enumerate() {
                 let _ = writeln!(
                     &mut buf,
-                    "-- RAG[{i}] file={} (score: {:.3})",
+                    "-- RAG_GENERAL[{i}] file={} (score: {:.3})",
                     r.file, r.score
                 );
-
                 if let Some(snippet) = &r.snippet {
                     buf.push_str(snippet.trim_end());
                     buf.push('\n');
                 }
-
                 buf.push('\n');
+            }
+        }
+
+        // 2) FOCUSED
+        if !rag_ctx.focused.is_empty() {
+            buf.push_str(
+                "=== RAG CONTEXT (FOCUSED, FROM PRE-REVIEW HYPOTHESES) ===\n\
+                 These snippets were fetched according to pre-review hypotheses and their\n\
+                 `required_context` descriptions. Use them to answer the concrete questions\n\
+                 raised by those hypotheses. They are still READ-ONLY and NON-AUTHORITATIVE.\n\
+                 Do NOT use line numbers from this section in anchors.\n\n",
+            );
+
+            for (i, block) in rag_ctx.focused.iter().enumerate() {
+                let _ = writeln!(
+                    &mut buf,
+                    "-- RAG_FOCUSED[{i}] hypothesis_id={} kind={} query=\"{}\"",
+                    block.hypothesis_id, block.kind, block.query
+                );
+                if !block.description.is_empty() {
+                    let _ = writeln!(&mut buf, "DESCRIPTION: {}", block.description);
+                }
+                if !block.tags.is_empty() {
+                    let _ = writeln!(&mut buf, "TAGS: {}", block.tags.join(", "));
+                }
+                if !block.suggested_files.is_empty() {
+                    let _ = writeln!(
+                        &mut buf,
+                        "SUGGESTED_FILES: {}",
+                        block.suggested_files.join(", ")
+                    );
+                }
+                buf.push('\n');
+
+                for (j, r) in block.results.iter().enumerate() {
+                    let _ = writeln!(
+                        &mut buf,
+                        "  >> RAG_FOCUSED[{i}].RESULT[{j}] file={} (score: {:.3})",
+                        r.file, r.score
+                    );
+                    if let Some(snippet) = &r.snippet {
+                        buf.push_str(snippet.trim_end());
+                        buf.push('\n');
+                    }
+                    buf.push('\n');
+                }
             }
         }
     }

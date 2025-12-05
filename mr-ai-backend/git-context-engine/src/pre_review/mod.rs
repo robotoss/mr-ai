@@ -12,6 +12,7 @@
 //! used to drive additional RAG queries before the final review.
 
 mod builder;
+pub mod utils;
 
 use std::fs;
 use std::sync::Arc;
@@ -75,6 +76,17 @@ pub enum HypothesisPriority {
     Low,
 }
 
+impl HypothesisPriority {
+    /// Returns a stable string representation used in JSON / logs / UI.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HypothesisPriority::High => "High",
+            HypothesisPriority::Medium => "Medium",
+            HypothesisPriority::Low => "Low",
+        }
+    }
+}
+
 /// Semantic type of a hypothesis.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum HypothesisKind {
@@ -84,6 +96,17 @@ pub enum HypothesisKind {
     PossibleBug,
     /// Design or architecture question.
     DesignQuestion,
+}
+
+impl HypothesisKind {
+    /// Returns a stable string representation used in JSON / logs / UI.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HypothesisKind::MissingContext => "MissingContext",
+            HypothesisKind::PossibleBug => "PossibleBug",
+            HypothesisKind::DesignQuestion => "DesignQuestion",
+        }
+    }
 }
 
 /// Description of a single context requirement.

@@ -87,8 +87,14 @@ pub async fn get_ai_request_data(
 
     // TODO: extend `build_llm_review_request` to accept `&rag_contexts`
     // and include them into per-target prompts.
-    let request =
-        build_llm_review_request(&bundle, &targets, &ast_provider, &rules, &rag_contexts)?;
+    let request = build_llm_review_request(
+        &bundle,
+        &targets,
+        &ast_provider,
+        &rules,
+        &rag_contexts,
+        None,
+    )?;
 
     dump_llm_request_to_temp(&request, &bundle.meta.id);
 
@@ -102,23 +108,17 @@ pub async fn get_ai_request_data(
     Ok(request)
 }
 
-/// Two-phase review entry point: pre-review planning + final review.
+/// Builds a two-phase review:
+/// 1. Pre-review planning with narrow RAG.
+/// 2. Final review request with enriched RAG guided by the plan.
 ///
-/// 1. Fetches bundle from provider.
-/// 2. Builds review targets from diff.
-/// 3. Runs pre-review planning with LLM to identify hypotheses and
-///    required context.
-/// 4. Builds enriched final review request that can be sent to a
-///    separate review LLM.
-///
-/// Returns both the pre-review plan and the final `LlmReviewRequest`
-/// so the caller can inspect and log the planning step.
+/// Returns `(pre_review_plan, final_llm_request)`.
 pub async fn build_two_phase_review(
     project_name: &str,
     cfg: ProviderConfig,
     id: ChangeRequestId,
     llm_profiles: Arc<LlmServiceProfiles>,
-) -> GitContextEngineResult<(PreReviewPlan, LlmReviewRequest)> {
+) -> GitContextEngineResult<LlmReviewRequest> {
     info!(
         provider = ?cfg.kind,
         project = %id.project,
@@ -127,7 +127,6 @@ pub async fn build_two_phase_review(
     );
 
     let client = ProviderClient::from_config(cfg.clone())?;
-
     let bundle: CrBundle = client.fetch_bundle(&id).await?;
 
     debug!(
@@ -148,10 +147,12 @@ pub async fn build_two_phase_review(
         );
     }
 
-    // First phase: use a small amount of RAG just to guide hypotheses.
-    let prereview_rag = build_rag_contexts_for_targets(project_name, &targets, Some(2)).await;
     let rules = default_rule_set();
 
+    // 1) short RAG for preview
+    let prereview_rag = build_rag_contexts_for_targets(project_name, &targets, Some(2)).await;
+
+    // 2) pre-review plan (and his dump temp/pre_review — inside module)
     let prereview_plan = pre_review::run_pre_review_planning(
         project_name,
         &bundle,
@@ -162,24 +163,38 @@ pub async fn build_two_phase_review(
     )
     .await?;
 
-    // Second phase: build full RAG for final review.
-    let final_rag = build_rag_contexts_for_targets(project_name, &targets, Some(5)).await;
+    // 3) Enriched RAG, with plan
+    let enriched_rag = crate::rag_layer::build_enriched_rag_contexts(
+        project_name,
+        &targets,
+        &prereview_plan,
+        Some(5), // base_k
+        Some(3), // focus_k
+    )
+    .await;
+
+    // 4) final request in LLM for review
     let ast_provider = NoopAstContextProvider;
 
-    let final_request =
-        build_llm_review_request(&bundle, &targets, &ast_provider, &rules, &final_rag)?;
+    let final_request = crate::prompt::builder::build_llm_review_request(
+        &bundle,
+        &targets,
+        &ast_provider,
+        &rules,
+        &enriched_rag,
+        Some(&prereview_plan),
+    )?;
 
     dump_llm_request_to_temp(&final_request, &bundle.meta.id);
 
     info!(
         project = %bundle.meta.id.project,
         iid = bundle.meta.id.iid,
-        target_count = final_request.targets.len(),
-        hypothesis_targets = prereview_plan.targets.len(),
-        "build_two_phase_review: two-phase AI request data built"
+        targets = final_request.targets.len(),
+        "build_two_phase_review: completed"
     );
 
-    Ok((prereview_plan, final_request))
+    Ok(final_request)
 }
 
 /// Dumps the LLM request into `./temp` as pretty JSON for debugging.
