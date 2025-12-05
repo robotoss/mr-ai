@@ -1,5 +1,6 @@
 //! Crate-wide error hierarchy for git-context-engine.
 
+use ai_llm_service::error_handler::AiLlmError;
 use thiserror::Error;
 
 /// Convenient alias for crate-wide results.
@@ -35,6 +36,10 @@ pub enum GitContextEngineError {
     /// Errors coming from the `code-indexer` crate.
     #[error("code-indexer error: {0}")]
     CodeIndexer(String),
+
+    /// Errors coming from the LLM service.
+    #[error("llm error: {0}")]
+    Llm(String),
 }
 
 /// Provider-specific error used inside the provider layer.
@@ -147,6 +152,12 @@ impl From<serde_json::Error> for GitContextEngineError {
 impl From<code_indexer::Error> for GitContextEngineError {
     fn from(err: code_indexer::Error) -> Self {
         GitContextEngineError::CodeIndexer(err.to_string())
+    }
+}
+
+impl From<AiLlmError> for GitContextEngineError {
+    fn from(err: AiLlmError) -> Self {
+        GitContextEngineError::Llm(err.to_string())
     }
 }
 

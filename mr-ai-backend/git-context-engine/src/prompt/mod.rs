@@ -18,10 +18,10 @@
 
 pub mod builder;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// High-level metadata about the change (MR/PR) included in the prompt header.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmReviewChangeMeta {
     /// Logical provider identifier (e.g. "GitLab", "GitHub").
     pub provider: String,
