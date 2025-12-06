@@ -48,13 +48,34 @@ pub fn build_prereview_prompt(
            You may use them to detect moved or related code, but you MUST NOT use their lines\n\
            in `anchor_lines`.\n\
          - Any RAG snippets are READ-ONLY and NON-AUTHORITATIVE helpers.\n\
-         - You MUST not invent files, functions or behavior that cannot be tied to the diff.\n\n\
-         HYPOTHESIS SELECTION\n\
+         - You MUST NOT invent files, functions or behavior that cannot be tied directly to the diff.\n\n",
+    );
+
+    // ---------------------------------------------------------------------
+    // HYPOTHESIS SELECTION
+    // ---------------------------------------------------------------------
+    buf.push_str(
+        "HYPOTHESIS SELECTION\n\
          --------------------\n\
          - Prefer a small number of high-signal hypotheses over many vague ones.\n\
-         - Use hypotheses only when you see a realistic chance of a bug, regression or design risk,\n\
+         - Use hypotheses only when you see a realistic chance of a bug, regression, design risk,\n\
            or when you clearly lack context to safely reason about behavior.\n\
-         - If the diff looks trivial and safe, return an empty hypothesis list.\n\n",
+         - If the diff looks trivial and safe, return an empty hypothesis list.\n\
+         \n\
+         - Pay special attention to:\n\
+           - functional correctness (wrong result, missing branches or edge cases);\n\
+           - resource and lifetime management (long-running or repeating operations, background work,\n\
+             event listeners, subscriptions, I/O handles, external connections);\n\
+           - performance characteristics (unnecessary repeated work, heavy operations in hot paths,\n\
+             needless recomputation or rebuilding of large structures);\n\
+           - design and API usage (misuse of public APIs, violations of invariants, confusing responsibilities);\n\
+           - consistency with configuration or surrounding code (routing tables, feature flags,\n\
+             schema definitions, protocol contracts).\n\
+         \n\
+         - When a single changed code fragment raises more than one independent concern\n\
+           (for example, correctness vs resource/lifetime vs performance vs design), you SHOULD create\n\
+           separate hypotheses for each concern, even if they share the same `anchor_lines`.\n\
+           Do NOT merge unrelated questions into one generic hypothesis.\n\n",
     );
 
     // ---------------------------------------------------------------------
@@ -115,8 +136,6 @@ pub fn build_prereview_prompt(
     // ---------------------------------------------------------------------
     // RELATED DIFFS (OTHER HUNKS IN SAME FILE)
     // ---------------------------------------------------------------------
-    // We render other hunks for the same file so that the model can see
-    // moves/related changes, but it MUST NOT use those lines in anchor_lines.
     let has_other_hunks = file_targets
         .iter()
         .any(|t| t.hunk_index != current.hunk_index);
@@ -152,7 +171,8 @@ pub fn build_prereview_prompt(
             buf.push_str(
                 "=== RAG CONTEXT (READ-ONLY, NON-AUTHORITATIVE) ===\n\
                  The following code snippets were retrieved via semantic search.\n\
-                 Treat them as hints about surrounding project structure (e.g. routing, state management).\n\
+                 Treat them as hints about surrounding project structure (e.g. routing, state management,\n\
+                 configuration or shared utilities).\n\
                  Do NOT claim behavior that cannot be justified by the primary diff and the current file.\n\
                  Do NOT use line numbers from this section in `anchor_lines`.\n\n",
             );
@@ -195,6 +215,9 @@ Perform a planning pass for this diff hunk.
 
 You MUST:
 - identify only those hypotheses that are clearly motivated by the PRIMARY DIFF;
+- when one code region raises multiple distinct concerns (e.g. correctness vs performance vs
+  security vs design vs missing context), represent them as multiple hypotheses (H1, H2, H3, ...)
+  instead of merging them into a single entry;
 - for each hypothesis, provide:
   - `anchor_lines` with exact diff lines from the PRIMARY DIFF block;
   - a short `title`;
@@ -213,6 +236,8 @@ ANCHORS AND DIFF LINES
   - the '|' separator and the code that follows.
 - Do NOT invent or reformat lines.
 - Do NOT use lines from RELATED DIFF blocks or RAG sections in `anchor_lines`.
+- Multiple hypotheses may reference the same `anchor_lines` when they focus on
+  different concerns about the same code fragment.
 
 OUTPUT FORMAT (STRICT JSON)
 ---------------------------

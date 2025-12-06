@@ -9,8 +9,8 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { workspace = true }
+axum   = { workspace = true }
 
-axum = "0.8"
 
 ai-llm-service = { path = "../ai-llm-service" }
 code-indexer = { path = "../code-indexer" }

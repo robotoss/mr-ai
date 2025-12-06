@@ -1,27 +1,14 @@
 //! Prompt builder: diff + AST context + RAG + rules → LlmReviewRequest.
 //!
-//! For each review target (one diff hunk) this builder constructs a prompt that
-//! clearly separates:
-//!   - high-level role & guardrails;
-//!   - change metadata (project / MR / author / URL / description);
-//!   - PRIMARY DIFF block (HEAD; authoritative) with BEGIN_DIFF/END_DIFF;
-//!   - optional AST context (read-only, non-authoritative);
-//!   - optional RAG / semantic context (read-only, non-authoritative);
-//!   - composed review rules (global + language-specific);
-//!   - a STRICT JSON output specification using `anchor.lines` with exact diff lines.
+//! In the two-phase mode each LlmReviewTarget corresponds to EXACTLY ONE
+//! hypothesis produced during the planning phase.
 //!
-//! Key constraints enforced in the prompt:
-//!   - The diff block (HEAD) is the only authoritative source of behavior.
-//!   - AST and RAG context are helpers only and must never be used as the sole
-//!     basis for claims about behavior.
-//!   - The model must only report issues that clearly require changes in this
-//!     diff hunk.
-//!   - Every issue must:
-//!       * use `anchor.lines` with exact lines copied from the PRIMARY DIFF
-//!         block (between BEGIN_DIFF and END_DIFF);
-//!       * set severity to: High / Medium / Low;
-//!       * set kind to: Bug / Style / Question;
-//!       * keep reasoning tied to the diff.
+//! The model:
+//!   - focuses on a FOCUSED FRAGMENT built from `anchor_lines`;
+//!   - uses the PRIMARY DIFF / AST / RAG only as additional context;
+//!   - answers the concrete hypothesis `question`;
+//!   - may return either 0 issues (hypothesis dismissed) or 1 consolidated
+//!     issue for this fragment.
 
 use std::fmt::Write as FmtWrite;
 
@@ -42,7 +29,7 @@ use crate::rules::{RuleSet, compose_rules_for_file};
 /// Modes:
 /// - single-phase (no `prereview_plan`): 1 target = 1 diff hunk, no hypotheses.
 /// - two-phase  (with `prereview_plan`): 1 target = 1 hypothesis (H1/H2/...)
-///   from the plan, even если несколько гипотез относятся к одному hunk.
+///   from the plan, even if multiple hypotheses refer to the same hunk.
 pub fn build_llm_review_request(
     bundle: &CrBundle,
     targets: &[ReviewTarget],
@@ -53,7 +40,6 @@ pub fn build_llm_review_request(
 ) -> GitContextEngineResult<LlmReviewRequest> {
     let mut out_targets = Vec::<LlmReviewTarget>::new();
 
-    // Helper: map (file_path, hunk_index) -> ReviewTarget.
     fn find_target<'a>(
         targets: &'a [ReviewTarget],
         file_path: &str,
@@ -64,7 +50,6 @@ pub fn build_llm_review_request(
             .find(|t| t.file_path == file_path && t.hunk_index == hunk_index)
     }
 
-    // Helper: map (file_path, hunk_index) -> TargetRagContext.
     fn find_rag_ctx<'a>(
         rag_contexts: &'a [TargetRagContext],
         file_path: &str,
@@ -97,7 +82,7 @@ pub fn build_llm_review_request(
 
             let rag_ctx = find_rag_ctx(rag_contexts, file_path, hunk_index);
 
-            // Если по этому hunk вообще нет гипотез — просто пропускаем его.
+            // If this hunk has no hypotheses in the plan — skip it.
             if tplan.hypotheses.is_empty() {
                 debug!(
                     file = %file_path,
@@ -107,7 +92,7 @@ pub fn build_llm_review_request(
                 continue;
             }
 
-            // Для КАЖДОЙ гипотезы этого hunk строим отдельный LlmReviewTarget.
+            // For EACH hypothesis of this hunk, build a separate LlmReviewTarget.
             for hyp in &tplan.hypotheses {
                 let ast_ctx: AstContext = ast_provider.lookup_context_for_target(target)?;
 
@@ -131,7 +116,8 @@ pub fn build_llm_review_request(
                     "prompt_builder: built prompt for single hypothesis (two-phase mode)",
                 );
 
-                // Build anchors for this (file, hunk) and keep only the one for current hypothesis.
+                // Build anchors for this (file, hunk) and keep only the ones
+                // belonging to the current hypothesis.
                 let all_anchors =
                     build_planned_anchors_for_target(file_path, hunk_index, Some(plan));
 
@@ -140,7 +126,6 @@ pub fn build_llm_review_request(
                     .filter(|a| a.hypothesis_id == hyp.id)
                     .collect();
 
-                // If for some reason no anchor was inferred, keep it empty but still send prompt.
                 if anchors_for_hyp.is_empty() {
                     debug!(
                         file = %file_path,
@@ -160,7 +145,7 @@ pub fn build_llm_review_request(
         }
     } else {
         // ---------------------------------------------------------------------
-        // SINGLE-PHASE MODE: old behavior, 1 target = 1 hunk, без гипотез.
+        // SINGLE-PHASE MODE: 1 target = 1 hunk, no hypotheses.
         // ---------------------------------------------------------------------
         for target in targets {
             let ast_ctx: AstContext = ast_provider.lookup_context_for_target(target)?;
@@ -210,13 +195,12 @@ pub fn build_llm_review_request(
     })
 }
 
-/// Render the final prompt text for a single review target (one diff hunk).
+/// Render the final prompt text for a single review target (one diff hunk + one hypothesis).
 ///
-/// The prompt enforces:
-///   * focus on the diff hunk only;
-///   * correct use of AST/RAG context as non-authoritative helpers;
-///   * severity High / Medium / Low for every issue;
-///   * a strict JSON output schema using `anchor.lines` with exact diff lines.
+/// Key differences:
+/// - The model focuses on the FOCUSED FRAGMENT (anchor_lines) only.
+/// - PRIMARY DIFF is additional context, not a new target for issues.
+/// - At most one issue per hypothesis (0 or 1).
 fn render_prompt_for_target(
     bundle: &CrBundle,
     target: &ReviewTarget,
@@ -227,6 +211,11 @@ fn render_prompt_for_target(
 ) -> GitContextEngineResult<String> {
     let mut buf = String::new();
 
+    let code_lang = guess_code_fence_lang(&target.file_path);
+
+    // In the two-phase mode we expect exactly one hypothesis per call.
+    let active_hyp = hypotheses.first();
+
     // -------------------------------------------------------------------------
     // ROLE & GLOBAL GUARDRAILS
     // -------------------------------------------------------------------------
@@ -234,21 +223,30 @@ fn render_prompt_for_target(
         "ROLE\n\
          ----\n\
          You are a senior automated code review assistant.\n\
-         You receive code diffs and optional read-only context, and you respond with precise, constructive review comments.\n\
+         In this phase you DO NOT re-review the entire diff.\n\
+         Instead, you focus on ONE suspicious fragment selected earlier,\n\
+         and decide whether it is a real issue that requires a change.\n\
          Your priorities are, in order: correctness, safety, performance, and maintainability.\n\
-         Review ONLY the diff hunk provided for this file.\n\
-         Do NOT comment on code that is not present in the diff hunk.\n\
-         Do NOT invent files, functions, line numbers, or behavior that are not supported by the diff.\n\n\
+         You receive:\n\
+         - a PRIMARY DIFF block for context;\n\
+         - one FOCUSED FRAGMENT (a subset of the diff lines);\n\
+         - optional AST and RAG context;\n\
+         - a concrete hypothesis with a question.\n\n\
          SOURCES OF TRUTH\n\
          -----------------\n\
-         - The PRIMARY DIFF block (between BEGIN_DIFF and END_DIFF) is the ONLY authoritative source of behavior.\n\
-         - AST and RAG context sections are READ-ONLY and NON-AUTHORITATIVE helpers.\n\
+         - The PRIMARY DIFF block (between BEGIN_DIFF and END_DIFF) is the ONLY authoritative view of the change.\n\
+         - The FOCUSED FRAGMENT is built directly from a subset of lines in the PRIMARY DIFF.\n\
+         - AST and RAG sections are READ-ONLY and NON-AUTHORITATIVE helpers.\n\
            They can help you understand intent and avoid false positives, but you must NOT base issues solely on them.\n\
          - If an issue cannot be justified directly from the diff (optionally supported by AST/RAG), do NOT report it.\n\n\
          ISSUE SELECTION\n\
          ---------------\n\
-         - Report only issues that clearly require code changes in this diff.\n\
-         - Prioritize a small number of high-signal findings over many minor nits.\n\
+         - You review ONLY the FOCUSED FRAGMENT for this phase.\n\
+         - PRIMARY DIFF, AST and RAG are context; do NOT invent new issues outside the fragment.\n\
+         - Prefer a single, well-formed issue over several overlapping or repetitive ones.\n\
+         - If several observations describe the same underlying problem in the fragment\n\
+           (e.g. performance + resource handling for the same Timer), MERGE them into one issue.\n\
+         - If the hypothesis is disproved by the visible code and context, return no issues.\n\
          - Avoid vague language like \"maybe\", \"might\", \"could be\".\n\
            Be definitive, or return no issues.\n\n",
     );
@@ -283,7 +281,9 @@ fn render_prompt_for_target(
     }
     buf.push('\n');
 
-    // Explicitly echo the exact identifiers the model must copy.
+    // -------------------------------------------------------------------------
+    // TARGET IDENTIFIER
+    // -------------------------------------------------------------------------
     let _ = writeln!(
         &mut buf,
         "TARGET IDENTIFIER (MUST BE COPIED EXACTLY INTO JSON)\n\
@@ -294,20 +294,93 @@ fn render_prompt_for_target(
     buf.push('\n');
 
     // -------------------------------------------------------------------------
-    // PRIMARY DIFF (HEAD; AUTHORITATIVE)
+    // HYPOTHESIS (if present)
+    // -------------------------------------------------------------------------
+    if let Some(hyp) = active_hyp {
+        let _ = writeln!(
+            &mut buf,
+            "HYPOTHESIS\n----------\nID: {}\nPriority: {:?}\nKind: {:?}",
+            hyp.id, hyp.priority, hyp.kind
+        );
+        if !hyp.title.trim().is_empty() {
+            let _ = writeln!(&mut buf, "Title: {}", hyp.title.trim());
+        }
+        if !hyp.question.trim().is_empty() {
+            let _ = writeln!(&mut buf, "Question: {}", hyp.question.trim());
+        }
+        buf.push('\n');
+    }
+
+    // -------------------------------------------------------------------------
+    // FOCUSED FRAGMENT (built from anchor_lines)
+    // -------------------------------------------------------------------------
+    if let Some(hyp) = active_hyp {
+        buf.push_str(
+            "=== FOCUSED FRAGMENT (ANCHOR LINES) ===\n\
+             This is the ONLY fragment you are allowed to comment on in this phase.\n\
+             PRIMARY DIFF below is just context.\n\n",
+        );
+
+        if hyp.anchor_lines.is_empty() {
+            buf.push_str("// (no anchor lines were provided)\n\n");
+        } else {
+            // Check if all anchor lines are additions, deletions or mixed.
+            let mut all_plus = true;
+            let mut all_minus = true;
+            for line in &hyp.anchor_lines {
+                let trimmed = line.trim_start();
+                if !trimmed.starts_with('+') {
+                    all_plus = false;
+                }
+                if !trimmed.starts_with('-') {
+                    all_minus = false;
+                }
+            }
+
+            if all_plus {
+                buf.push_str("// Anchored added lines (logic to review):\n");
+                for line in &hyp.anchor_lines {
+                    if let Some(pipe_pos) = line.find('|') {
+                        let code_part = &line[pipe_pos + 1..];
+                        let _ = writeln!(&mut buf, "{}", code_part.trim_end());
+                    } else {
+                        let _ = writeln!(&mut buf, "{}", line.trim_start_matches('+'));
+                    }
+                }
+                buf.push('\n');
+            } else if all_minus {
+                buf.push_str("// Anchored removed lines (old logic for reference):\n");
+                for line in &hyp.anchor_lines {
+                    if let Some(pipe_pos) = line.find('|') {
+                        let code_part = &line[pipe_pos + 1..];
+                        let _ = writeln!(&mut buf, "{}", code_part.trim_end());
+                    } else {
+                        let _ = writeln!(&mut buf, "{}", line.trim_start_matches('-'));
+                    }
+                }
+                buf.push('\n');
+            } else {
+                buf.push_str("// Mixed added/removed lines (diff-style view of the fragment):\n");
+                for line in &hyp.anchor_lines {
+                    let _ = writeln!(&mut buf, "{}", line);
+                }
+                buf.push('\n');
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // PRIMARY DIFF (HEAD; authoritative, as context)
     // -------------------------------------------------------------------------
     let _ = writeln!(
         &mut buf,
-        "=== PRIMARY DIFF (HEAD; authoritative) ===\n\
-         The following block shows the diff hunk YOU MUST REVIEW.\n\
-         All anchors and findings MUST be tied only to lines inside this block.\n\
+        "=== PRIMARY DIFF (HEAD; authoritative, CONTEXT ONLY) ===\n\
+         The following block shows the full diff hunk for context.\n\
+         You MUST NOT create issues for lines outside the FOCUSED FRAGMENT.\n\
          BEGIN_DIFF file={} hunk_index={}",
         target.file_path, target.hunk_index
     );
 
-    // `diff_preview` is already a structured diff snippet with numbered lines, e.g.:
-    //   "  26/26  |           /// Comment"
-    //   "+    29 |             newCode();"
     let _ = writeln!(&mut buf, "{}", target.diff_preview.trim_end());
 
     buf.push_str("END_DIFF\n\n");
@@ -319,8 +392,7 @@ fn render_prompt_for_target(
         buf.push_str(
             "=== AST CONTEXT (READ-ONLY, NON-AUTHORITATIVE) ===\n\
              These snippets show nearby or enclosing code from the same repository.\n\
-             Use them ONLY to better understand the diff and to avoid false positives.\n\
-             The PRIMARY DIFF above is the final source of truth for behavior.\n\
+             Use them ONLY to better understand the change and to avoid false positives.\n\
              Do NOT use line numbers from this section in anchors.\n\n",
         );
 
@@ -339,7 +411,6 @@ fn render_prompt_for_target(
     // RAG CONTEXT (READ-ONLY, NON-AUTHORITATIVE)
     // -------------------------------------------------------------------------
     if let Some(rag_ctx) = rag_ctx {
-        // 1) GENERAL
         if !rag_ctx.general_results.is_empty() {
             buf.push_str(
                 "=== RAG CONTEXT (GENERAL; READ-ONLY, NON-AUTHORITATIVE) ===\n\
@@ -362,13 +433,12 @@ fn render_prompt_for_target(
             }
         }
 
-        // 2) FOCUSED
         if !rag_ctx.focused.is_empty() {
             buf.push_str(
                 "=== RAG CONTEXT (FOCUSED, FROM PRE-REVIEW HYPOTHESES) ===\n\
                  These snippets were fetched according to pre-review hypotheses and their\n\
-                 `required_context` descriptions. Use them to answer the concrete questions\n\
-                 raised by those hypotheses. They are still READ-ONLY and NON-AUTHORITATIVE.\n\
+                 `required_context` descriptions. Use them to answer the concrete question\n\
+                 of this hypothesis. They are still READ-ONLY and NON-AUTHORITATIVE.\n\
                  Do NOT use line numbers from this section in anchors.\n\n",
             );
 
@@ -410,39 +480,6 @@ fn render_prompt_for_target(
     }
 
     // -------------------------------------------------------------------------
-    // PRE-REVIEW HYPOTHESES TO ADDRESS
-    // -------------------------------------------------------------------------
-    if !hypotheses.is_empty() {
-        buf.push_str(
-            "=== PRE-REVIEW HYPOTHESES TO ADDRESS ===\n\
-                The pre-review planning phase produced the following hypotheses\n\
-                and questions for this diff hunk. You MUST explicitly consider them\n\
-                when deciding which issues to report.\n\n",
-        );
-
-        for hyp in hypotheses {
-            let _ = writeln!(
-                &mut buf,
-                "- ID: {} | Priority: {:?} | Kind: {:?}",
-                hyp.id, hyp.priority, hyp.kind
-            );
-            if !hyp.title.trim().is_empty() {
-                let _ = writeln!(&mut buf, "  Title: {}", hyp.title.trim());
-            }
-            if !hyp.question.trim().is_empty() {
-                let _ = writeln!(&mut buf, "  Question: {}", hyp.question.trim());
-            }
-            if !hyp.anchor_lines.is_empty() {
-                buf.push_str("  Anchor lines (from PRIMARY DIFF):\n");
-                for line in &hyp.anchor_lines {
-                    let _ = writeln!(&mut buf, "    {}", line);
-                }
-            }
-            buf.push('\n');
-        }
-    }
-
-    // -------------------------------------------------------------------------
     // REVIEW RULES (GLOBAL + LANGUAGE-SPECIFIC)
     // -------------------------------------------------------------------------
     let rules_text = compose_rules_for_file(&target.file_path, rules);
@@ -460,20 +497,16 @@ fn render_prompt_for_target(
     // -------------------------------------------------------------------------
     // FINAL INSTRUCTIONS + STRICT JSON SCHEMA
     // -------------------------------------------------------------------------
-
     buf.push_str(
         r#"=== FINAL INSTRUCTIONS ===
-Perform a focused review of this diff hunk.
+Perform a focused review of the FOCUSED FRAGMENT only.
 
 You MUST:
-- explicitly address the hypotheses listed in the section
-  "PRE-REVIEW HYPOTHESES TO ADDRESS":
-  - if a hypothesis is confirmed as a real issue, report it as an issue;
-  - if a hypothesis is disproved by the diff/context, do NOT report it;
-- keep all reasoning tied to the PRIMARY DIFF block between BEGIN_DIFF and END_DIFF;
-- treat AST and RAG sections strictly as helper context, never as the primary source of truth;
-- report only issues that clearly require changes in this diff;
-- prefer concrete, actionable findings over generic advice.
+- answer the hypothesis question based on the FOCUSED FRAGMENT and the provided context;
+- if the fragment clearly contains a real issue that requires a code change, report exactly ONE issue;
+- if the fragment looks safe or the hypothesis is disproved by the code and context, return no issues;
+- keep all reasoning tied to the FOCUSED FRAGMENT lines taken from the PRIMARY DIFF;
+- treat AST and RAG sections strictly as helper context, never as the primary source of truth.
 
 ANCHORS AND DIFF LINES
 ----------------------
@@ -485,10 +518,11 @@ ANCHORS AND DIFF LINES
   - the numeric prefix (e.g. "  27/27  |", "    49  |", or "+    29 |"),
   - the "|" separator and the code that follows.
 - Do NOT invent, modify, or reformat diff lines.
+- All lines in "anchor.lines" MUST belong to the FOCUSED FRAGMENT of this hypothesis.
 - For a single-line issue, "anchor.lines" MUST contain exactly one line.
 - For a multi-line issue, include all relevant diff lines in order.
 
-Use kind = "Question" when the code looks unusual, risky, or framework-dependent
+Use kind = "Question" when the fragment looks unusual, risky, or framework-dependent
 but there is a reasonable chance it is intentional and you cannot prove it is a bug
 based only on the diff and provided context.
 
@@ -510,8 +544,18 @@ Return ONLY a single JSON object with the following structure:
       "severity": "High" | "Medium" | "Low",
       "kind": "Bug" | "Style" | "Question",
       "title": "<short one-line summary>",
-      "body": "<short explanation tied to the diff; keep it to a few sentences>",
-      "suggested_fix": "<optional minimal fix or patch; empty string if none>"
+      "body": "<short explanation tied to the visible code; keep it to a few sentences>",
+"#,
+    );
+
+    let _ = writeln!(
+        &mut buf,
+        "      \"suggested_fix\": \"<either an empty string, or a minimal code patch formatted as a fenced code block using ```{lang}``` with ONLY code and no prose>\"",
+        lang = code_lang,
+    );
+
+    buf.push_str(
+        r#"
     }
   ]
 }
@@ -524,6 +568,7 @@ HARD CONSTRAINTS
   - no extra text before or after the JSON object.
 - You MUST copy "file_path" and "hunk_index" EXACTLY from FILE_PATH and HUNK_INDEX shown above.
   Do NOT shorten, modify, or guess them.
+
 - If there are NO valid issues, return exactly:
 
 {
@@ -537,10 +582,54 @@ HARD CONSTRAINTS
   - set "severity" to one of: "High", "Medium", "Low";
   - set "kind" to one of: "Bug", "Style", "Question";
   - use ONLY lines from the PRIMARY DIFF block in "anchor.lines";
+  - use ONLY lines that belong to the FOCUSED FRAGMENT for this hypothesis;
   - be justified directly by the diff (optionally supported by AST/RAG);
   - keep the explanation concise and actionable.
+
+- The \"issues\" array length MUST be 0 or 1. Do NOT output multiple issues in one response.
+  If you see several aspects of the same underlying problem in the fragment
+  (for example, performance AND resource handling of the same periodic timer),
+  MERGE them into a single issue and describe the different aspects in \"body\"
+  and/or the suggested fix.
 "#,
     );
 
     Ok(buf)
+}
+
+fn guess_code_fence_lang(file_path: &str) -> &'static str {
+    if let Some(ext) = std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        match ext {
+            "dart" => "dart",
+            "kt" => "kotlin",
+            "kts" => "kotlin",
+            "java" => "java",
+            "ts" => "ts",
+            "tsx" => "tsx",
+            "js" => "js",
+            "jsx" => "jsx",
+            "py" => "python",
+            "rs" => "rust",
+            "go" => "go",
+            "cs" => "csharp",
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" => "cpp",
+            "c" => "c",
+            "php" => "php",
+            "rb" => "ruby",
+            "swift" => "swift",
+            "scala" => "scala",
+            "m" => "objective-c",
+            "mm" => "objective-cpp",
+            "sh" => "bash",
+            "yaml" | "yml" => "yaml",
+            "json" => "json",
+            "xml" => "xml",
+            _ => "text",
+        }
+    } else {
+        "text"
+    }
 }
