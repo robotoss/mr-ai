@@ -20,13 +20,13 @@ use ai_llm_service::service_profiles::LlmServiceProfiles;
 use tracing::{debug, info, warn};
 
 use crate::diff_model::build_review_targets;
+use crate::errors::GitContextEngineResult;
 use crate::git_providers::types::{ChangeRequestId, CrBundle};
 use crate::git_providers::{ProviderClient, ProviderConfig};
 use crate::prompt::LlmReviewRequest;
 use crate::prompt::builder::build_llm_review_request;
 use crate::rules::builtin::default_rule_set;
 use crate::{ast_context::NoopAstContextProvider, rag_layer::build_rag_contexts_for_targets};
-use crate::{errors::GitContextEngineResult, pre_review::PreReviewPlan};
 
 /// Builds AI request data for a single change request.
 ///
