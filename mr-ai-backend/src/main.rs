@@ -1,15 +1,8 @@
-use std::{error::Error, str::FromStr, sync::Arc};
+use std::{error::Error, sync::Arc};
 
 use ai_llm_service::{config::default_config, service_profiles::LlmServiceProfiles};
 use api;
-use tracing::Level;
-use tracing_subscriber::{
-    EnvFilter, Layer,
-    filter::{Directive, Targets},
-    fmt,
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -39,18 +32,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn init_tracing() {
-    let base = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    let filter = base.add_directive(Directive::from_str("mr_reviewer=trace").unwrap());
-
-    let fmt_all = fmt::layer();
-
-    let ai_layer = ai_llm_service::telemetry::layer::<_>()
-        .with_filter(Targets::new().with_target("ai_llm_service", Level::DEBUG));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt_all)
-        .with(ai_layer)
+        .with(tracing_subscriber::fmt::layer())
         .init();
 }

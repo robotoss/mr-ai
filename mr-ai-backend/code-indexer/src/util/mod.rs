@@ -1,6 +1,5 @@
 pub mod fs_scan;
 pub mod jsonl;
-pub mod microchunk;
 
 use crate::errors::{Error, Result};
 use std::path::Path;

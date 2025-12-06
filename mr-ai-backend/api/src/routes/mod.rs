@@ -1,5 +1,4 @@
-pub mod ask;
-pub mod prepare_qdrant_route;
+pub mod check_mr;
 pub mod project_indexer;
 pub mod rag_base;
 pub mod sync_git;

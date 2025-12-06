@@ -53,6 +53,7 @@ wasm-pack.log
 .env.*
 
 code_data/*
+temp/*
 !code_data/.gitkeep
 ssh_keys/*
 !ssh_keys/.gitkeep

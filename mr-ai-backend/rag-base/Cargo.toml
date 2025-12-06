@@ -2,6 +2,8 @@
 name = "rag-base"
 version = "0.1.0"
 edition = "2024"
+authors = ["Yeftifeyev Konstantin <zoxo@outlook.com>"]
+license = "FSL-1.1"
 
 [dependencies]
 

@@ -2,10 +2,11 @@
 name = "mr-ai-backend"
 version = "0.1.0"
 edition = "2024"
-
+authors = ["Yeftifeyev Konstantin <zoxo@outlook.com>"]
+license = "FSL-1.1"
 
 [workspace]
-members = [".", "ai-llm-service", "api", "code-indexer", "codegraph-prep", "contextor", "mr-reviewer", "project_code_store", "rag-base",  "rag-store", "services"]
+members = [".", "ai-llm-service", "ai-review-engine", "api", "code-indexer", "git-context-engine", "project_code_store", "rag-base", "services"]
 
 [dependencies]
 api = { path = "api" }
@@ -28,3 +29,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt",] }
 reqwest = { version = "0.12"}
 thiserror = "1.0"
 colored = "3.0"
+axum = "0.8"

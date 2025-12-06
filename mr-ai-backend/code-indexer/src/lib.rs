@@ -1,13 +1,19 @@
 //! Public entrypoints for cross-platform code indexing with AST and optional LSP enrichment.
 
-mod ast;
+pub mod ast;
+pub mod diff_types;
 pub mod errors;
 mod lsp;
 pub mod types;
 mod util;
 
-use crate::lsp::{dart::DartLsp, interface::LspProvider}; // bring trait into scope for ::enrich
+use crate::{
+    ast::router::RouterAst,
+    diff_types::DiffAstModel,
+    lsp::{dart::DartLsp, interface::LspProvider},
+}; // bring trait into scope for ::enrich
 pub use errors::{Error, Result};
+use tracing::{debug, info, warn};
 pub use types::{CodeChunk, LanguageKind};
 
 use std::path::{Path, PathBuf};
@@ -92,4 +98,75 @@ pub fn index_project_to_jsonl(project_name: &str, enable_lsp: bool) -> Result<Pa
     w.finish()?;
 
     Ok(out_path)
+}
+
+/// Indexes only files affected by a diff/changeset into `CodeChunk`s.
+///
+/// This function is analogous to `index_project`, but instead of scanning
+/// the entire repository it uses a pre-constructed `DiffAstModel` that is
+/// usually built from a Git diff (e.g. GitLab merge request changes).
+///
+/// Typical usage:
+///   1. clone / checkout the repo at MR head SHA;
+///   2. build `DiffAstModel` from `ChangeSet` (new_path/old_path flags);
+///   3. call `index_diff_model` to obtain AST chunks only for touched files;
+///   4. feed those chunks into RAG / rules / prompt construction.
+pub fn index_diff_model(model: &DiffAstModel, enable_lsp: bool) -> Result<Vec<CodeChunk>> {
+    let mut chunks = Vec::<CodeChunk>::new();
+
+    debug!(
+        base = %model.base_dir.display(),
+        files = model.files.len(),
+        "index_diff_model: indexing diff-touched files",
+    );
+
+    for entry in &model.files {
+        // Deleted files do not exist in the checked-out HEAD tree and
+        // cannot be parsed from disk; skip them for now.
+        if entry.is_deleted {
+            debug!(
+                old_path = ?entry.old_path,
+                "index_diff_model: skipping deleted file",
+            );
+            continue;
+        }
+
+        // Use new_path if present, otherwise fall back to old_path.
+        let rel = match (&entry.new_path, &entry.old_path) {
+            (Some(p), _) => p,
+            (None, Some(p)) => p,
+            (None, None) => {
+                warn!("index_diff_model: file entry without paths, skipping");
+                continue;
+            }
+        };
+
+        let abs: PathBuf = model.base_dir.join(rel);
+
+        if !abs.exists() {
+            warn!(
+                path = %abs.display(),
+                "index_diff_model: file does not exist on disk, skipping",
+            );
+            continue;
+        }
+
+        debug!(
+            rel = rel,
+            abs = %abs.display(),
+            is_new = entry.is_new,
+            is_renamed = entry.is_renamed,
+            "index_diff_model: parsing file",
+        );
+
+        let mut file_chunks = RouterAst::parse_file(&abs)?;
+        chunks.append(&mut file_chunks);
+    }
+
+    if enable_lsp {
+        info!("index_diff_model: enriching Dart chunks with LSP");
+        DartLsp::enrich(&model.base_dir, &mut chunks)?;
+    }
+
+    Ok(chunks)
 }
