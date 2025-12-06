@@ -22,22 +22,22 @@ services:
     networks:
       - app_net
 
-  ollama:
-    image: docker.io/ollama/ollama:0.11.5
-    container_name: ollama
-    pull_policy: always
-    tty: true
-    restart: always
-    ports:
-      - "7869:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-      # - .:/code
-    environment:
-      - OLLAMA_KEEP_ALIVE=24h
-      - OLLAMA_HOST=0.0.0.0
-    networks:
-      - app_net
+  # ollama:
+  #   image: docker.io/ollama/ollama:0.11.5
+  #   container_name: ollama
+  #   pull_policy: always
+  #   tty: true
+  #   restart: always
+  #   ports:
+  #     - "7869:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #     # - .:/code
+  #   environment:
+  #     - OLLAMA_KEEP_ALIVE=24h
+  #     - OLLAMA_HOST=0.0.0.0
+  #   networks:
+  #     - app_net
 
 networks:
   app_net:
@@ -45,4 +45,4 @@ networks:
 
 volumes:
   qdrant_data:
-  ollama_data:
+  # ollama_data:
