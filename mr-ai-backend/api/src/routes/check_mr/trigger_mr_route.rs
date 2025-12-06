@@ -96,6 +96,7 @@ pub async fn trigger_mr_route(
         cfg,
         id,
         state.llm_profiles.clone(),
+        false,
     )
     .await;
     // ApiResponse::success(TriggerMrResponse {

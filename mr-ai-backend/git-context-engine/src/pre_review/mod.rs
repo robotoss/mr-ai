@@ -152,6 +152,7 @@ pub async fn run_pre_review_planning(
     rules: &RuleSet,
     rag_contexts: &[TargetRagContext],
     llm_profiles: Arc<LlmServiceProfiles>,
+    save_logs: bool,
 ) -> GitContextEngineResult<PreReviewPlan> {
     info!(
         project = %bundle.meta.id.project,
@@ -241,7 +242,9 @@ pub async fn run_pre_review_planning(
         targets: out_targets,
     };
 
-    dump_prereview_plan_to_temp(project_name, &bundle.meta.id, &plan);
+    if save_logs {
+        dump_prereview_plan_to_temp(project_name, &bundle.meta.id, &plan);
+    }
 
     info!(
         project = %bundle.meta.id.project,

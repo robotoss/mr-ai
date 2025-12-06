@@ -118,6 +118,7 @@ pub async fn build_two_phase_review(
     cfg: ProviderConfig,
     id: ChangeRequestId,
     llm_profiles: Arc<LlmServiceProfiles>,
+    save_logs: bool,
 ) -> GitContextEngineResult<LlmReviewRequest> {
     info!(
         provider = ?cfg.kind,
@@ -160,6 +161,7 @@ pub async fn build_two_phase_review(
         &rules,
         &prereview_rag,
         llm_profiles,
+        save_logs,
     )
     .await?;
 
@@ -185,7 +187,9 @@ pub async fn build_two_phase_review(
         Some(&prereview_plan),
     )?;
 
-    dump_llm_request_to_temp(&final_request, &bundle.meta.id);
+    if save_logs {
+        dump_llm_request_to_temp(&final_request, &bundle.meta.id);
+    }
 
     info!(
         project = %bundle.meta.id.project,
