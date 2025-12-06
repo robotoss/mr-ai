@@ -54,7 +54,6 @@ Everything runs in your own environment: **no code leaves your infrastructure**.
 ├── code_data/           # Local project data (clones, AST/JSONL, vector artifacts)
 ├── ssh_keys/            # SSH keys for repo access (never commit private keys)
 ├── .env                 # Runtime configuration (not in VCS)
-├── bootstrap_ollama.sh  # Helper to start Ollama + Qdrant stack
 ├── docker-compose.yml   # Local Docker stack (Ollama + Qdrant)
 ````
 
