@@ -26,7 +26,10 @@ use crate::git_providers::{ProviderClient, ProviderConfig};
 use crate::prompt::LlmReviewRequest;
 use crate::prompt::builder::build_llm_review_request;
 use crate::rules::builtin::default_rule_set;
-use crate::{ast_context::NoopAstContextProvider, rag_layer::build_rag_contexts_for_targets};
+use crate::{
+    ast_context::{from_index::index_changeset_with_code_indexer, DiffAstContextProvider, NoopAstContextProvider},
+    rag_layer::build_rag_contexts_for_targets,
+};
 
 /// Builds AI request data for a single change request.
 ///
@@ -175,13 +178,37 @@ pub async fn build_two_phase_review(
     )
     .await;
 
-    // 4) final request in LLM for review
-    let ast_provider = NoopAstContextProvider;
+    // 4) Index changed files with code-indexer to extract AST signatures
+    let repo_root = std::path::PathBuf::from(format!("code_data/{}", project_name));
+    let ast_provider: Box<dyn crate::ast_context::AstContextProvider> = if repo_root.exists() {
+        match index_changeset_with_code_indexer(&repo_root, &bundle.changes, false) {
+            Ok(chunks) => {
+                debug!(
+                    chunks = chunks.len(),
+                    "build_two_phase_review: indexed chunks from changed files"
+                );
+                Box::new(DiffAstContextProvider::new(chunks))
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "build_two_phase_review: failed to index changed files, using noop AST provider"
+                );
+                Box::new(NoopAstContextProvider)
+            }
+        }
+    } else {
+        warn!(
+            repo_root = %repo_root.display(),
+            "build_two_phase_review: repo root does not exist, using noop AST provider"
+        );
+        Box::new(NoopAstContextProvider)
+    };
 
     let final_request = crate::prompt::builder::build_llm_review_request(
         &bundle,
         &targets,
-        &ast_provider,
+        ast_provider.as_ref(),
         &rules,
         &enriched_rag,
         Some(&prereview_plan),

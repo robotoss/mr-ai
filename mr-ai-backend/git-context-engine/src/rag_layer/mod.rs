@@ -4,6 +4,8 @@
 //! diff previews and queries the rag-base vector index (`search_code`).
 //! The result can then be attached to LLM prompts for MR review.
 
+use std::collections::HashSet;
+
 use crate::{
     diff_model::ReviewTarget,
     pre_review::{PreReviewHypothesis, PreReviewPlan, PreReviewTargetPlan, RequiredContextHint},
@@ -52,6 +54,9 @@ pub struct FocusedRagBlock {
 /// This function is best-effort: on rag-base errors it logs a warning
 /// and returns empty `general_results` for that target so the review
 /// pipeline can continue.
+///
+/// IMPROVEMENT: Now includes cross-file relationship queries to find
+/// related changes in other files of the same MR.
 pub async fn build_rag_contexts_for_targets(
     project_name: &str,
     targets: &[ReviewTarget],
@@ -60,9 +65,15 @@ pub async fn build_rag_contexts_for_targets(
     let k = k.unwrap_or(8);
     let mut out = Vec::with_capacity(targets.len());
 
+    // Build a map of all changed files for cross-file relationship detection
+    let changed_files: HashSet<String> = targets
+        .iter()
+        .map(|t| t.file_path.clone())
+        .collect();
+
     for target in targets {
-        // 1) Build a text query from the diff hunk.
-        let query = build_query_from_review_target(target);
+        // 1) Build a text query from the diff hunk with improved extraction
+        let query = build_query_from_review_target_enhanced(target, &changed_files);
 
         // 2) Query rag-base for semantically similar code.
         let results = match search_code(project_name, &query, Some(k)).await {
@@ -91,21 +102,90 @@ pub async fn build_rag_contexts_for_targets(
     out
 }
 
-/// Build a RAG query string from a single review target.
+/// Enhanced query builder that extracts function/class names and includes
+/// cross-file relationship hints for better semantic search.
 ///
-/// This uses `diff_preview` as the base query and truncates it to a
-/// reasonable length. You can customize this to strip metadata and keep
-/// only added lines if needed.
-fn build_query_from_review_target(target: &ReviewTarget) -> String {
+/// This version:
+/// 1. Extracts identifiers (function/class names) from added lines
+/// 2. Includes file path context
+/// 3. Adds hints about other changed files in the same MR for cross-file relationship detection
+fn build_query_from_review_target_enhanced(
+    target: &ReviewTarget,
+    changed_files: &std::collections::HashSet<String>,
+) -> String {
     const MAX_QUERY_CHARS: usize = 4000;
 
-    let mut q = target.diff_preview.clone();
+    let mut parts = Vec::new();
 
-    if q.len() > MAX_QUERY_CHARS {
-        q.truncate(MAX_QUERY_CHARS);
+    // 1) Extract meaningful identifiers from added lines (function/class names)
+    let identifiers = extract_identifiers_from_diff(&target.diff_preview);
+    parts.extend(identifiers);
+
+    // 2) Include the full diff preview (truncated)
+    let mut diff_text = target.diff_preview.clone();
+    if diff_text.len() > MAX_QUERY_CHARS {
+        diff_text.truncate(MAX_QUERY_CHARS);
+    }
+    parts.push(diff_text);
+
+    // 3) Add file path as context (helps with module/package-level matches)
+    parts.push(target.file_path.clone());
+
+    // 4) If there are other changed files, mention them to help find cross-file relationships
+    // This helps RAG find code that uses functions/classes modified in this MR
+    if changed_files.len() > 1 {
+        let other_files: Vec<String> = changed_files
+            .iter()
+            .filter(|f| *f != &target.file_path)
+            .cloned()
+            .take(3) // Limit to avoid too long queries
+            .collect();
+        if !other_files.is_empty() {
+            parts.push(format!("related changes in: {}", other_files.join(", ")));
+        }
     }
 
-    q
+    parts.join(" ")
+}
+
+/// Extract meaningful identifiers (function names, class names, etc.) from diff text.
+///
+/// Focuses on added lines (lines starting with '+') and extracts identifiers
+/// that likely represent function/class/method names.
+fn extract_identifiers_from_diff(diff_text: &str) -> Vec<String> {
+    let mut identifiers = HashSet::new();
+
+    for line in diff_text.lines() {
+        let line = line.trim_start();
+        // Focus on added lines
+        if !line.starts_with('+') {
+            continue;
+        }
+
+        // Remove diff markers
+        let code_line = line.trim_start_matches('+').trim_start();
+
+        // Extract potential function/class/method names
+        // This is a simple heuristic - could be improved with language-specific parsing
+        for word in code_line.split_whitespace() {
+            // Look for patterns like: "def function_name", "class ClassName", "function functionName"
+            // or identifiers followed by '('
+            let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            if clean.len() >= 3 && clean.len() <= 50 {
+                // Common patterns: function definitions, class definitions, method calls
+                if code_line.contains(&format!("{}(", clean))
+                    || code_line.contains(&format!("def {}", clean))
+                    || code_line.contains(&format!("class {}", clean))
+                    || code_line.contains(&format!("fn {}", clean))
+                    || code_line.contains(&format!("function {}", clean))
+                {
+                    identifiers.insert(clean.to_string());
+                }
+            }
+        }
+    }
+
+    identifiers.into_iter().take(10).collect() // Limit to top 10 identifiers
 }
 
 /// Build enriched RAG contexts combining:

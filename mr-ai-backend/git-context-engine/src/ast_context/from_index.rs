@@ -8,7 +8,9 @@
 //!     provider `ChangeSet` into `CodeChunk`s via `index_diff_model`
 //!     (to feed a vector database).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tracing::{debug, warn};
 
@@ -22,6 +24,75 @@ use code_indexer::index_diff_model;
 use code_indexer::types::CodeChunk;
 
 use super::{AstContext, AstContextProvider, CodeContextSnippet, CodeIndexClient, CodeIndexQuery};
+
+/// AST context provider that extracts signatures from code-indexer chunks.
+///
+/// This provider uses pre-indexed CodeChunks from changed files and extracts
+/// only important signatures (functions, classes, methods) that overlap with
+/// the changed lines in each target.
+///
+/// This is more efficient than indexing on-demand and focuses on what actually changed.
+pub struct DiffAstContextProvider {
+    /// Map from file path to chunks indexed for that file.
+    chunks_by_file: Arc<HashMap<String, Vec<CodeChunk>>>,
+}
+
+impl DiffAstContextProvider {
+    /// Creates a new provider from pre-indexed chunks.
+    ///
+    /// The chunks should already be indexed for the changed files in the MR.
+    pub fn new(chunks: Vec<CodeChunk>) -> Self {
+        let mut chunks_by_file: HashMap<String, Vec<CodeChunk>> = HashMap::new();
+
+        for chunk in chunks {
+            chunks_by_file
+                .entry(chunk.file.clone())
+                .or_insert_with(Vec::new)
+                .push(chunk);
+        }
+
+        Self {
+            chunks_by_file: Arc::new(chunks_by_file),
+        }
+    }
+
+    /// Creates an empty provider (returns empty context for all targets).
+    pub fn empty() -> Self {
+        Self {
+            chunks_by_file: Arc::new(HashMap::new()),
+        }
+    }
+}
+
+impl AstContextProvider for DiffAstContextProvider {
+    fn lookup_context_for_target(
+        &self,
+        target: &ReviewTarget,
+    ) -> GitContextEngineResult<AstContext> {
+        debug!(
+            file = %target.file_path,
+            hunk_index = target.hunk_index,
+            "ast_context: extracting signatures from indexed chunks"
+        );
+
+        let file_chunks = self
+            .chunks_by_file
+            .get(&target.file_path)
+            .map(|chunks| chunks.as_slice())
+            .unwrap_or(&[]);
+
+        let snippets = extract_signatures_from_chunks_for_target(file_chunks, target);
+
+        debug!(
+            file = %target.file_path,
+            hunk_index = target.hunk_index,
+            snippet_count = snippets.len(),
+            "ast_context: extracted signatures from chunks"
+        );
+
+        Ok(AstContext { snippets })
+    }
+}
 
 /// AST context provider backed by an external code index.
 ///
@@ -189,4 +260,95 @@ pub fn index_changeset_with_code_indexer(
     );
 
     Ok(chunks)
+}
+
+/// Extract only important signatures (functions, classes, methods) from code chunks
+/// that overlap with changed lines in a diff hunk.
+///
+/// This function filters CodeChunks to return only relevant signatures that intersect
+/// with the modified lines, reducing noise and focusing on what actually changed.
+pub fn extract_signatures_from_chunks_for_target(
+    chunks: &[CodeChunk],
+    target: &ReviewTarget,
+) -> Vec<CodeContextSnippet> {
+    let mut snippets = Vec::new();
+
+    // Collect line numbers that were changed in this hunk
+    let changed_lines: std::collections::HashSet<u32> = target
+        .hunk
+        .lines
+        .iter()
+        .filter_map(|line| match line {
+            crate::git_providers::types::DiffLine::Added { new_line, .. } => Some(*new_line),
+            crate::git_providers::types::DiffLine::Removed { old_line, .. } => Some(*old_line),
+            crate::git_providers::types::DiffLine::Context { .. } => None,
+        })
+        .collect();
+
+    if changed_lines.is_empty() {
+        return snippets;
+    }
+
+    // Filter chunks that belong to the target file
+    let file_chunks: Vec<&CodeChunk> = chunks
+        .iter()
+        .filter(|chunk| chunk.file == target.file_path)
+        .collect();
+
+    for chunk in file_chunks {
+        // Check if the chunk's span overlaps with changed lines
+        // span.start_row and span.end_row are 0-based, but DiffLine uses 1-based line numbers
+        let chunk_start_line = (chunk.span.start_row + 1) as u32;
+        let chunk_end_line = (chunk.span.end_row + 1) as u32;
+
+        let overlaps = changed_lines.iter().any(|&line| {
+            line >= chunk_start_line && line <= chunk_end_line
+        });
+
+        if !overlaps {
+            continue;
+        }
+
+        // Only include important symbol kinds (functions, classes, methods, etc.)
+        let is_important = matches!(
+            chunk.kind,
+            code_indexer::types::SymbolKind::Function
+                | code_indexer::types::SymbolKind::Method
+                | code_indexer::types::SymbolKind::Class
+                | code_indexer::types::SymbolKind::Interface
+                | code_indexer::types::SymbolKind::Enum
+                | code_indexer::types::SymbolKind::Constructor
+                | code_indexer::types::SymbolKind::Mixin
+                | code_indexer::types::SymbolKind::Extension
+        );
+
+        if !is_important {
+            continue;
+        }
+
+        // Prefer signature if available, otherwise use snippet
+        let code_text = if let Some(ref sig) = chunk.signature {
+            sig.clone()
+        } else if let Some(ref snip) = chunk.snippet {
+            // Limit snippet size to avoid overwhelming the prompt
+            if snip.len() > 500 {
+                format!("{}...", &snip[..500])
+            } else {
+                snip.clone()
+            }
+        } else {
+            continue;
+        };
+
+        let label = format!("{} {}", chunk.kind, chunk.symbol);
+        snippets.push(CodeContextSnippet {
+            label,
+            file_path: chunk.file.clone(),
+            start_line: chunk_start_line,
+            end_line: chunk_end_line,
+            code: code_text,
+        });
+    }
+
+    snippets
 }

@@ -3,6 +3,7 @@
 pub mod from_index;
 mod types;
 
+pub use from_index::DiffAstContextProvider;
 pub use types::{
     AstContext, CodeContextSnippet, CodeIndexClient, CodeIndexQuery, CodeIndexSnippet,
     collect_terms,
