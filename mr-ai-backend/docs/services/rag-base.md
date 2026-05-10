@@ -60,7 +60,6 @@ Loaded from env via `RagConfig::from_env(Some(project_name))`:
 | `QDRANT_DISTANCE` | `Cosine` / `Dot` / `Euclid`. | `Cosine` |
 | `QDRANT_BATCH_SIZE` | Upsert batch size. | `256` |
 | `EMBEDDING_DIM` | Expected vector dimension (validated against gateway output). | `1024` |
-| `EMBEDDING_CONCURRENCY` | Parallel embedding workers. | `4` |
 | `RAG_DISABLE` | Short-circuit search to empty. | `false` |
 | `RAG_TOP_K` | Default `k` for search. | `20` |
 | `RAG_MIN_SCORE` | Minimum vector score. | `0.0` |

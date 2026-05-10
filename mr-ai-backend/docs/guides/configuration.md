@@ -78,8 +78,7 @@ Loaded by [`RagConfig::from_env`](../../rag-base/src/structs/rag_base_config.rs)
 | `QDRANT_COLLECTION` | `mr_ai_code` | Collection name. |
 | `QDRANT_DISTANCE` | `Cosine` | One of `Cosine`, `Dot`, `Euclid`. |
 | `QDRANT_BATCH_SIZE` | `256` | Upsert batch size. |
-| `EMBEDDING_DIM` | `1024` | Sanity-check on vectors returned by gateway. |
-| `EMBEDDING_CONCURRENCY` | `4` | Parallel embedding workers. |
+| `EMBEDDING_DIM` | `1024` | Strict invariant on vectors returned by gateway. Must match the gateway's embedding model. |
 | `RAG_DISABLE` | `false` | Short-circuit search to empty. |
 | `RAG_TOP_K` | `20` | Default `k`. |
 | `RAG_MIN_SCORE` | `0.0` | Minimum vector score. |
