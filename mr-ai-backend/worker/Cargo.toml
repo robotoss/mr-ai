@@ -19,6 +19,7 @@ code-indexer = { path = "../code-indexer" }
 git-context-engine = { path = "../git-context-engine" }
 ai-llm-service = { path = "../ai-llm-service" }
 ai-review-engine = { path = "../ai-review-engine" }
+rag-base = { path = "../rag-base" }
 secrets = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

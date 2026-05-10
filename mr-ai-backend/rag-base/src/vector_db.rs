@@ -370,7 +370,6 @@ pub async fn scroll_points_filtered(
 /// Wired into the worker in S2 (incremental dedup path) and into
 /// `/admin/reindex_repo` in S5. Public until then so downstream crates
 /// can call it once `ReindexHandler` lands.
-#[allow(dead_code)]
 pub async fn delete_by_filter(
     client: &Qdrant,
     cfg: &RagConfig,
@@ -399,7 +398,6 @@ pub async fn delete_by_filter(
 
 /// Drop every point belonging to a given repo (used by `/admin/reindex_repo`
 /// and by the incremental dedup path when a repo is fully removed).
-#[allow(dead_code)]
 pub async fn delete_by_repo(
     client: &Qdrant,
     cfg: &RagConfig,
@@ -412,7 +410,6 @@ pub async fn delete_by_repo(
 
 /// Drop every chunk attributed to a specific file inside a repo. Used by
 /// the incremental dedup path when a file disappears from the worktree.
-#[allow(dead_code)]
 pub async fn delete_by_file(
     client: &Qdrant,
     cfg: &RagConfig,
@@ -432,14 +429,12 @@ pub async fn delete_by_file(
 /// pipeline diffs the result with the newly-emitted chunks to decide
 /// keep / upsert / delete sets without re-embedding unchanged content.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ChunkMeta {
     pub id: String,
     pub content_sha256: String,
     pub file: String,
 }
 
-#[allow(dead_code)]
 pub async fn scroll_repo_chunk_metas(
     client: &Qdrant,
     cfg: &RagConfig,
@@ -491,7 +486,6 @@ pub async fn scroll_repo_chunk_metas(
     Ok(all)
 }
 
-#[allow(dead_code)]
 fn extract_payload_str(
     payload: &std::collections::HashMap<String, qdrant_client::qdrant::Value>,
     key: &str,
@@ -677,8 +671,48 @@ fn map_retrieved_point_to_hit(rp: RetrievedPoint) -> SearchHit {
 }
 
 /// Deterministically hash an arbitrary string to a u64 ID.
-fn hash_to_u64(s: &str) -> u64 {
+pub(crate) fn hash_to_u64(s: &str) -> u64 {
     let digest = blake3::hash(s.as_bytes());
     let bytes = &digest.as_bytes()[..8];
     u64::from_le_bytes(bytes.try_into().expect("slice with incorrect length"))
+}
+
+/// Delete Qdrant points by their **string** id (the rich
+/// `<repo_uuid>:<file>:<symbol_path>:<sha[..16]>` value carried in the
+/// payload `id` field). The IDs are re-hashed with the same scheme as
+/// `upsert_batch` so storage layout stays consistent.
+pub async fn delete_by_string_ids(
+    client: &Qdrant,
+    cfg: &RagConfig,
+    ids: &[String],
+) -> Result<(), RagBaseError> {
+    use qdrant_client::qdrant::points_selector::PointsSelectorOneOf;
+    use qdrant_client::qdrant::{DeletePointsBuilder, PointId, PointsIdsList};
+
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let point_ids: Vec<PointId> = ids
+        .iter()
+        .map(|s| PointId::from(hash_to_u64(s)))
+        .collect();
+    let selector = PointsSelectorOneOf::Points(PointsIdsList { ids: point_ids });
+    client
+        .delete_points(
+            DeletePointsBuilder::new(&cfg.qdrant.collection)
+                .points(selector)
+                .wait(true),
+        )
+        .await
+        .map_err(|e| {
+            error!(target: "rag_base::vector_db", error = %e, "delete_by_string_ids failed");
+            RagBaseError::Qdrant(format!("delete_points: {e}"))
+        })?;
+    info!(
+        target: "rag_base::vector_db",
+        collection = %cfg.qdrant.collection,
+        deleted = ids.len(),
+        "delete_by_string_ids: done"
+    );
+    Ok(())
 }

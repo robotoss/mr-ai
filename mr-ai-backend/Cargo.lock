@@ -2355,6 +2355,7 @@ dependencies = [
  "ai-llm-service",
  "blake3",
  "code-indexer",
+ "domain",
  "qdrant-client",
  "regex",
  "reqwest",
@@ -2364,6 +2365,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4567,6 +4569,7 @@ dependencies = [
  "git-context-engine",
  "persistence",
  "project-code-store",
+ "rag-base",
  "secrets",
  "serde",
  "serde_json",

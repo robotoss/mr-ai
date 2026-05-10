@@ -35,6 +35,7 @@ sequenceDiagram
     Re->>Analyzer: analyze_chunks(chunks)
     Analyzer-->>Re: AnalysisOutcome
     Re->>Graph: persist_graph(repo_id, nodes, edges)
+    Re->>Qdrant: rag_base::upsert_repo_chunks (scroll → diff → embed → upsert/delete)
     Re->>Reviews: index_state.mark_indexed(head_sha)
     Re-->>Git: WorktreeHandle::Drop (cleanup)
 
@@ -57,7 +58,8 @@ sequenceDiagram
 | Index workspace | `code_indexer::index_workspace` | Public S6 helper; runs inside `tokio::task::spawn_blocking`. Re-roots `chunk.file` to repo-relative paths so graph IDs stay stable across worktrees. |
 | Analyze | `code_indexer::analyzer::DartAnalyzer::analyze_chunks` | Pure data → `(NodeIntent, EdgeIntent, Coverage)`. |
 | Persist | `persistence::graph_persist::persist_graph` | Resolves fqns to `NodeId`s, materialises placeholders for unknown endpoints. |
-| Mark indexed | `persistence::repos::index_state::mark_indexed` | Only when `head_sha` is supplied. |
+| Embed + upsert (S2) | `rag_base::upsert_repo_chunks` | Diffs `content_sha256` against Qdrant via `scroll_repo_chunk_metas`; keeps unchanged chunks, embeds only the upsert set, deletes orphans by stable id. See [Ingestion Pipeline](ingestion-pipeline.md). |
+| Mark indexed | `persistence::repos::index_state::mark_indexed` | Only when `head_sha` is supplied. Also clears `last_indexed_path_prefix` (S9 resume checkpoint). |
 | Cleanup | `WorktreeHandle::Drop` | `git worktree prune` runs even on early exit. |
 
 LSP enrichment is gated off (`enable_lsp = false`) for now — the worker
