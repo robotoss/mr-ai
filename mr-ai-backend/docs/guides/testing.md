@@ -66,9 +66,18 @@ cargo test --workspace --tests -- --ignored
 - end-to-end webhook → enqueue → claim → complete → redelivery dedup
   flow (`webhook_to_queue_to_completion_flow`).
 
-Future additions: Qdrant container + `rag-base` round-trip; an
-HTTP-level smoke that drives the axum router once an `LlmGateway`
-test fixture lands.
+[`rag-base/tests/integration.rs`](../../rag-base/tests/integration.rs)
+boots a real Qdrant via testcontainers and round-trips
+`create_collection` → `upsert_points` → `search_points`. Same
+`#[ignore]` gate; same one-line invocation.
+
+[`api/tests/http_smoke.rs`](../../api/tests/http_smoke.rs) drives the
+GitLab webhook handler through `axum::Router::oneshot` against the
+testcontainers Postgres + the
+[`ai_llm_service::test_support::dummy_gateway`](../../ai-llm-service/src/test_support.rs)
+fixture. Asserts `202 Accepted` on first delivery, `webhook_events` +
+`jobs` rows populated, replay returns `200 OK` with
+`duplicate=true` and no extra job.
 
 ## Dart sidecar tests
 

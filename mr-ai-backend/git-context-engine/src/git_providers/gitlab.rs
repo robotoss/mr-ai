@@ -405,6 +405,10 @@ struct GitLabMr {
     updated_at: DateTime<Utc>,
     source_branch: String,
     target_branch: String,
+    /// Head commit SHA. Kept for API completeness — `diff_refs.head_sha`
+    /// supersedes it for inline-comment positioning, but some operators
+    /// audit raw responses that include this value.
+    #[allow(dead_code)]
     sha: String,
     diff_refs: GitLabDiffRefs,
     author: GitLabUser,
@@ -429,6 +433,9 @@ struct GitLabUser {
 #[derive(Debug, Deserialize)]
 struct GitLabMrCommit {
     id: String,
+    /// Truncated commit hash; surfaced by GitLab in commit listings but
+    /// not needed for review assembly. Retained for audit traces.
+    #[allow(dead_code)]
     short_id: String,
     title: String,
     message: String,

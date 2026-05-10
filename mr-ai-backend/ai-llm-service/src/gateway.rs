@@ -149,6 +149,54 @@ impl LlmGateway {
         })
     }
 
+    /// Build a gateway from explicit provider trait objects. Intended for
+    /// tests and other callers that already own concrete provider
+    /// implementations and do not want the env-driven `from_config` path
+    /// (with its `pricing.toml` lookup).
+    pub fn with_providers(
+        fast: Arc<dyn crate::traits::LlmProvider>,
+        smart: Arc<dyn crate::traits::LlmProvider>,
+        embedding: Arc<dyn crate::traits::EmbeddingProvider>,
+    ) -> Self {
+        let fast_meta = ProviderMeta {
+            provider: fast.provider_kind(),
+            model: fast.model().to_owned(),
+            endpoint: fast.endpoint().to_owned(),
+        };
+        let smart_meta = ProviderMeta {
+            provider: smart.provider_kind(),
+            model: smart.model().to_owned(),
+            endpoint: smart.endpoint().to_owned(),
+        };
+        let embedding_meta = ProviderMeta {
+            provider: embedding.provider_kind(),
+            model: embedding.model().to_owned(),
+            endpoint: embedding.endpoint().to_owned(),
+        };
+
+        let mut completions: HashMap<ModelTier, Arc<dyn crate::traits::LlmProvider>> =
+            HashMap::new();
+        completions.insert(ModelTier::Fast, fast);
+        completions.insert(ModelTier::Smart, smart);
+        let mut embeddings: HashMap<EmbeddingTier, Arc<dyn crate::traits::EmbeddingProvider>> =
+            HashMap::new();
+        embeddings.insert(EmbeddingTier::Default, embedding);
+
+        Self {
+            completions,
+            embeddings,
+            cost: CostEstimator::new(PriceTable::empty()),
+            fast_meta,
+            smart_meta,
+            embedding_meta,
+            counters: UsageCounters::new(),
+            recorder: Arc::new(crate::usage::NoopUsageRecorder),
+            record_previews: false,
+            redact_secrets: true,
+            preview_chars: 0,
+        }
+    }
+
     /// Routes a completion to the requested tier and emits the analytics log line.
     pub async fn complete(
         &self,

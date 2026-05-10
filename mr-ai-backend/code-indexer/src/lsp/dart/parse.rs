@@ -11,7 +11,13 @@ pub struct ByteRange {
 
 #[derive(Debug, Clone)]
 pub struct LspSymbolInfo {
+    /// Symbol name, retained for telemetry/debug logs even though the
+    /// merge pipeline keys off `range`.
+    #[allow(dead_code)]
     pub name: String,
+    /// Optional one-line signature surfaced by the LSP. Used by future
+    /// enrichment passes; consumers today read it from `LspEnrichment`.
+    #[allow(dead_code)]
     pub signature: Option<String>,
     pub range: ByteRange, // absolute byte range in the file
 }

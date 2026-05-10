@@ -19,6 +19,7 @@ pub mod health;
 pub mod providers;
 pub mod sigv4;
 pub mod telemetry;
+pub mod test_support;
 pub mod traits;
 pub mod unified;
 pub mod usage;

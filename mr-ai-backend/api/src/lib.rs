@@ -1,9 +1,9 @@
 use std::{env, sync::Arc};
 
-mod core;
+pub mod core;
 mod error_handler;
 mod middleware_layer;
-mod routes;
+pub mod routes;
 
 use ai_llm_service::LlmGateway;
 use axum::{

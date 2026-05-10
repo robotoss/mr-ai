@@ -45,6 +45,78 @@ int compute(int n) {
     });
   });
 
+  group('dataFlowEdgesForUnit (cross-procedure)', () {
+    test('emits param edges for positional argument passed by name', () {
+      const source = '''
+int outer() {
+  var seed = 42;
+  return inner(seed);
+}
+''';
+      final unit = parseString(content: source).unit;
+      final edges = AnalyzerEngine.dataFlowEdgesForUnit(unit, 'lib/x.dart');
+      final crossEdges = edges
+          .where((e) => (e['to_fqn'] as String).startsWith('inner::param'))
+          .toList();
+      expect(crossEdges, hasLength(1));
+      final meta = crossEdges.first['meta'] as Map<String, Object?>;
+      expect(meta['callee'], 'inner');
+      expect(meta['arg'], 'seed');
+      expect(meta['positional'], 0);
+    });
+
+    test('uses named-parameter label when arg is named', () {
+      const source = '''
+int outer() {
+  var threshold = 7;
+  return classify(score: threshold);
+}
+''';
+      final unit = parseString(content: source).unit;
+      final edges = AnalyzerEngine.dataFlowEdgesForUnit(unit, 'lib/x.dart');
+      final crossEdges = edges
+          .where((e) => (e['to_fqn'] as String).startsWith('classify::param:'))
+          .toList();
+      expect(crossEdges, hasLength(1));
+      expect(crossEdges.first['to_fqn'], 'classify::param:score');
+    });
+
+    test('skips literal arguments and unknown identifiers', () {
+      const source = '''
+int outer() {
+  var seed = 42;
+  return both(seed, 99, undeclared);
+}
+''';
+      final unit = parseString(content: source).unit;
+      final edges = AnalyzerEngine.dataFlowEdgesForUnit(unit, 'lib/x.dart');
+      final crossEdges = edges
+          .where((e) => (e['to_fqn'] as String).startsWith('both::param'))
+          .toList();
+      expect(crossEdges, hasLength(1));
+      final meta = crossEdges.first['meta'] as Map<String, Object?>;
+      expect(meta['arg'], 'seed');
+      expect(meta['positional'], 0);
+    });
+
+    test('parameters of the caller flow into nested calls', () {
+      const source = '''
+int outer(int n) {
+  return inner(n);
+}
+''';
+      final unit = parseString(content: source).unit;
+      final edges = AnalyzerEngine.dataFlowEdgesForUnit(unit, 'lib/x.dart');
+      expect(
+        edges.any((e) =>
+            e['to_fqn'] == 'inner::param@0' &&
+            (e['meta'] as Map<String, Object?>)['arg'] == 'n'),
+        isTrue,
+        reason: 'parameter `n` should be a data-flow source for `inner(n)`',
+      );
+    });
+  });
+
   group('controlFlowEdgesForUnit', () {
     test('emits one branch edge per if/for/while/switch/try inside a function',
         () {

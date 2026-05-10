@@ -20,3 +20,6 @@ tracing = { workspace = true }
 
 ai-llm-service = { path = "../ai-llm-service" }
 code-indexer = { path = "../code-indexer" }
+
+[dev-dependencies]
+testcontainers = "0.23"

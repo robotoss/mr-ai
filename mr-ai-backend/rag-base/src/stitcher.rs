@@ -13,6 +13,7 @@ use crate::structs::rag_store::SearchHit;
 use crate::structs::search_result::CodeSearchResult;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ChunkPiece {
     id: String,
     file: String,
@@ -147,6 +148,7 @@ pub async fn search_hits_to_code_results(
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct Block {
     file: String,
     start_row: u32,

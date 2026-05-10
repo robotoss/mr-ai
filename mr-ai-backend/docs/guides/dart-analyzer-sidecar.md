@@ -97,7 +97,8 @@ path. The worker logs `Reindex: sidecar disabled` and continues.
 | --- | --- | --- |
 | `imports`, `defines`, `calls`, `inherits`, `type_uses` | tree-sitter / chunk graph (S3) | Stable, no sidecar required. |
 | `async_boundary` | sidecar AstVisitor | `<function_fqn>` → `await:<callee>` per `AwaitExpression`; falls back to the LSP-tag heuristic when the sidecar is disabled. |
-| `data_flow` | sidecar AstVisitor | Intra-procedural `<function_fqn>::var:<name>` → `<function_fqn>::use:<name>@<offset>`; one edge per identifier reference matching a local declaration. |
+| `data_flow` (intra-procedural) | sidecar AstVisitor | `<function_fqn>::var:<name>` → `<function_fqn>::use:<name>@<offset>`; one edge per identifier reference matching a local declaration or parameter. |
+| `data_flow` (cross-procedure) | sidecar AstVisitor | For every `MethodInvocation` inside a function body, each `SimpleIdentifier` argument that names a local var / parameter emits `<caller_fqn>::var:<name>` → `<callee>::param@<index>` (positional) or `<callee>::param:<label>` (named). Lexical match — no element resolution required. |
 | `control_flow` | sidecar AstVisitor | One `<function_fqn>` → `<function_fqn>::branch:<kind>@<offset>` edge per `if`/`for`/`while`/`do_while`/`switch`/`try` statement. |
 
 Edge intents land in `graph_edges` via the existing
@@ -106,8 +107,9 @@ schema change needed.
 
 ### Future refinements
 
-- Inter-procedural data flow (uses Element/ElementResolver instead of
-  syntactic name match).
+- Element-resolution-driven data flow (current cross-procedure pass
+  is lexical; resolving the `MethodInvocation`'s static element gives
+  precise FQNs for the callee instead of an unscoped name).
 - Jump-style control-flow edges (`break`, `continue`, `return`,
   `throw`) with branch destinations resolved.
 - Effect-tracking on async boundaries (cancellation, error propagation).

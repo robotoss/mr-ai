@@ -175,6 +175,8 @@ class _DataFlowVisitor extends _ScopedVisitor {
 
   void _emitVarUseEdges(FunctionBody body, String functionFqn) {
     final defs = <String, int>{};
+    // Parameters declared by the surrounding function are first-class
+    // data-flow sources alongside locals.
     body.visitChildren(_VarCollector(defs));
     final uses = _IdentifierUseCollector(defs);
     body.visitChildren(uses);
@@ -187,6 +189,14 @@ class _DataFlowVisitor extends _ScopedVisitor {
         'meta': {'name': use.name, 'offset': use.offset},
       });
     }
+
+    // Cross-procedure: for every MethodInvocation in the body, emit a
+    // syntactic data-flow edge from each local-variable argument to the
+    // callee's positional parameter slot. No element resolution required —
+    // matches by lexical name. The to_fqn is intentionally callee-name-
+    // scoped (no FQN guesswork) so edges remain stable when the callee
+    // lives in another file.
+    body.visitChildren(_CallSiteVisitor(defs, functionFqn, edges));
   }
 
   @override
@@ -214,6 +224,83 @@ class _VarCollector extends RecursiveAstVisitor<void> {
   void visitVariableDeclaration(VariableDeclaration node) {
     defs.putIfAbsent(node.name.lexeme, () => node.offset);
     super.visitVariableDeclaration(node);
+  }
+
+  @override
+  void visitSimpleFormalParameter(SimpleFormalParameter node) {
+    final name = node.name?.lexeme;
+    if (name != null) {
+      defs.putIfAbsent(name, () => node.offset);
+    }
+    super.visitSimpleFormalParameter(node);
+  }
+
+  @override
+  void visitDefaultFormalParameter(DefaultFormalParameter node) {
+    final name = node.name?.lexeme;
+    if (name != null) {
+      defs.putIfAbsent(name, () => node.offset);
+    }
+    super.visitDefaultFormalParameter(node);
+  }
+}
+
+class _CallSiteVisitor extends RecursiveAstVisitor<void> {
+  _CallSiteVisitor(this.defs, this.callerFqn, this.edges);
+  final Map<String, int> defs;
+  final String callerFqn;
+  final List<Map<String, Object?>> edges;
+
+  @override
+  void visitMethodInvocation(MethodInvocation node) {
+    final callee = node.methodName.name;
+    final args = node.argumentList.arguments;
+    for (var index = 0; index < args.length; index++) {
+      final arg = args[index];
+      String? localName;
+      int slot = index;
+      if (arg is SimpleIdentifier) {
+        localName = arg.name;
+      } else if (arg is NamedExpression) {
+        final inner = arg.expression;
+        if (inner is SimpleIdentifier) {
+          localName = inner.name;
+          // Named arg keeps its label as the slot identifier.
+          slot = -1;
+        }
+        if (localName != null && defs.containsKey(localName)) {
+          edges.add({
+            'from_fqn': '$callerFqn::var:$localName',
+            'to_fqn': '$callee::param:${arg.name.label.name}',
+            'edge_type': 'data_flow',
+            'weight': 0.6,
+            'meta': {
+              'callee': callee,
+              'arg': localName,
+              'named': arg.name.label.name,
+              'offset': arg.offset,
+            },
+          });
+        }
+        super.visitMethodInvocation(node);
+        return;
+      }
+      if (localName != null && defs.containsKey(localName)) {
+        edges.add({
+          'from_fqn': '$callerFqn::var:$localName',
+          'to_fqn': '$callee::param@$slot',
+          'edge_type': 'data_flow',
+          'weight': 0.6,
+          'meta': {
+            'callee': callee,
+            'arg': localName,
+            'positional': slot,
+            'offset': arg.offset,
+          },
+        });
+      }
+    }
+    super.visitMethodInvocation(node);
   }
 }
 
