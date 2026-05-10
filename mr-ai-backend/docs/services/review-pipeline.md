@@ -84,22 +84,46 @@ The handler:
    sets the row to `published`. Failures land as `failed` with the error
    text in `bundle.error`.
 
-The actual LLM completion and inline-comment posting happen **outside**
-the worker today — that wiring (rerank, posting via
-`ai_review_engine::publish`) ships in S7. The serialised
-`LlmReviewRequest` in `bundle` is the hand-off contract: anything reading
-the row can render the prompt, replay the call, or audit the review
-input.
+After the bundle lands, two optional stages run depending on env flags:
+
+### Optional rerank (`RAG_LLM_RERANK_ENABLED`)
+
+When true, the handler calls
+[`rerank_review_request`](../../git-context-engine/src/retrieval/review_rerank.rs)
+which lifts every `LlmReviewTarget` into a `RetrievalSeed` (priority of
+the planned anchor → seed score), runs `llm_rerank` against `ModelTier::Smart`
+under `RAG_RERANK_TIMEOUT_SECS`, and folds the result back into a list of
+`ScoredHit`s keyed by `<file_path>#<hunk_index>`. The output is recorded
+in `mr_reviews.bundle.rerank` for diagnostics; failures degrade to the
+heuristic ordering.
+
+### Optional publishing (`REVIEW_PUBLISH_COMMENTS`)
+
+When true, the handler builds an `ai_review_engine::publish::ProviderConfig`
+from `GIT_API_BASE` + `GIT_TOKEN`, maps `domain::ProviderKind` to
+`ai_review_engine::publish::GitProviderKind` (Gitlab / Github only;
+Bitbucket Cloud has no inline-comment publisher in the engine and is
+recorded as `skipped`), and calls
+[`review_merge_request`](../../ai-review-engine/src/lib.rs). That function
+runs the per-target LLM completion, parses each JSON response into an
+`AiFileReview`, maps anchors to line-level draft comments, and posts them
+via `MrCommentPublisher`. The publish status (`published` / `skipped` /
+`failed`) lands in `mr_reviews.bundle.publish`.
+
+Both stages are off by default so dev environments never publish by
+accident. Set both flags to `true` (or `1`/`yes`) to enable end-to-end
+review with LLM rerank diagnostics.
 
 ## Configuration
 
-No new environment variables. The handler reads:
-
-| Var | Source | Used for |
+| Var | Default | Purpose |
 | --- | --- | --- |
-| `GIT_API_BASE` | existing `AppConfig::from_env` | Provider base URL passed into `ProviderConfig`. |
-| `GIT_TOKEN` | `secrets::sync::resolve` | Provider auth token (env or mounted file). |
-| `PROJECT_NAME` | existing `AppConfig::from_env` | Legacy prompt-assembly project label until per-project routing lands. |
+| `GIT_API_BASE` | (required) | Provider base URL passed into both `git-context-engine` and `ai-review-engine` config. |
+| `GIT_TOKEN` | (required) | Provider auth token. Resolved via `SecretProvider`. |
+| `PROJECT_NAME` | (required) | Legacy prompt-assembly project label until per-project routing lands. |
+| `RAG_LLM_RERANK_ENABLED` | `false` | When `true`, run the LLM rerank diagnostic step after the bundle is built. |
+| `RAG_RERANK_TIMEOUT_SECS` | `20` | Hard timeout for the rerank LLM call. |
+| `REVIEW_PUBLISH_COMMENTS` | `false` | When `true`, run `review_merge_request` and post inline comments. |
 
 ## Failure modes
 

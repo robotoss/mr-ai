@@ -16,12 +16,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ai_llm_service::LlmGateway;
+use ai_review_engine::publish::{
+    GitProviderKind as PublisherProviderKind, ProviderConfig as PublisherConfig,
+};
+use ai_review_engine::review_merge_request;
 use async_trait::async_trait;
 use code_indexer::analyzer::{DartAnalyzer, LanguageAnalyzer};
-use domain::{MrId, ProviderKind};
+use domain::{MrId, ProviderKind, RetrievalConfig};
 use git_context_engine::git_providers::{
     types::ProviderKind as ContextProviderKind, ProviderConfig,
 };
+use git_context_engine::retrieval::rerank_review_request;
 use persistence::graph_persist::{self, EdgeUpsert, NodeUpsert};
 use persistence::repos::{
     index_state, jobs::{self, EnqueueOptions}, mr_reviews, projects,
@@ -244,6 +249,65 @@ impl JobHandler for IngestMrHandler {
                         "error": err.to_string(),
                     })
                 });
+
+                // Optional rerank stage. Diagnostic only — recorded in
+                // the bundle so reviewers can see how the LLM scored
+                // each hunk relative to the others. Heuristic fallback
+                // is built into rerank_review_request.
+                let rerank_results = if env_flag("RAG_LLM_RERANK_ENABLED") {
+                    let cfg = RetrievalConfig::from_env();
+                    let timeout = std::time::Duration::from_secs(
+                        std::env::var("RAG_RERANK_TIMEOUT_SECS")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(20),
+                    );
+                    let hits =
+                        rerank_review_request(self.gateway.clone(), &request, cfg, timeout).await;
+                    serde_json::to_value(&hits).unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                };
+
+                // Optional comment posting. Default-off so the worker
+                // never publishes by accident in dev. When enabled, run
+                // review_merge_request which itself does LLM completions
+                // per target + provider-side publish_all.
+                let publish_status = if env_flag("REVIEW_PUBLISH_COMMENTS") {
+                    match publisher_provider_kind(provider) {
+                        Some(kind) => {
+                            let cfg = PublisherConfig {
+                                kind,
+                                base_url: self.git_api_base.clone(),
+                                token: secrets::sync::resolve(
+                                    None,
+                                    &secrets::SecretKey::GitToken,
+                                )
+                                .unwrap_or_default(),
+                            };
+                            match review_merge_request(request.clone(), self.gateway.clone(), &cfg)
+                                .await
+                            {
+                                Ok(()) => json!({"status": "published"}),
+                                Err(err) => {
+                                    warn!(
+                                        target = "worker.handler",
+                                        error = %err,
+                                        "IngestMr: review_merge_request failed; bundle still recorded"
+                                    );
+                                    json!({"status": "failed", "error": err.to_string()})
+                                }
+                            }
+                        }
+                        None => json!({
+                            "status": "skipped",
+                            "reason": "provider has no inline-comment publisher",
+                        }),
+                    }
+                } else {
+                    json!({"status": "disabled"})
+                };
+
                 let snapshot = json!({
                     "stage": "two_phase_built",
                     "remote_url": parsed.remote_url,
@@ -252,6 +316,8 @@ impl JobHandler for IngestMrHandler {
                     "target_branch": parsed.target_branch,
                     "head_sha": parsed.head_sha,
                     "request": bundle,
+                    "rerank": rerank_results,
+                    "publish": publish_status,
                 });
                 mr_reviews::finish(&self.pool, review_id, "published", &snapshot)
                     .await
@@ -261,10 +327,6 @@ impl JobHandler for IngestMrHandler {
                     review_id = %review_id,
                     targets = request.targets.len(),
                     "IngestMr: bundle persisted"
-                );
-                warn!(
-                    target = "worker.handler",
-                    "IngestMr: LLM call + comment posting deferred to S7"
                 );
                 Ok(())
             }
@@ -277,6 +339,25 @@ impl JobHandler for IngestMrHandler {
                 ))
             }
         }
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
+
+fn publisher_provider_kind(provider: ProviderKind) -> Option<PublisherProviderKind> {
+    match provider {
+        ProviderKind::Gitlab => Some(PublisherProviderKind::GitLab),
+        ProviderKind::Github => Some(PublisherProviderKind::GitHub),
+        // ai-review-engine targets the GitBucket / GitHub-compatible API for
+        // the third slot. Bitbucket Cloud is not currently supported by the
+        // inline-comment publisher; the bundle is still persisted, just
+        // without a publication step.
+        ProviderKind::Bitbucket => None,
     }
 }
 

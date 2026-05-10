@@ -15,8 +15,10 @@
 
 pub mod llm_rerank;
 pub mod plan;
+pub mod review_rerank;
 
 pub use llm_rerank::{
     build_rerank_prompt, llm_rerank, parse_rerank_response, LlmRerankError,
 };
-pub use plan::{RetrievalPlan, RetrievalSeed, ScoredHit};
+pub use plan::{RetrievalPlan, RetrievalSeed, ScoredHit, SeedSource};
+pub use review_rerank::{plan_from_review_request, rerank_review_request};
