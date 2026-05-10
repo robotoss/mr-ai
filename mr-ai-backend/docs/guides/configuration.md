@@ -212,6 +212,15 @@ Overrides apply per process; per-project overrides land in S5.
 | `RAG_TOKEN_BUDGET` | `8000` | Char ceiling fed to the reranker. |
 | `RAG_MIN_SCORE` | `0.0` | Drop seeds below this score (reuses the legacy var). |
 
+## Health / observability (S5)
+
+Loaded by [`detailed::collect_components`](../../api/src/routes/health/detailed.rs).
+See [Observability](observability.md) for the full rundown.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `HEALTH_DETAILED_TIMEOUT_MS` | `2000` | Per-component timeout for the `/health/detailed` and `/health/ready` probes. |
+
 ## Configuration patterns
 
 - **Ollama-only smoke**: set the three tiers to Ollama and pull the

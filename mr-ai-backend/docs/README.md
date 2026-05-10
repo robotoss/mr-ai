@@ -51,7 +51,8 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Dart Analyzer sidecar](guides/dart-analyzer-sidecar.md) | Plan + RPC contract for the upcoming control-flow / data-flow extractor. |
 | [Add a new LLM Provider](guides/add-llm-provider.md) | Plug Anthropic / Groq / a custom backend behind the gateway. |
 | [Configuration](guides/configuration.md) | Every environment variable, where it's read, and what it controls. |
-| [Observability](guides/observability.md) | Log structure, file rotation, per-request analytics. |
+| [Observability](guides/observability.md) | Health endpoints, retry helper, log structure, per-request analytics. |
+| [Testing](guides/testing.md) | Running and extending the unit-test suite. |
 
 ## Reference
 

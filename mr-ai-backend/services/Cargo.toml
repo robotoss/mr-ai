@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 tokio = { workspace = true }
 uuid = {version = "1.18", features = ["v5"]}
+tracing = { workspace = true }
 
 anyhow = { workspace = true }

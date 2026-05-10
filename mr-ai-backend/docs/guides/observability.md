@@ -1,6 +1,54 @@
 # Observability
 
-What signals the gateway emits, where they go, and how to consume them.
+What signals the system emits, where they go, and how to consume them.
+
+## Health endpoints (S5)
+
+Three liveness/readiness probes plus a detailed snapshot. All are
+unauthenticated and side-effect free (apart from the small SQL probe in
+the latter two).
+
+| Path | Status | Body |
+| --- | --- | --- |
+| `GET /health/live` | always `200` | `{"status":"ok"}` |
+| `GET /health/ready` | `200` healthy / `503` degraded | `{"status":"ready\|degraded","components":[…]}` |
+| `GET /health/detailed` | always `200` | same as `/ready` plus `latency_ms` per component |
+
+Components reported today: `postgres`, `secrets`, `llm_gateway`, `queue`.
+Per-component checks have a 2 s timeout (override with
+`HEALTH_DETAILED_TIMEOUT_MS`).
+
+A single hung dependency cannot stall the probe — every check runs under
+`tokio::time::timeout`. The `queue` check reports queued / running / dead
+counts in the `note` field; the component flips to unhealthy when the
+dead-letter row count crosses `1000`.
+
+## Retry helper (S5)
+
+[`services::retry::retry_async`](../../services/src/retry.rs) wraps any
+fallible async call in an exponential-backoff loop. Defaults:
+
+- `max_attempts = 5`
+- `initial_backoff = 200 ms`
+- `max_backoff = 10 s`
+- `jitter = ±20%`
+
+The classifier callback decides which errors deserve retry; non-retryable
+errors short-circuit on the first failure. Use `retry_any` when every
+error should be retried.
+
+```rust
+use services::retry::{retry_async, retry_any, RetryPolicy};
+
+let mr = retry_async(
+    "gitlab_fetch_mr",
+    &RetryPolicy::default(),
+    retry_any,
+    || async { client.fetch_bundle(&id).await },
+).await?;
+```
+
+
 
 ## Logging stack
 

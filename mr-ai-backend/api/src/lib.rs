@@ -20,6 +20,9 @@ use crate::{
     middleware_layer::json_extractor::json_error_mapper,
     routes::{
         check_mr::trigger_mr_route::trigger_mr_route,
+        health::{
+            detailed::detailed_route, live::live_route, ready::ready_route,
+        },
         project_indexer::project_indexer_route::project_indexer_route,
         rag_base::{
             search_vector_base_route::search_vector_base_route,
@@ -127,6 +130,9 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         .route("/webhooks/gitlab", post(gitlab_webhook_route))
         .route("/webhooks/github", post(github_webhook_route))
         .route("/webhooks/bitbucket", post(bitbucket_webhook_route))
+        .route("/health/live", get(live_route))
+        .route("/health/ready", get(ready_route))
+        .route("/health/detailed", get(detailed_route))
         .route("/usage", get(usage_route))
         .fallback(handler_404)
         .layer(middleware::from_fn(json_error_mapper))
