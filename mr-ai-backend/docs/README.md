@@ -42,6 +42,8 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | Guide | When to use |
 | --- | --- |
 | [Getting Started](guides/getting-started.md) | First-time local setup and smoke run. |
+| [Installation](guides/installation.md) | Full local environment with Postgres + Qdrant via Docker. |
+| [Secrets](guides/secrets.md) | `SecretProvider` model — env vs file-mount backends, layout, rotation. |
 | [Add a new LLM Provider](guides/add-llm-provider.md) | Plug Anthropic / Groq / a custom backend behind the gateway. |
 | [Configuration](guides/configuration.md) | Every environment variable, where it's read, and what it controls. |
 | [Observability](guides/observability.md) | Log structure, file rotation, per-request analytics. |
@@ -54,6 +56,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Pricing](reference/pricing.md) | `pricing.toml` schema and cost-estimation math. |
 | [Usage Log](reference/usage-log.md) | Per-call JSONL history, `/usage` endpoint, jq cookbook. |
 | [Errors](reference/errors.md) | Error hierarchy, where each variant comes from, how it's mapped at boundaries. |
+| [Database Schema](reference/database-schema.md) | Postgres tables, migration workflow, ER diagram. |
 
 ## Conventions
 

@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use persistence::PersistenceError;
 use project_code_store::errors::GitCloneError;
 use serde::Serialize;
 use thiserror::Error;
@@ -25,6 +26,12 @@ pub enum AppError {
 
     #[error("server error")]
     Server(#[source] std::io::Error),
+
+    #[error(transparent)]
+    Persistence(#[from] PersistenceError),
+
+    #[error("projects.toml load error: {0}")]
+    ProjectsConfig(String),
 
     // --- Request / routing ---
     #[error("bad request: {0}")]
@@ -56,6 +63,8 @@ impl AppError {
 
             // 5xx
             AppError::Bind(_) | AppError::Server(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Persistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::ProjectsConfig(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -68,6 +77,8 @@ impl AppError {
             AppError::BadRequest(_) => "BAD_REQUEST",
             AppError::NotFound => "NOT_FOUND",
             AppError::Http { code, .. } => code,
+            AppError::Persistence(_) => "PERSISTENCE_ERROR",
+            AppError::ProjectsConfig(_) => "PROJECTS_CONFIG_ERROR",
         }
     }
 }

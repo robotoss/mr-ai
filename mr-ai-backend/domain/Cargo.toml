@@ -1,0 +1,17 @@
+[package]
+name = "domain"
+version = "0.1.0"
+edition = "2024"
+license = "FSL-1.1"
+description = "Shared identifiers and ingestion/review domain types for mr-ai-backend."
+
+[lib]
+name = "domain"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }

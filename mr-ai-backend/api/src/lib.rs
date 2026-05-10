@@ -44,8 +44,55 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         "✅ AppConfig successfully loaded from environment".green()
     );
 
+    // Secret provider — env by default, optionally file-mounted.
+    let secrets_provider = secrets::from_env();
+    println!(
+        "{}",
+        format!(
+            "✅ Secret provider initialised (backend = {})",
+            secrets_provider.backend_name()
+        )
+        .green()
+    );
+
+    // Optional Postgres pool. When DATABASE_URL is unset and DATABASE_OPTIONAL
+    // is "true" (default), the binary still boots and the legacy paths keep
+    // working. Set DATABASE_OPTIONAL=false in production to fail fast.
+    let optional = env::var("DATABASE_OPTIONAL")
+        .ok()
+        .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
+        .unwrap_or(true);
+    let db_pool = persistence::init_optional_with_migrations(optional).await?;
+    if db_pool.is_some() {
+        println!(
+            "{}",
+            "✅ Postgres pool ready and migrations applied".green()
+        );
+        let cfg_path = env::var("PROJECTS_CONFIG").unwrap_or_else(|_| "projects.toml".into());
+        if let Some(pool) = db_pool.as_ref() {
+            match persistence::projects_config::load_and_replicate(pool, &cfg_path).await {
+                Ok(n) => println!(
+                    "{}",
+                    format!("✅ projects.toml synced ({n} project group(s))").green()
+                ),
+                Err(e) => return Err(AppError::ProjectsConfig(e.to_string())),
+            }
+        }
+    } else {
+        println!(
+            "{}",
+            "ℹ️  Postgres disabled (no DATABASE_URL); legacy paths only"
+                .yellow()
+        );
+    }
+
     // Build shared state
-    let shared_state = Arc::new(AppState::new(config.clone(), gateway));
+    let shared_state = Arc::new(AppState::new(
+        config.clone(),
+        gateway,
+        secrets_provider,
+        db_pool,
+    ));
     println!("{}", "✅ Shared state initialized".green());
 
     // Routes

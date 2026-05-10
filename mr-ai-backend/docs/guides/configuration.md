@@ -119,13 +119,58 @@ Loaded by [`AppConfig::from_env`](../../api/src/core/app_state.rs).
 
 ## Git cloning
 
-Loaded by [`project-code-store`](../services/project-code-store.md).
+Loaded by [`project-code-store`](../services/project-code-store.md). Resolved
+through the [`SecretProvider`](secrets.md) — `env` backend by default.
 
 | Var | Purpose |
 | --- | --- |
 | `SSH_KEY_PATH` | Absolute path to private key; falls back to ssh-agent. |
+| `SSH_KEY_PASSPHRASE` | Optional passphrase for the SSH key. |
 | `GIT_HTTP_TOKEN` | HTTPS auth token. |
 | `GIT_HTTP_USER` | HTTPS username (default `oauth2`). |
+
+## Postgres / persistence
+
+Loaded by [`persistence`](../../persistence/src/lib.rs). Persistence is
+optional in S1 — set `DATABASE_OPTIONAL=false` in production to fail fast
+when the DB is unreachable.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | unset | sqlx-style URL, e.g. `postgres://mr_ai:<pwd>@localhost:5432/mr_ai`. |
+| `DATABASE_OPTIONAL` | `true` | When `true`, the binary still boots without a DB. |
+| `DATABASE_MAX_CONNECTIONS` | `8` | Pool size cap. |
+| `SQLX_OFFLINE` | `false` | Build with the bundled `sqlx-data.json`. Set to `true` in CI. |
+| `POSTGRES_DB` | `mr_ai` | Used by `docker-compose` to seed the container. |
+| `POSTGRES_USER` | `mr_ai` | Same. |
+| `POSTGRES_PASSWORD` | (required) | Same. No safe default. |
+| `POSTGRES_PORT` | `5432` | Host-side port mapping for the compose service. |
+| `PGADMIN_PORT` | `5050` | Optional pgAdmin UI (compose `--profile dev`). |
+| `PGADMIN_EMAIL` / `PGADMIN_PASSWORD` | `admin@local` / `admin` | pgAdmin credentials. |
+
+See [Database schema](../reference/database-schema.md) for the table layout
+and migration workflow.
+
+## Project group config
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `PROJECTS_CONFIG` | `projects.toml` | Path to the declarative project-group config. Missing file is logged and skipped. |
+
+When `DATABASE_URL` is set, the file is parsed at boot and replicated into
+the `projects` / `project_repos` / `project_dependencies` tables. Re-running
+the binary with an updated file is idempotent: project IDs are looked up by
+slug and repo IDs by `(project_id, remote_url)`.
+
+## Secrets
+
+Loaded by [`secrets`](../../secrets/src/lib.rs). See the dedicated
+[Secrets guide](secrets.md) for the file-mount layout.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `SECRET_PROVIDER` | `env` | `env` or `file`. |
+| `SECRETS_DIR` | `/var/secrets` | Root for `file` backend. Layout: `<dir>/<project_uuid>/<key>` or `<dir>/_global/<key>`. |
 
 ## Configuration patterns
 

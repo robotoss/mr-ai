@@ -20,6 +20,10 @@ project-code-store = { path = "../project_code_store" }
 rag-base = { path = "../rag-base" }
 git-context-engine = { path = "../git-context-engine" }
 
+domain = { workspace = true }
+secrets = { workspace = true }
+persistence = { workspace = true }
+sqlx = { workspace = true }
 
 serde = { workspace = true }
 tracing = { workspace = true }

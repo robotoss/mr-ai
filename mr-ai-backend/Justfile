@@ -1,0 +1,45 @@
+# mr-ai-backend developer Justfile
+# https://github.com/casey/just
+#
+# `just db-up`        — start Postgres (and Qdrant if not already running)
+# `just db-migrate`   — apply pending migrations against $DATABASE_URL
+# `just db-revert`    — revert the last migration (LOCAL DEV ONLY)
+# `just db-prepare`   — refresh the offline sqlx-data.json bundle
+# `just db-reset`     — drop, recreate and migrate the database (LOCAL DEV ONLY)
+
+set dotenv-load := true
+
+migrations_dir := "persistence/migrations"
+
+# Start the Postgres service in the background and wait for it to be healthy.
+db-up:
+    docker compose up -d postgres
+    @echo "waiting for postgres to be healthy..."
+    @until [ "$(docker inspect -f '{{{{.State.Health.Status}}}}' mr_ai_postgres 2>/dev/null)" = "healthy" ]; do sleep 1; done
+    @echo "postgres is ready"
+
+# Apply pending migrations.
+db-migrate:
+    cargo sqlx migrate run --source {{migrations_dir}}
+
+# Revert the last migration (use only locally — never in production).
+db-revert:
+    cargo sqlx migrate revert --source {{migrations_dir}}
+
+# Refresh sqlx-data.json so CI can build with SQLX_OFFLINE=true.
+db-prepare:
+    cargo sqlx prepare --workspace -- --tests
+
+# Drop, recreate, and re-migrate the database. LOCAL DEV ONLY.
+db-reset:
+    cargo sqlx database drop -y
+    cargo sqlx database create
+    just db-migrate
+
+# Stop infrastructure containers without removing volumes.
+db-down:
+    docker compose stop postgres pgadmin
+
+# Tail Postgres logs.
+db-logs:
+    docker compose logs -f postgres

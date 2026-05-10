@@ -1,0 +1,42 @@
+# Declarative project group config.
+# Copy to `projects.toml` (next to Cargo.toml) and edit. The file is parsed
+# at boot and replicated into Postgres. Re-running with edits is idempotent
+# — project IDs are looked up by `slug` and repo IDs by (project, remote_url).
+#
+# Each [[project]] entry is a logical group that shares review context:
+# multiple repos that should all contribute diffs into a single review.
+
+[[project]]
+slug = "flutter-monorepo"
+name = "Flutter Monorepo"
+
+  [[project.repo]]
+  provider = "gitlab"          # gitlab | github | bitbucket
+  remote_url = "git@gitlab.com:org/app.git"
+  default_branch = "main"
+  is_primary = true
+
+  [[project.repo]]
+  provider = "gitlab"
+  remote_url = "git@gitlab.com:org/shared-package.git"
+  default_branch = "main"
+
+  # Directed dependency: when `app` changes, the review may pull diffs from
+  # `shared-package` too. `kind` records the source of the declaration so
+  # auto-detection (S2) can co-exist with manual edits.
+  [[project.dependency]]
+  from = "git@gitlab.com:org/app.git"
+  to   = "git@gitlab.com:org/shared-package.git"
+  kind = "manual"
+
+# Add another project group below if you operate more than one. The runtime
+# routes inbound webhooks to the right group by matching `remote_url`.
+#
+# [[project]]
+# slug = "service-x"
+# name = "Service X"
+#
+#   [[project.repo]]
+#   provider = "github"
+#   remote_url = "https://github.com/acme/service-x.git"
+#   is_primary = true

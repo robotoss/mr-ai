@@ -73,7 +73,8 @@ fn clone_one_blocking(url: &str, base_dir: &Path) -> Result<()> {
     }
 
     // --- credentials callback ---
-    let key_path_env = std::env::var("SSH_KEY_PATH").ok();
+    // SecretProvider (sync helper) resolves env → mounted file in one place.
+    let key_path_env = secrets::sync::resolve(None, &secrets::SecretKey::SshKeyPath);
     let key_path_disk = Path::new("ssh_keys/bot_key");
     let have_disk_key = key_path_disk.exists();
 
@@ -81,26 +82,38 @@ fn clone_one_blocking(url: &str, base_dir: &Path) -> Result<()> {
     callbacks.credentials(move |url_str, username_from_url, allowed| {
         let user = username_from_url.unwrap_or("git");
 
-        // HTTPS with token from env (optional)
+        // HTTPS with token (optional)
         if url_str.starts_with("http") {
-            if let Ok(token) = std::env::var("GIT_HTTP_TOKEN") {
-                let http_user = std::env::var("GIT_HTTP_USER").unwrap_or_else(|_| "oauth2".into());
+            if let Some(token) =
+                secrets::sync::resolve(None, &secrets::SecretKey::GitHttpToken)
+            {
+                let http_user = secrets::sync::resolve(
+                    None,
+                    &secrets::SecretKey::GitHttpUser,
+                )
+                .unwrap_or_else(|| "oauth2".into());
                 return Cred::userpass_plaintext(&http_user, &token);
             }
         }
 
-        // Prefer explicit SSH key path from env
+        // Prefer explicit SSH key path from secrets
         if allowed.contains(CredentialType::SSH_KEY) {
             if let Some(ref key) = key_path_env {
                 let key_path = Path::new(key);
                 if key_path.exists() {
-                    let pass = std::env::var("SSH_KEY_PASSPHRASE").ok();
+                    let pass = secrets::sync::resolve(
+                        None,
+                        &secrets::SecretKey::SshKeyPassphrase,
+                    );
                     return Cred::ssh_key(user, None, key_path, pass.as_deref());
                 }
             }
             // fallback: ./ssh_keys/bot_key
             if have_disk_key {
-                let pass = std::env::var("SSH_KEY_PASSPHRASE").ok();
+                let pass = secrets::sync::resolve(
+                    None,
+                    &secrets::SecretKey::SshKeyPassphrase,
+                );
                 return Cred::ssh_key(user, None, key_path_disk, pass.as_deref());
             }
         }

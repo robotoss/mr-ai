@@ -1,6 +1,8 @@
 use std::{env, fmt, sync::Arc};
 
 use ai_llm_service::LlmGateway;
+use secrets::SecretProvider;
+use sqlx::PgPool;
 
 /// Application configuration loaded from environment variables.
 #[derive(Clone, Debug)]
@@ -78,11 +80,28 @@ pub struct AppState {
     pub config: Arc<AppConfig>,
     /// Universal LLM Gateway (provider-agnostic).
     pub gateway: Arc<LlmGateway>,
+    /// Secret resolution backend (env or mounted files). Always present —
+    /// defaults to `EnvSecretProvider` when nothing is configured.
+    pub secrets: Arc<dyn SecretProvider>,
+    /// Optional Postgres pool. `None` means persistence is disabled (legacy
+    /// path, controlled by `DATABASE_OPTIONAL=true`). Handlers that need DB
+    /// access must report a clean error when this is `None`.
+    pub db: Option<PgPool>,
 }
 
 impl AppState {
-    /// Create state from pre-loaded configuration.
-    pub fn new(config: Arc<AppConfig>, gateway: Arc<LlmGateway>) -> Self {
-        Self { config, gateway }
+    /// Create state with full dependency wiring.
+    pub fn new(
+        config: Arc<AppConfig>,
+        gateway: Arc<LlmGateway>,
+        secrets: Arc<dyn SecretProvider>,
+        db: Option<PgPool>,
+    ) -> Self {
+        Self {
+            config,
+            gateway,
+            secrets,
+            db,
+        }
     }
 }

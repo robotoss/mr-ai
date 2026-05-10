@@ -1,0 +1,14 @@
+//! Shared domain types for mr-ai-backend.
+//!
+//! Pure data — no DB, no IO. Other crates depend on this for stable identity
+//! and cross-boundary payloads (ingestion events, review bundles).
+
+pub mod ids;
+pub mod ingestion;
+pub mod project;
+pub mod review;
+
+pub use ids::{JobId, MrId, ProjectId, RepoId, WebhookEventId};
+pub use ingestion::{IngestionEvent, IngestionEventKind, ProviderKind};
+pub use project::{ProjectGroup, ProjectRepo, RepoDependency};
+pub use review::{ReviewBundle, ReviewTargetRef};
