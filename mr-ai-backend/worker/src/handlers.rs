@@ -446,11 +446,16 @@ struct ReindexPayload {
 pub struct ReindexHandler {
     pool: PgPool,
     git: GitService,
+    gateway: Arc<LlmGateway>,
 }
 
 impl ReindexHandler {
-    pub fn new(pool: PgPool, git: GitService) -> Self {
-        Self { pool, git }
+    pub fn new(pool: PgPool, git: GitService, gateway: Arc<LlmGateway>) -> Self {
+        Self {
+            pool,
+            git,
+            gateway,
+        }
     }
 }
 
@@ -477,7 +482,7 @@ impl JobHandler for ReindexHandler {
         let resolved = projects::find_repo_by_remote_url_lenient(&self.pool, &parsed.remote_url)
             .await
             .map_err(WorkerError::Persistence)?;
-        let Some((_project_id, repo_id)) = resolved else {
+        let Some((project_id, repo_id)) = resolved else {
             return Err(WorkerError::BadPayload {
                 kind: KIND_REINDEX.into(),
                 msg: format!("unknown remote_url: {}", parsed.remote_url),
@@ -554,12 +559,12 @@ impl JobHandler for ReindexHandler {
                     "Reindex: sidecar augmentation failed; continuing"
                 ),
             }
-            Ok((chunks.len(), outcome))
+            Ok((chunks, outcome))
         })
         .await
         .map_err(|e| WorkerError::Handler(KIND_REINDEX.into(), Box::new(e)))?;
 
-        let (chunk_count, outcome) = match analysis {
+        let (chunks, outcome) = match analysis {
             Ok(value) => value,
             Err(msg) => {
                 drop(worktree);
@@ -569,6 +574,7 @@ impl JobHandler for ReindexHandler {
                 ));
             }
         };
+        let chunk_count = chunks.len();
 
         info!(
             target = "worker.handler",
@@ -614,6 +620,39 @@ impl JobHandler for ReindexHandler {
             "Reindex: graph persisted"
         );
 
+        // Embedding pipeline: diff content_sha256 against what already
+        // lives in Qdrant for this repo so unchanged chunks survive
+        // without re-embedding. Failures map to WorkerError::Handler so
+        // the job is retried via the existing backoff path.
+        let rag_cfg = rag_base::structs::rag_base_config::RagConfig::from_env(None)
+            .map_err(|e| WorkerError::Handler(KIND_REINDEX.into(), Box::new(e)))?;
+        let qdrant_client = rag_base::vector_db::connect(&rag_cfg)
+            .await
+            .map_err(|e| WorkerError::Handler(KIND_REINDEX.into(), Box::new(e)))?;
+        let repo_uuid: uuid::Uuid = repo_id.into();
+        let project_uuid: uuid::Uuid = project_id.into();
+        let repo_id_str = repo_uuid.simple().to_string();
+        let project_id_str = project_uuid.simple().to_string();
+        let report = rag_base::upsert_repo_chunks(
+            &qdrant_client,
+            &rag_cfg,
+            &self.gateway,
+            &repo_id_str,
+            Some(&project_id_str),
+            &chunks,
+        )
+        .await
+        .map_err(|e| WorkerError::Handler(KIND_REINDEX.into(), Box::new(e)))?;
+        info!(
+            target = "worker.handler",
+            upserted = report.upserted,
+            embedded = report.embedded,
+            kept = report.kept,
+            deleted = report.deleted,
+            duration_ms = report.duration_ms,
+            "Reindex: vector upsert finished"
+        );
+
         if let Some(sha) = parsed.head_sha.as_deref() {
             index_state::mark_indexed(&self.pool, repo_id, sha)
                 .await
@@ -656,11 +695,11 @@ pub fn default_registry(cfg: DefaultRegistryConfig) -> crate::WorkerResult<crate
         .register(IngestPushHandler::new(pool.clone(), git.clone()))
         .register(IngestMrHandler::new(
             pool.clone(),
-            gateway,
+            gateway.clone(),
             git_api_base,
             project_name_legacy,
         ))
-        .register(ReindexHandler::new(pool, git))
+        .register(ReindexHandler::new(pool, git, gateway))
         .build())
 }
 

@@ -21,7 +21,7 @@ and are managed via `sqlx-cli`.
 | Range | Sprint | Tables |
 | --- | --- | --- |
 | `0001..0006` | **S1** | projects, project_repos, project_dependencies, webhook_events, jobs, mr_reviews, secrets_metadata, index_state |
-| `0007..0009` | S2 | (queue evolution: indexes, retry_after) — folded into S1 migrations |
+| `0007`       | **S2** | `index_state.last_indexed_path_prefix` resume checkpoint (S9 wires the producer). |
 | `0010..0011` | **S3** | graph_nodes, graph_edges |
 | `0012` | S3-D | (sidecar-derived data_flow / control_flow markers, when they land) |
 | `0013..0014` | S4 | overlay metrics, delta tracking |
@@ -155,6 +155,7 @@ incremental delta updater (S4) can compute `last_indexed_sha → HEAD`.
 | `last_indexed_sha` | TEXT | |
 | `last_indexed_at` | TIMESTAMPTZ | |
 | `last_error` | TEXT | |
+| `last_indexed_path_prefix` | TEXT | S2 column, populated by the S9 timeout / auto-split path so a long Reindex can resume mid-walk; cleared by `mark_indexed`. |
 
 ## Tables (S3 — graph layer)
 

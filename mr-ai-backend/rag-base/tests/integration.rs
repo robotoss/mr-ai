@@ -10,6 +10,9 @@
 
 #![allow(clippy::needless_return)]
 
+use ai_llm_service::test_support::dummy_gateway;
+use code_indexer::types::{ChunkFeatures, Span, SymbolKind};
+use code_indexer::{CodeChunk, LanguageKind};
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     Condition, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, Distance, FieldType,
@@ -204,4 +207,180 @@ async fn qdrant_delete_and_scroll_helpers() {
             .await
             .expect("scroll repo-B final");
     assert!(metas_b_final.is_empty());
+}
+
+/// S2: content-sha incremental dedup pipeline.
+///
+/// `upsert_repo_chunks` is the worker's post-graph_persist entry point.
+/// It must:
+///   1) embed + upsert every chunk on a cold collection;
+///   2) skip embedding and upsert entirely when the same chunks come in
+///      a second time (content_sha matches);
+///   3) on a content change, re-embed/upsert exactly the changed chunk
+///      and leave the rest in place;
+///   4) on a removed chunk, delete the orphan without re-embedding.
+///
+/// We drive the pipeline with the dummy gateway (8-dim zero vectors) so
+/// the assertions focus on diff bookkeeping, not embedding fidelity.
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn upsert_repo_chunks_dedup_pipeline() {
+    use rag_base::structs::rag_base_config::{
+        ChunkClampConfig, DistanceMetric, EmbeddingConfig, QdrantConfig, RagConfig, SearchConfig,
+    };
+
+    let image = GenericImage::new("qdrant/qdrant", "v1.14.0")
+        .with_exposed_port(6334.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Qdrant gRPC listening"));
+    let container = image.start().await.expect("start qdrant container");
+    let port = container.get_host_port_ipv4(6334).await.unwrap();
+    let url = format!("http://127.0.0.1:{port}");
+
+    let dim = 8usize;
+    let collection = "s2_dedup".to_owned();
+    let cfg = RagConfig {
+        project_name: "test".into(),
+        code_jsonl: std::path::PathBuf::from("/tmp/unused.jsonl"),
+        qdrant: QdrantConfig {
+            url: url.clone(),
+            collection: collection.clone(),
+            distance: DistanceMetric::Cosine,
+            batch_size: 4,
+        },
+        embedding: EmbeddingConfig { dim },
+        search: SearchConfig::default(),
+        clamp: ChunkClampConfig::default(),
+    };
+
+    let client = Qdrant::from_url(&url).build().expect("qdrant client builds");
+    rag_base::vector_db::reset_collection(&client, &cfg)
+        .await
+        .expect("reset_collection");
+
+    let gateway = dummy_gateway();
+    let repo_id = uuid::Uuid::new_v4().simple().to_string();
+    let project_id = uuid::Uuid::new_v4().simple().to_string();
+
+    let chunk_a_v1 = make_chunk("lib/a.dart", "lib/a.dart::A::foo", "sha-a-v1");
+    let chunk_b = make_chunk("lib/b.dart", "lib/b.dart::B::bar", "sha-b-v1");
+
+    // Pass 1: cold collection → upsert everything.
+    let report = rag_base::upsert_repo_chunks(
+        &client,
+        &cfg,
+        &gateway,
+        &repo_id,
+        Some(&project_id),
+        &[chunk_a_v1.clone(), chunk_b.clone()],
+    )
+    .await
+    .expect("upsert_repo_chunks v1");
+    assert_eq!(report.upserted, 2, "v1 upserted: {report:?}");
+    assert_eq!(report.embedded, 2, "v1 embedded: {report:?}");
+    assert_eq!(report.kept, 0, "v1 kept: {report:?}");
+    assert_eq!(report.deleted, 0, "v1 deleted: {report:?}");
+    let metas = rag_base::vector_db::scroll_repo_chunk_metas(&client, &cfg, &repo_id, 100)
+        .await
+        .expect("scroll after v1");
+    assert_eq!(metas.len(), 2);
+
+    // Pass 2: identical input → all kept, nothing embedded or upserted.
+    let report = rag_base::upsert_repo_chunks(
+        &client,
+        &cfg,
+        &gateway,
+        &repo_id,
+        Some(&project_id),
+        &[chunk_a_v1.clone(), chunk_b.clone()],
+    )
+    .await
+    .expect("upsert_repo_chunks v2");
+    assert_eq!(report.upserted, 0, "v2 upserted: {report:?}");
+    assert_eq!(report.embedded, 0, "v2 embedded: {report:?}");
+    assert_eq!(report.kept, 2, "v2 kept: {report:?}");
+    assert_eq!(report.deleted, 0, "v2 deleted: {report:?}");
+
+    // Pass 3: a.dart changes (new sha) → exactly the changed chunk is
+    // re-embedded; the old version is deleted by id.
+    let chunk_a_v2 = make_chunk("lib/a.dart", "lib/a.dart::A::foo", "sha-a-v2");
+    let report = rag_base::upsert_repo_chunks(
+        &client,
+        &cfg,
+        &gateway,
+        &repo_id,
+        Some(&project_id),
+        &[chunk_a_v2.clone(), chunk_b.clone()],
+    )
+    .await
+    .expect("upsert_repo_chunks v3");
+    assert_eq!(report.upserted, 1, "v3 upserted: {report:?}");
+    assert_eq!(report.embedded, 1, "v3 embedded: {report:?}");
+    assert_eq!(report.kept, 1, "v3 kept: {report:?}");
+    assert_eq!(report.deleted, 1, "v3 deleted: {report:?}");
+    let metas = rag_base::vector_db::scroll_repo_chunk_metas(&client, &cfg, &repo_id, 100)
+        .await
+        .expect("scroll after v3");
+    assert_eq!(metas.len(), 2);
+    assert!(metas
+        .iter()
+        .any(|m| m.file == "lib/a.dart" && m.content_sha256 == "sha-a-v2"));
+
+    // Pass 4: drop a.dart entirely → the orphan is deleted, no work on b.dart.
+    let report = rag_base::upsert_repo_chunks(
+        &client,
+        &cfg,
+        &gateway,
+        &repo_id,
+        Some(&project_id),
+        &[chunk_b.clone()],
+    )
+    .await
+    .expect("upsert_repo_chunks v4");
+    assert_eq!(report.upserted, 0, "v4 upserted: {report:?}");
+    assert_eq!(report.embedded, 0, "v4 embedded: {report:?}");
+    assert_eq!(report.kept, 1, "v4 kept: {report:?}");
+    assert_eq!(report.deleted, 1, "v4 deleted: {report:?}");
+    let metas = rag_base::vector_db::scroll_repo_chunk_metas(&client, &cfg, &repo_id, 100)
+        .await
+        .expect("scroll after v4");
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].file, "lib/b.dart");
+}
+
+fn make_chunk(file: &str, symbol_path: &str, sha: &str) -> CodeChunk {
+    CodeChunk {
+        id: format!("legacy-{file}-{symbol_path}-{sha}"),
+        language: LanguageKind::Dart,
+        file: file.to_owned(),
+        symbol: symbol_path.rsplit("::").next().unwrap_or(symbol_path).to_owned(),
+        symbol_path: symbol_path.to_owned(),
+        kind: SymbolKind::Method,
+        span: Span {
+            start_byte: 0,
+            end_byte: 1,
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 1,
+        },
+        owner_path: Vec::new(),
+        doc: None,
+        annotations: Vec::new(),
+        imports: Vec::new(),
+        signature: Some(format!("fn {symbol_path}()")),
+        is_definition: true,
+        is_generated: false,
+        snippet: Some(format!("// chunk for {symbol_path}")),
+        features: ChunkFeatures::default(),
+        content_sha256: sha.to_owned(),
+        neighbors: None,
+        identifiers: Vec::new(),
+        anchors: Vec::new(),
+        graph: None,
+        hints: None,
+        lsp: None,
+        extras: None,
+        parent_symbol_id: None,
+        chunk_kind: None,
+    }
 }

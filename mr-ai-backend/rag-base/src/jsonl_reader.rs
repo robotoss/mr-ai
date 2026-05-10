@@ -93,7 +93,40 @@ fn map_line_to_triple(
     }
 
     let chunk: CodeChunk = serde_json::from_str(trimmed).ok()?;
-    if chunk.id.is_empty() {
+    chunk_to_triple(
+        &chunk,
+        ChunkScope::default(),
+        preview_max_snippet_chars,
+        embed_max_snippet_chars,
+    )
+}
+
+/// Multi-tenant scope assigned to every emitted chunk. Legacy JSONL
+/// ingest leaves both fields `None`; the worker pipeline (S2+) sets
+/// `repo_id` (and `project_id`) so the payload carries enough metadata
+/// for per-repo filters and incremental dedup.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ChunkScope<'a> {
+    pub project_id: Option<&'a str>,
+    pub repo_id: Option<&'a str>,
+}
+
+/// Map a parsed `CodeChunk` into `(id, embed_text, VectorPayload)` ready
+/// for embedding + upsert. When `scope.repo_id` is supplied, the returned
+/// id is the deterministic
+/// `<repo_uuid>:<file>:<symbol_path>:<sha[..16]>` produced by
+/// `domain::chunk_id::derive_chunk_id`. Legacy callers (no scope) keep
+/// `chunk.id` untouched.
+pub fn chunk_to_triple(
+    chunk: &CodeChunk,
+    scope: ChunkScope<'_>,
+    preview_max_snippet_chars: usize,
+    embed_max_snippet_chars: usize,
+) -> Option<(String, String, VectorPayload)> {
+    if chunk.id.is_empty() && scope.repo_id.is_none() {
+        return None;
+    }
+    if chunk.content_sha256.is_empty() {
         return None;
     }
 
@@ -190,18 +223,29 @@ fn map_line_to_triple(
         &keywords,
     );
 
-    // Lightweight payload. project_id / repo_id / chunk_kind / parent_symbol_id
-    // are filled by callers that have multi-tenant scope (the worker pipeline
-    // in S2+). JSONL reader path is single-project legacy and leaves them
-    // None; reset_collection still indexes the columns so future migrations
-    // backfill cleanly.
+    // Derive a stable point ID when the caller carries multi-tenant
+    // scope. Without `repo_id` we honour the legacy JSONL behaviour and
+    // reuse `chunk.id`, which already shipped in single-project deploys.
+    let id = match scope
+        .repo_id
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    {
+        Some(repo_uuid) => domain::derive_chunk_id(domain::ChunkIdParts {
+            repo_id: domain::RepoId::from_uuid(repo_uuid),
+            file: &chunk.file,
+            symbol_path: &chunk.symbol_path,
+            content_sha256: &chunk.content_sha256,
+        }),
+        None => chunk.id.clone(),
+    };
+
     let payload = VectorPayload {
-        id: chunk.id.clone(),
+        id: id.clone(),
         file: chunk.file.clone(),
         language: language.clone(),
         kind: kind.clone(),
-        project_id: None,
-        repo_id: None,
+        project_id: scope.project_id.map(str::to_owned),
+        repo_id: scope.repo_id.map(str::to_owned),
         chunk_kind: chunk.chunk_kind.map(|k| k.as_str().to_owned()),
         parent_symbol_id: chunk.parent_symbol_id.clone(),
         symbol: chunk.symbol.clone(),
@@ -233,7 +277,7 @@ fn map_line_to_triple(
         embed_max_snippet_chars,
     );
 
-    Some((chunk.id, embed_text, payload))
+    Some((id, embed_text, payload))
 }
 
 #[inline]

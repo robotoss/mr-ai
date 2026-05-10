@@ -79,6 +79,20 @@ pub struct IndexStats {
     pub duration_ms: u128,
 }
 
+/// Per-repo incremental dedup outcome reported by
+/// `vector_db::upsert_repo_chunks`. Captures the work the pipeline
+/// actually performed (embed + upsert + delete) versus the work it
+/// avoided (`kept` chunks whose `content_sha256` matched what was
+/// already in Qdrant).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct UpsertReport {
+    pub upserted: usize,
+    pub deleted: usize,
+    pub kept: usize,
+    pub embedded: usize,
+    pub duration_ms: u128,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

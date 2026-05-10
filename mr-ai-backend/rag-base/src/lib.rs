@@ -3,13 +3,18 @@
 //! - `search_code`: semantic search with lexical re-ranking and stitched code blocks.
 
 pub mod embedding;
-mod jsonl_reader;
+pub mod ingest;
+pub mod jsonl_reader;
 mod search;
 mod stitcher;
 pub mod vector_db;
 
 pub mod errors;
 pub mod structs;
+
+pub use ingest::upsert_repo_chunks;
+pub use jsonl_reader::{ChunkScope, chunk_to_triple};
+pub use structs::rag_store::UpsertReport;
 
 use std::sync::{
     Arc,

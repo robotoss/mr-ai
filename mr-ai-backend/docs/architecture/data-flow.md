@@ -3,7 +3,42 @@
 End-to-end sequences for the two main interactive flows. Both diagrams use
 the same actor names as the [Architecture Overview](overview.md).
 
-## Flow 1 — Index a project
+## Flow 1 — Master push reindex (S2)
+
+The production master flow: a push webhook lands on `IngestPush`, the
+handler refreshes the bare clone and enqueues `Reindex`. `ReindexHandler`
+analyses the worktree, persists the code graph to Postgres, and then
+runs `rag_base::upsert_repo_chunks` to keep Qdrant in sync via content-sha
+dedup — only changed chunks reach `LlmGateway::embed_batch`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Q as jobs queue
+    participant Re as ReindexHandler
+    participant CI as code-indexer
+    participant PG as Postgres (graph)
+    participant Rag as rag-base
+    participant GW as LlmGateway
+    participant QD as Qdrant
+
+    Q-->>Re: claim Reindex
+    Re->>CI: index_workspace(worktree)
+    CI-->>Re: Vec<CodeChunk>
+    Re->>PG: persist_graph(repo_id, nodes, edges)
+    Re->>Rag: upsert_repo_chunks(repo_id, project_id, chunks)
+    Rag->>QD: scroll_repo_chunk_metas(repo_id)
+    note over Rag: diff existing vs. desired
+    Rag->>GW: embed_batch(upsert set only)
+    Rag->>QD: upsert + delete orphans
+    Rag-->>Re: UpsertReport
+    Re->>PG: index_state.mark_indexed(head_sha)
+```
+
+See [Ingestion Pipeline](../services/ingestion-pipeline.md) for the full
+contract and failure modes.
+
+## Flow 1b — Legacy `/vector_base_index` (deprecated, removed in S5)
 
 Triggered by `GET /vector_base_index`. Builds (or rebuilds) the Qdrant
 collection for the configured `PROJECT_NAME`.
