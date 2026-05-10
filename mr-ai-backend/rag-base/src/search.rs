@@ -1,12 +1,14 @@
 //! Search pipeline: vector search, lexical re-ranking and fallback scroll.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
+use ai_llm_service::LlmGateway;
 use qdrant_client::qdrant::{Condition, FieldCondition, Filter, Match, MinShould};
 use regex::Regex;
 use tracing::{debug, info, warn};
 
-use crate::embedding::embed_texts_ollama;
+use crate::embedding::embed_texts;
 use crate::errors::rag_base_error::RagBaseError;
 use crate::structs::rag_base_config::RagConfig;
 use crate::structs::rag_store::SearchHit;
@@ -18,6 +20,7 @@ use crate::vector_db::{connect, scroll_points_filtered, search_top_k as db_searc
 /// This function returns raw `SearchHit` items without stitched code.
 /// Stitched code blocks are produced separately in the `stitcher` module.
 pub async fn search_hits(
+    gateway: Arc<LlmGateway>,
     project_name: &str,
     query: &str,
     k: Option<usize>,
@@ -43,7 +46,7 @@ pub async fn search_hits(
     let client = connect(&cfg).await?;
 
     // Embed the query using the same model/dimension.
-    let query_vecs = embed_texts_ollama(&cfg, &[query.to_string()]).await?;
+    let query_vecs = embed_texts(&gateway, &cfg, &[query.to_string()]).await?;
     let query_vec = query_vecs
         .into_iter()
         .next()

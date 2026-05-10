@@ -51,6 +51,10 @@ wasm-pack.log
 # Environment files
 .env
 .env.*
+!.env.example
+
+# LLM Gateway log files (rotated daily by tracing-appender)
+logs/
 
 code_data/*
 temp/*

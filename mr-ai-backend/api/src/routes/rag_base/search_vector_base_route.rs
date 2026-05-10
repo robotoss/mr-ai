@@ -34,7 +34,7 @@ pub async fn search_vector_base_route(
     );
 
     let result: Result<_, RagBaseError> =
-        search_code(&state.config.project_name, &p.query, p.k).await;
+        search_code(state.gateway.clone(), &state.config.project_name, &p.query, p.k).await;
 
     match result {
         Ok(results) => {

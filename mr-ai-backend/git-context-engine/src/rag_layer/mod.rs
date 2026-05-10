@@ -4,10 +4,13 @@
 //! diff previews and queries the rag-base vector index (`search_code`).
 //! The result can then be attached to LLM prompts for MR review.
 
+use std::sync::Arc;
+
 use crate::{
     diff_model::ReviewTarget,
     pre_review::{PreReviewHypothesis, PreReviewPlan, PreReviewTargetPlan, RequiredContextHint},
 };
+use ai_llm_service::LlmGateway;
 use rag_base::{CodeSearchResult, search_code};
 use tracing::{debug, warn};
 
@@ -53,6 +56,7 @@ pub struct FocusedRagBlock {
 /// and returns empty `general_results` for that target so the review
 /// pipeline can continue.
 pub async fn build_rag_contexts_for_targets(
+    gateway: Arc<LlmGateway>,
     project_name: &str,
     targets: &[ReviewTarget],
     k: Option<usize>,
@@ -65,7 +69,7 @@ pub async fn build_rag_contexts_for_targets(
         let query = build_query_from_review_target(target);
 
         // 2) Query rag-base for semantically similar code.
-        let results = match search_code(project_name, &query, Some(k)).await {
+        let results = match search_code(gateway.clone(), project_name, &query, Some(k)).await {
             Ok(results) => results,
             Err(err) => {
                 // Do not fail the whole pipeline; log and continue.
@@ -115,6 +119,7 @@ fn build_query_from_review_target(target: &ReviewTarget) -> String {
 /// `base_k`  – max number of general results per hunk.
 /// `focus_k` – max number of focused results per required_context.
 pub async fn build_enriched_rag_contexts(
+    gateway: Arc<LlmGateway>,
     project_name: &str,
     targets: &[ReviewTarget],
     prereview_plan: &PreReviewPlan,
@@ -125,7 +130,8 @@ pub async fn build_enriched_rag_contexts(
     let focus_k = focus_k.unwrap_or(3);
 
     // 1) Build general RAG contexts first (same as before).
-    let mut contexts = build_rag_contexts_for_targets(project_name, targets, Some(base_k)).await;
+    let mut contexts =
+        build_rag_contexts_for_targets(gateway.clone(), project_name, targets, Some(base_k)).await;
 
     // Helper to find a per-target plan by (file_path, hunk_index).
     fn find_plan_for_target<'a>(
@@ -158,7 +164,13 @@ pub async fn build_enriched_rag_contexts(
             for rc in &hyp.required_context {
                 let composed_query = build_query_for_required_context(&ctx.file_path, hyp, rc);
 
-                let results = match search_code(project_name, &composed_query, Some(focus_k)).await
+                let results = match search_code(
+                    gateway.clone(),
+                    project_name,
+                    &composed_query,
+                    Some(focus_k),
+                )
+                .await
                 {
                     Ok(r) => r,
                     Err(err) => {

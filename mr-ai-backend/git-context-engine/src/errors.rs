@@ -1,6 +1,6 @@
 //! Crate-wide error hierarchy for git-context-engine.
 
-use ai_llm_service::error_handler::AiLlmError;
+use ai_llm_service::GatewayError;
 use thiserror::Error;
 
 /// Convenient alias for crate-wide results.
@@ -155,8 +155,8 @@ impl From<code_indexer::Error> for GitContextEngineError {
     }
 }
 
-impl From<AiLlmError> for GitContextEngineError {
-    fn from(err: AiLlmError) -> Self {
+impl From<GatewayError> for GitContextEngineError {
+    fn from(err: GatewayError) -> Self {
         GitContextEngineError::Llm(err.to_string())
     }
 }

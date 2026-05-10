@@ -1,6 +1,6 @@
 use std::{env, fmt, sync::Arc};
 
-use ai_llm_service::service_profiles::LlmServiceProfiles;
+use ai_llm_service::LlmGateway;
 
 /// Application configuration loaded from environment variables.
 #[derive(Clone, Debug)]
@@ -76,16 +76,13 @@ impl AppConfig {
 pub struct AppState {
     /// Immutable configuration.
     pub config: Arc<AppConfig>,
-    /// LLM service profiles (e.g. Ollama).
-    pub llm_profiles: Arc<LlmServiceProfiles>,
+    /// Universal LLM Gateway (provider-agnostic).
+    pub gateway: Arc<LlmGateway>,
 }
 
 impl AppState {
     /// Create state from pre-loaded configuration.
-    pub fn new(config: Arc<AppConfig>, llm_profiles: Arc<LlmServiceProfiles>) -> Self {
-        Self {
-            config,
-            llm_profiles,
-        }
+    pub fn new(config: Arc<AppConfig>, gateway: Arc<LlmGateway>) -> Self {
+        Self { config, gateway }
     }
 }

@@ -1,4 +1,4 @@
-use ai_llm_service::error_handler::AiLlmError;
+use ai_llm_service::GatewayError;
 use thiserror::Error;
 
 use crate::publish::GitProviderKind;
@@ -10,11 +10,9 @@ use crate::publish::GitProviderKind;
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum AiReviewEngineError {
-    /// Errors coming from the underlying AI LLM service.
-    ///
-    /// `AiLlmError` already implements Display and appends "[AI LLM Service]".
+    /// Errors coming from the underlying LLM Gateway.
     #[error("AI review generation failed: {0}")]
-    Ai(#[from] AiLlmError),
+    Ai(#[from] GatewayError),
 
     /// Review request is invalid (for example, empty targets).
     #[error("invalid review request: {0}")]

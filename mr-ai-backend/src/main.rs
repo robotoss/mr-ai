@@ -1,41 +1,30 @@
 use std::{error::Error, sync::Arc};
 
-use ai_llm_service::{config::default_config, service_profiles::LlmServiceProfiles};
-use api;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use ai_llm_service::{GatewayConfig, LlmGateway, init_tracing};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Load environment variables from .env file.
-    // Fails if .env file not found, not readable or invalid.
     dotenvy::dotenv()?;
 
-    init_tracing();
+    // Build typed gateway config first so we can wire logging from it.
+    let gateway_cfg = GatewayConfig::from_env()?;
 
-    let slow = default_config::config_ollama_slow()?;
-    let fast = default_config::config_ollama_fast()?;
-    let embedding = default_config::config_ollama_embedding()?;
+    // Initialise tracing: pretty stdout + JSON daily-rotated file appender.
+    // The returned guard must live for the duration of the process.
+    let _log_guard = init_tracing(&gateway_cfg.log)?;
 
-    let svc = Arc::new(LlmServiceProfiles::new(
-        slow,
-        Some(fast),
-        embedding,
-        Some(10),
-    )?);
+    let gateway = Arc::new(LlmGateway::from_config(gateway_cfg)?);
 
-    let statuses = svc.health_all().await?;
+    let statuses = gateway.health_all().await;
+    for s in &statuses {
+        if s.ok {
+            tracing::info!(role = ?s.role, provider = %s.provider, model = %s.model, latency_ms = s.latency_ms, "{}", s.message);
+        } else {
+            tracing::warn!(role = ?s.role, provider = %s.provider, model = %s.model, latency_ms = s.latency_ms, "{}", s.message);
+        }
+    }
 
-    println!("{:?}", statuses);
-
-    api::start(svc).await?;
+    api::start(gateway).await?;
     Ok(())
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .init();
 }

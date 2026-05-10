@@ -5,7 +5,7 @@ mod error_handler;
 mod middleware_layer;
 mod routes;
 
-use ai_llm_service::service_profiles::LlmServiceProfiles;
+use ai_llm_service::LlmGateway;
 use axum::{
     Router, middleware,
     response::IntoResponse,
@@ -29,7 +29,7 @@ use crate::{
     },
 };
 
-pub async fn start(svc: Arc<LlmServiceProfiles>) -> AppResult<()> {
+pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     println!("{}", "🚀 Starting service initialization...".blue().bold());
 
     // Strict env read with explicit error
@@ -44,7 +44,7 @@ pub async fn start(svc: Arc<LlmServiceProfiles>) -> AppResult<()> {
     );
 
     // Build shared state
-    let shared_state = Arc::new(AppState::new(config.clone(), svc));
+    let shared_state = Arc::new(AppState::new(config.clone(), gateway));
     println!("{}", "✅ Shared state initialized".green());
 
     // Routes
