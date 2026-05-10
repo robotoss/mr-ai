@@ -96,7 +96,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     // Build shared state
     let shared_state = Arc::new(AppState::new(
         config.clone(),
-        gateway,
+        gateway.clone(),
         secrets_provider,
         db_pool.clone(),
     ));
@@ -106,12 +106,16 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     // jobs live in Postgres. Returns a handle we drain on graceful shutdown.
     let worker_pool = if let Some(pool) = db_pool.as_ref() {
         let cfg = worker::WorkerConfig::from_env();
-        let registry = worker::handlers::default_registry(pool.clone()).map_err(|e| {
-            AppError::Http {
-                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                code: "WORKER_INIT_ERROR",
-                message: e.to_string(),
-            }
+        let registry = worker::handlers::default_registry(
+            pool.clone(),
+            gateway.clone(),
+            config.git_api_base.clone(),
+            config.project_name.clone(),
+        )
+        .map_err(|e| AppError::Http {
+            status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            code: "WORKER_INIT_ERROR",
+            message: e.to_string(),
         })?;
         let pool_handle = worker::spawn_pool(pool.clone(), registry, cfg);
         println!("{}", "✅ Worker pool spawned".green());

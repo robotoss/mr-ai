@@ -4211,11 +4211,15 @@ dependencies = [
 name = "worker"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "async-trait",
  "chrono",
+ "code-indexer",
  "domain",
+ "git-context-engine",
  "persistence",
  "project-code-store",
+ "secrets",
  "serde",
  "serde_json",
  "sqlx",

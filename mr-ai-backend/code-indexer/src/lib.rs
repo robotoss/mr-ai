@@ -40,6 +40,28 @@ pub(crate) fn index_project(base_dir: &Path, enable_lsp: bool) -> Result<Vec<Cod
     Ok(chunks)
 }
 
+/// Index an arbitrary directory tree into `CodeChunk`s.
+///
+/// Public entry point used by the worker pool when reindexing a freshly-
+/// fetched bare repo via a per-job `git worktree`. Symlink-safe:
+/// `walkdir` does not follow them by default. The supplied paths in the
+/// resulting chunks are made relative to `base_dir` so downstream graph
+/// upserts get stable identifiers regardless of where the worktree
+/// happened to live on disk.
+pub fn index_workspace(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChunk>> {
+    let mut chunks = index_project(base_dir, enable_lsp)?;
+    for chunk in &mut chunks {
+        if let Ok(rel) = std::path::Path::new(&chunk.file).strip_prefix(base_dir) {
+            chunk.file = rel.to_string_lossy().into_owned();
+            // Re-anchor symbol_path so it stays consistent with file.
+            if let Some(rest) = chunk.symbol_path.split_once("::").map(|(_, r)| r.to_owned()) {
+                chunk.symbol_path = format!("{}::{rest}", chunk.file);
+            }
+        }
+    }
+    Ok(chunks)
+}
+
 /// Build canonical base directory: `code_data/{project_name}` (internal).
 fn project_base_dir(project_name: &str) -> PathBuf {
     PathBuf::from(format!("code_data/{project_name}"))

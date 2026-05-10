@@ -1,19 +1,34 @@
 //! Job handler implementations.
 //!
-//! S2 ships:
+//! S6 ships:
 //! - `IngestPush` — refresh the bare clone for the affected repo and enqueue
-//!   a `Reindex` follow-up. Real index recompute lands in S4.
-//! - `IngestMr` — skeleton that logs and acks. Two-phase review wiring
-//!   (multi-repo fan-out + LLM call) lands in S2-D / S3.
-//! - `Reindex` — skeleton; S4 implements the incremental delta updater.
+//!   a `Reindex` follow-up.
+//! - `IngestMr` — resolve provider config, build the two-phase review via
+//!   `git-context-engine`, snapshot the `LlmReviewRequest` into the
+//!   `mr_reviews.bundle` JSONB column. The actual LLM call + comment
+//!   posting lands in S7 alongside the LLM-rerank wiring.
+//! - `Reindex` — prepare a per-job worktree, walk it via the public
+//!   `index_workspace` helper, run `DartAnalyzer`, persist nodes/edges,
+//!   advance `index_state`. Worktree cleanup happens via `WorktreeHandle`'s
+//!   Drop.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use ai_llm_service::LlmGateway;
 use async_trait::async_trait;
-use persistence::repos::index_state;
-use persistence::repos::jobs::{self, EnqueueOptions};
-use persistence::repos::projects;
+use code_indexer::analyzer::{DartAnalyzer, LanguageAnalyzer};
+use domain::{MrId, ProviderKind};
+use git_context_engine::git_providers::{
+    types::ProviderKind as ContextProviderKind, ProviderConfig,
+};
+use persistence::graph_persist::{self, EdgeUpsert, NodeUpsert};
+use persistence::repos::{
+    index_state, jobs::{self, EnqueueOptions}, mr_reviews, projects,
+};
 use project_code_store::{GitService, GitServiceConfig};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sqlx::PgPool;
 use tracing::{info, warn};
 
@@ -22,6 +37,10 @@ use crate::{JobHandler, WorkerError, WorkerResult};
 pub const KIND_INGEST_PUSH: &str = "IngestPush";
 pub const KIND_INGEST_MR: &str = "IngestMr";
 pub const KIND_REINDEX: &str = "Reindex";
+
+// =====================================================================
+//  IngestPush — refresh bare clone + enqueue Reindex
+// =====================================================================
 
 #[derive(Debug, Deserialize)]
 struct PushPayload {
@@ -63,37 +82,69 @@ impl JobHandler for IngestPushHandler {
             "IngestPush: refreshing bare clone"
         );
 
-        // Refresh the bare clone so subsequent worktree-based work reads
-        // up-to-date refs. Failures bubble up and the queue retries with
-        // backoff.
         self.git
             .ensure_bare(&parsed.remote_url)
             .await
             .map_err(|e| WorkerError::Handler(KIND_INGEST_PUSH.into(), Box::new(e)))?;
 
-        // Enqueue a Reindex follow-up. Default-branch gating happens in S4
-        // when the indexer goes live; for now any push enqueues a Reindex
-        // (handler is a skeleton anyway).
         let reindex_payload = json!({
             "remote_url": parsed.remote_url,
             "branch": parsed.branch,
             "head_sha": parsed.head_sha,
         });
-        let opts = EnqueueOptions::default();
-        let new_id = jobs::enqueue(&self.pool, KIND_REINDEX, &reindex_payload, opts)
-            .await
-            .map_err(WorkerError::Persistence)?;
-        info!(
-            target = "worker.handler",
-            job_id = %new_id,
-            "IngestPush: enqueued Reindex"
-        );
+        let new_id = jobs::enqueue(
+            &self.pool,
+            KIND_REINDEX,
+            &reindex_payload,
+            EnqueueOptions::default(),
+        )
+        .await
+        .map_err(WorkerError::Persistence)?;
+        info!(target = "worker.handler", job_id = %new_id, "IngestPush: enqueued Reindex");
         Ok(())
     }
 }
 
-#[derive(Debug, Default)]
-pub struct IngestMrHandler;
+// =====================================================================
+//  IngestMr — assemble two-phase review bundle
+// =====================================================================
+
+#[derive(Debug, Deserialize)]
+struct MrPayload {
+    provider: String,
+    remote_url: String,
+    mr_iid: String,
+    #[serde(default)]
+    source_branch: String,
+    #[serde(default)]
+    target_branch: String,
+    #[serde(default)]
+    head_sha: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct IngestMrHandler {
+    pool: PgPool,
+    gateway: Arc<LlmGateway>,
+    git_api_base: String,
+    project_name_legacy: String,
+}
+
+impl IngestMrHandler {
+    pub fn new(
+        pool: PgPool,
+        gateway: Arc<LlmGateway>,
+        git_api_base: String,
+        project_name_legacy: String,
+    ) -> Self {
+        Self {
+            pool,
+            gateway,
+            git_api_base,
+            project_name_legacy,
+        }
+    }
+}
 
 #[async_trait]
 impl JobHandler for IngestMrHandler {
@@ -102,29 +153,162 @@ impl JobHandler for IngestMrHandler {
     }
 
     async fn handle(&self, payload: Value) -> WorkerResult<()> {
-        // S2-D / S3 will wire build_two_phase_review with multi-repo fan-out
-        // and post the review back. For now, log so the queue plumbing can
-        // be verified end-to-end against real webhooks.
-        info!(target = "worker.handler", payload = %payload, "IngestMr received (skeleton)");
-        warn!(target = "worker.handler", "IngestMr handler is a skeleton — review pipeline lands in a follow-up");
-        Ok(())
+        let parsed: MrPayload =
+            serde_json::from_value(payload.clone()).map_err(|e| WorkerError::BadPayload {
+                kind: KIND_INGEST_MR.into(),
+                msg: e.to_string(),
+            })?;
+
+        let provider: ProviderKind = parsed
+            .provider
+            .parse()
+            .map_err(|_| WorkerError::BadPayload {
+                kind: KIND_INGEST_MR.into(),
+                msg: format!("unknown provider: {}", parsed.provider),
+            })?;
+
+        // Resolve project + repo identity in Postgres so we can persist
+        // mr_reviews against stable IDs.
+        let (project_id, repo_id) =
+            projects::find_repo_by_remote_url_lenient(&self.pool, &parsed.remote_url)
+                .await
+                .map_err(WorkerError::Persistence)?
+                .ok_or_else(|| WorkerError::BadPayload {
+                    kind: KIND_INGEST_MR.into(),
+                    msg: format!("unknown remote_url: {}", parsed.remote_url),
+                })?;
+
+        let mr_id = MrId::new(parsed.mr_iid.clone());
+
+        // Open / refresh the mr_reviews row. Includes a thin payload echo
+        // so observers can see what the worker started from.
+        let initial = json!({
+            "stage": "received",
+            "payload": payload,
+        });
+        let review_id = mr_reviews::upsert_pending(
+            &self.pool,
+            project_id,
+            repo_id,
+            &mr_id,
+            &initial,
+        )
+        .await
+        .map_err(WorkerError::Persistence)?;
+        mr_reviews::mark_running(&self.pool, review_id)
+            .await
+            .map_err(WorkerError::Persistence)?;
+
+        info!(
+            target = "worker.handler",
+            review_id = %review_id,
+            provider = %provider,
+            mr_iid = %parsed.mr_iid,
+            "IngestMr: review row opened"
+        );
+
+        // Build the two-phase review via git-context-engine. Token comes
+        // from SecretProvider (env-only sync resolver in S6). The legacy
+        // project name is plumbed in for the existing prompt assembly
+        // path; per-project routing lands when projects.toml gains the
+        // git provider URL/token mapping.
+        let token = secrets::sync::resolve(None, &secrets::SecretKey::GitToken)
+            .ok_or_else(|| WorkerError::BadPayload {
+                kind: KIND_INGEST_MR.into(),
+                msg: "GIT_TOKEN unset; configure secrets backend".into(),
+            })?;
+        let cfg = ProviderConfig {
+            kind: map_provider(provider),
+            base_api: self.git_api_base.clone(),
+            token,
+        };
+        let mr_iid_num = parsed.mr_iid.parse::<u64>().unwrap_or_default();
+        let id = git_context_engine::git_providers::types::ChangeRequestId {
+            project: parsed.remote_url.clone(),
+            iid: mr_iid_num,
+        };
+        let review_result = git_context_engine::build_two_phase_review(
+            &self.project_name_legacy,
+            cfg,
+            id,
+            self.gateway.clone(),
+            false,
+        )
+        .await;
+
+        match review_result {
+            Ok(request) => {
+                let bundle = serde_json::to_value(&request).unwrap_or_else(|err| {
+                    json!({
+                        "stage": "request_serialise_failed",
+                        "error": err.to_string(),
+                    })
+                });
+                let snapshot = json!({
+                    "stage": "two_phase_built",
+                    "remote_url": parsed.remote_url,
+                    "mr_iid": parsed.mr_iid,
+                    "source_branch": parsed.source_branch,
+                    "target_branch": parsed.target_branch,
+                    "head_sha": parsed.head_sha,
+                    "request": bundle,
+                });
+                mr_reviews::finish(&self.pool, review_id, "published", &snapshot)
+                    .await
+                    .map_err(WorkerError::Persistence)?;
+                info!(
+                    target = "worker.handler",
+                    review_id = %review_id,
+                    targets = request.targets.len(),
+                    "IngestMr: bundle persisted"
+                );
+                warn!(
+                    target = "worker.handler",
+                    "IngestMr: LLM call + comment posting deferred to S7"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                let _ = mr_reviews::mark_failed(&self.pool, review_id, &msg).await;
+                Err(WorkerError::Handler(
+                    KIND_INGEST_MR.into(),
+                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg)),
+                ))
+            }
+        }
     }
 }
+
+fn map_provider(provider: ProviderKind) -> ContextProviderKind {
+    match provider {
+        ProviderKind::Gitlab => ContextProviderKind::GitLab,
+        ProviderKind::Github => ContextProviderKind::GitHub,
+        ProviderKind::Bitbucket => ContextProviderKind::Bitbucket,
+    }
+}
+
+// =====================================================================
+//  Reindex — worktree-driven incremental index
+// =====================================================================
 
 #[derive(Debug, Deserialize)]
 struct ReindexPayload {
     remote_url: String,
     head_sha: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ReindexHandler {
     pool: PgPool,
+    git: GitService,
 }
 
 impl ReindexHandler {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, git: GitService) -> Self {
+        Self { pool, git }
     }
 }
 
@@ -145,12 +329,9 @@ impl JobHandler for ReindexHandler {
             target = "worker.handler",
             remote = %parsed.remote_url,
             head_sha = ?parsed.head_sha,
-            "Reindex received"
+            "Reindex: starting"
         );
 
-        // Resolve repo. Unknown URLs become a hard failure rather than a
-        // silent ack — webhook handlers already filter unknown repos out,
-        // so anything reaching us here should be registered.
         let resolved = projects::find_repo_by_remote_url_lenient(&self.pool, &parsed.remote_url)
             .await
             .map_err(WorkerError::Persistence)?;
@@ -161,34 +342,183 @@ impl JobHandler for ReindexHandler {
             });
         };
 
-        // S4-A advances the watermark on every Reindex so downstream
-        // systems can observe progress. The actual chunk/edge upsert is
-        // wired in S4-B once the indexer reads from the bare clone.
+        // Resolve the ref to check out. Prefer head_sha; fall back to the
+        // declared branch; default to FETCH_HEAD when neither is supplied.
+        let ref_spec: String = parsed
+            .head_sha
+            .clone()
+            .or(parsed.branch.clone())
+            .unwrap_or_else(|| "FETCH_HEAD".into());
+        let job_tag = format!("reindex-{}", uuid::Uuid::new_v4().simple());
+
+        let worktree = self
+            .git
+            .create_worktree(&parsed.remote_url, &ref_spec, &job_tag)
+            .await
+            .map_err(|e| WorkerError::Handler(KIND_REINDEX.into(), Box::new(e)))?;
+
+        let workspace: PathBuf = worktree
+            .path()
+            .map(PathBuf::from)
+            .ok_or_else(|| WorkerError::Handler(
+                KIND_REINDEX.into(),
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "worktree path missing",
+                )),
+            ))?;
+
+        // Run the indexer + analyzer on a blocking pool — tree-sitter is
+        // sync and walking 10⁵-file workspaces stalls the runtime
+        // otherwise.
+        let workspace_clone = workspace.clone();
+        let analysis = tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let chunks = code_indexer::index_workspace(&workspace_clone, false)
+                .map_err(|e| e.to_string())?;
+            let outcome = DartAnalyzer::new().analyze_chunks(&chunks);
+            Ok((chunks.len(), outcome))
+        })
+        .await
+        .map_err(|e| WorkerError::Handler(KIND_REINDEX.into(), Box::new(e)))?;
+
+        let (chunk_count, outcome) = match analysis {
+            Ok(value) => value,
+            Err(msg) => {
+                drop(worktree);
+                return Err(WorkerError::Handler(
+                    KIND_REINDEX.into(),
+                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg)),
+                ));
+            }
+        };
+
+        info!(
+            target = "worker.handler",
+            chunks = chunk_count,
+            nodes = outcome.nodes.len(),
+            edges = outcome.edges.len(),
+            coverage = ?outcome.coverage,
+            "Reindex: analyzer finished"
+        );
+
+        let nodes: Vec<NodeUpsert> = outcome
+            .nodes
+            .into_iter()
+            .map(|n| NodeUpsert {
+                fqn: n.fqn,
+                kind: n.kind,
+                file: n.file,
+                symbol: n.symbol,
+                language: n.language,
+                content_sha256: n.content_sha256,
+                span_start: n.span_start,
+                span_end: n.span_end,
+            })
+            .collect();
+        let edges: Vec<EdgeUpsert> = outcome
+            .edges
+            .into_iter()
+            .map(|e| EdgeUpsert {
+                from_fqn: e.from_fqn,
+                to_fqn: e.to_fqn,
+                edge_type: e.edge_type,
+                weight: e.weight,
+                meta: e.meta,
+            })
+            .collect();
+
+        let persist = graph_persist::persist_graph(&self.pool, repo_id, &nodes, &edges)
+            .await
+            .map_err(WorkerError::Persistence)?;
+        info!(
+            target = "worker.handler",
+            ?persist,
+            "Reindex: graph persisted"
+        );
+
         if let Some(sha) = parsed.head_sha.as_deref() {
             index_state::mark_indexed(&self.pool, repo_id, sha)
                 .await
                 .map_err(WorkerError::Persistence)?;
-            info!(target = "worker.handler", repo_id = %repo_id, %sha, "watermark advanced");
-        } else {
-            warn!(
-                target = "worker.handler",
-                "Reindex payload missing head_sha; watermark not advanced"
-            );
         }
 
-        warn!(target = "worker.handler", "Reindex incremental upsert is a skeleton — chunk/edge writeback lands in S4-B");
+        // worktree drops here → cleanup
         Ok(())
     }
 }
 
-/// Build the default registry for production. Wires `IngestPush` against the
-/// supplied DB pool and a freshly-resolved `GitService` (env-driven config).
-pub fn default_registry(pool: PgPool) -> crate::WorkerResult<crate::Registry> {
+// =====================================================================
+//  Registry
+// =====================================================================
+
+/// Build the default registry for production. Wires every handler against
+/// the supplied DB pool, the gateway used for IngestMr's review build,
+/// and a freshly-resolved `GitService` (env-driven config).
+pub fn default_registry(
+    pool: PgPool,
+    gateway: Arc<LlmGateway>,
+    git_api_base: String,
+    project_name_legacy: String,
+) -> crate::WorkerResult<crate::Registry> {
     let git = GitService::new(GitServiceConfig::from_env())
         .map_err(|e| WorkerError::Handler("git_service_init".into(), Box::new(e)))?;
     Ok(crate::Registry::builder()
-        .register(IngestPushHandler::new(pool.clone(), git))
-        .register(IngestMrHandler)
-        .register(ReindexHandler::new(pool))
+        .register(IngestPushHandler::new(pool.clone(), git.clone()))
+        .register(IngestMrHandler::new(
+            pool.clone(),
+            gateway,
+            git_api_base,
+            project_name_legacy,
+        ))
+        .register(ReindexHandler::new(pool, git))
         .build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_payload_round_trip() {
+        let json = json!({
+            "remote_url": "git@gitlab.com:org/app.git",
+            "branch": "main",
+            "head_sha": "deadbeef"
+        });
+        let parsed: PushPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.branch, "main");
+        assert_eq!(parsed.head_sha, "deadbeef");
+    }
+
+    #[test]
+    fn mr_payload_tolerates_missing_optional_fields() {
+        let json = json!({
+            "provider": "gitlab",
+            "remote_url": "git@gitlab.com:org/app.git",
+            "mr_iid": "42"
+        });
+        let parsed: MrPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.provider, "gitlab");
+        assert!(parsed.source_branch.is_empty());
+        assert!(parsed.target_branch.is_empty());
+        assert!(parsed.head_sha.is_empty());
+    }
+
+    #[test]
+    fn reindex_payload_falls_back_to_fetch_head() {
+        let json = json!({"remote_url": "git@x.git"});
+        let parsed: ReindexPayload = serde_json::from_value(json).unwrap();
+        assert!(parsed.head_sha.is_none());
+        assert!(parsed.branch.is_none());
+    }
+
+    #[test]
+    fn provider_mapping_is_complete() {
+        assert!(matches!(map_provider(ProviderKind::Gitlab), ContextProviderKind::GitLab));
+        assert!(matches!(map_provider(ProviderKind::Github), ContextProviderKind::GitHub));
+        assert!(matches!(
+            map_provider(ProviderKind::Bitbucket),
+            ContextProviderKind::Bitbucket
+        ));
+    }
 }

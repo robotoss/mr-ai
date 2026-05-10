@@ -37,6 +37,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `git-service` | Bare clones + per-MR worktrees inside `project_code_store`. | [git-service](services/git-service.md) |
 | `graph-rag` (graph) | Postgres-backed code graph (nodes / edges / analyzer). | [graph-rag (part 1)](services/graph-rag.md) |
 | `graph-rag` (retrieval) | Seeds + k-hop expansion + rerank pipeline; transient overlay. | [graph-rag (part 2)](services/graph-rag-retrieval.md) |
+| `review-pipeline` | Worker pipeline binding webhooks → graph reindex → review bundle. | [review-pipeline](services/review-pipeline.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 

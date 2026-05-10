@@ -15,6 +15,10 @@ chrono = { workspace = true }
 domain = { workspace = true }
 persistence = { workspace = true }
 project-code-store = { path = "../project_code_store" }
+code-indexer = { path = "../code-indexer" }
+git-context-engine = { path = "../git-context-engine" }
+ai-llm-service = { path = "../ai-llm-service" }
+secrets = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
