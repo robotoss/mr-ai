@@ -21,10 +21,20 @@ lexical re-ranking for the orchestration layer.
 | --- | --- | --- |
 | `load_fresh_index(gateway, project_name)` | [`src/lib.rs:36`](../../rag-base/src/lib.rs#L36) | Drop and rebuild a Qdrant collection from JSONL. |
 | `search_code(gateway, project_name, query, k)` | [`src/lib.rs:121`](../../rag-base/src/lib.rs#L121) | Semantic + lexical search returning stitched code blocks. |
+| `vector_db::delete_by_filter(client, cfg, filter)` | [`src/vector_db.rs`](../../rag-base/src/vector_db.rs) | Generic delete by `Filter` (S1). |
+| `vector_db::delete_by_repo(client, cfg, repo_id)` | [`src/vector_db.rs`](../../rag-base/src/vector_db.rs) | Wipe all chunks for a repo (S1). |
+| `vector_db::delete_by_file(client, cfg, repo_id, file)` | [`src/vector_db.rs`](../../rag-base/src/vector_db.rs) | Wipe all chunks for a single file in a repo (S1). |
+| `vector_db::scroll_repo_chunk_metas(client, cfg, repo_id, page_size)` | [`src/vector_db.rs`](../../rag-base/src/vector_db.rs) | Stream `(id, content_sha256, file)` for incremental dedup (S1, wired in S2). |
 | `CodeSearchResult` | [`src/structs/search_result.rs`](../../rag-base/src/structs/) | Output type. |
 | `IndexStats` | [`src/structs/rag_store.rs`](../../rag-base/src/structs/) | Indexing summary. |
+| `VectorPayload` | [`src/structs/rag_store.rs`](../../rag-base/src/structs/rag_store.rs) | Qdrant payload — see [Qdrant Schema](../reference/qdrant-schema.md). |
 | `RagBaseError` | [`src/errors/rag_base_error.rs`](../../rag-base/src/errors/rag_base_error.rs) | Crate error. |
 | `RagConfig` | [`src/structs/rag_base_config.rs`](../../rag-base/src/structs/rag_base_config.rs) | Index/search settings (loaded from env). |
+
+The mutation helpers are the **only** sanctioned way to evolve a live
+collection; `load_fresh_index` remains for full rebuilds and bootstrap.
+S2 wires the worker through them to drive incremental content-sha
+deduplication without re-embedding unchanged chunks.
 
 ## Architecture
 
@@ -138,6 +148,7 @@ No unit tests today; exercised end-to-end via the `/vector_base_index` and
 ## Related docs
 
 - [Data Flow — Index a project](../architecture/data-flow.md#flow-1--index-a-project)
+- [Qdrant Schema](../reference/qdrant-schema.md)
 - [services/ai-llm-service](ai-llm-service.md)
 - [services/code-indexer](code-indexer.md)
 - [Configuration](../guides/configuration.md)

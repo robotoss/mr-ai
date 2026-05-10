@@ -2,11 +2,11 @@
 //! - `load_fresh_index`: drop+create collection, ingest JSONL, create payload indexes.
 //! - `search_code`: semantic search with lexical re-ranking and stitched code blocks.
 
-mod embedding;
+pub mod embedding;
 mod jsonl_reader;
 mod search;
 mod stitcher;
-mod vector_db;
+pub mod vector_db;
 
 pub mod errors;
 pub mod structs;

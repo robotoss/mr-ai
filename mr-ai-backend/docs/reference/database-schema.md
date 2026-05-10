@@ -5,6 +5,14 @@ metadata, MR review state, the job queue, webhook event log, and the code
 graph (S3+). Vector data lives separately in Qdrant; nothing in this schema
 duplicates it.
 
+## External stores
+
+| Store | Role | Reference |
+| --- | --- | --- |
+| Postgres (this page) | OLTP truth: projects, repos, queue, graph nodes/edges. | — |
+| **Qdrant** | Vector index of code chunks; payload carries `project_id` / `repo_id` / `chunk_kind` / `parent_symbol_id` / `content_sha256` so tenancy, hierarchy, and dedup are all enforced in-payload, not by collection segregation. | [Qdrant Schema](qdrant-schema.md) |
+
+
 Migrations live in [`persistence/migrations/`](../../persistence/migrations)
 and are managed via `sqlx-cli`.
 

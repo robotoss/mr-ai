@@ -70,6 +70,13 @@ pub async fn reset_collection(client: &Qdrant, cfg: &RagConfig) -> Result<(), Ra
     create_bool_index(client, &cfg.qdrant.collection, "is_definition").await?;
     create_keyword_index(client, &cfg.qdrant.collection, "routes").await?;
     create_keyword_index(client, &cfg.qdrant.collection, "search_terms").await?;
+    // Tenant / scope identity (S1) — required for /retrieve filtering.
+    create_keyword_index(client, &cfg.qdrant.collection, "project_id").await?;
+    create_keyword_index(client, &cfg.qdrant.collection, "repo_id").await?;
+    // Hierarchical chunking (S3) — emission lands later; index now so
+    // reset_collection doesn't need a second pass.
+    create_keyword_index(client, &cfg.qdrant.collection, "chunk_kind").await?;
+    create_keyword_index(client, &cfg.qdrant.collection, "parent_symbol_id").await?;
 
     // Text indexes for full-text style lexical search.
     create_text_index(client, &cfg.qdrant.collection, "search_blob").await?;
@@ -356,6 +363,142 @@ pub async fn scroll_points_filtered(
         .collect::<Vec<_>>();
 
     Ok(hits)
+}
+
+/// Delete every point matching the supplied filter.
+///
+/// Wired into the worker in S2 (incremental dedup path) and into
+/// `/admin/reindex_repo` in S5. Public until then so downstream crates
+/// can call it once `ReindexHandler` lands.
+#[allow(dead_code)]
+pub async fn delete_by_filter(
+    client: &Qdrant,
+    cfg: &RagConfig,
+    filter: Filter,
+) -> Result<(), RagBaseError> {
+    use qdrant_client::qdrant::DeletePointsBuilder;
+
+    client
+        .delete_points(
+            DeletePointsBuilder::new(&cfg.qdrant.collection)
+                .points(filter)
+                .wait(true),
+        )
+        .await
+        .map_err(|e| {
+            error!(target: "rag_base::vector_db", error = %e, "delete_by_filter failed");
+            RagBaseError::Qdrant(format!("delete_points: {e}"))
+        })?;
+    info!(
+        target: "rag_base::vector_db",
+        collection = %cfg.qdrant.collection,
+        "delete_by_filter: done"
+    );
+    Ok(())
+}
+
+/// Drop every point belonging to a given repo (used by `/admin/reindex_repo`
+/// and by the incremental dedup path when a repo is fully removed).
+#[allow(dead_code)]
+pub async fn delete_by_repo(
+    client: &Qdrant,
+    cfg: &RagConfig,
+    repo_id: &str,
+) -> Result<(), RagBaseError> {
+    use qdrant_client::qdrant::Condition;
+    let filter = Filter::must([Condition::matches("repo_id", repo_id.to_owned())]);
+    delete_by_filter(client, cfg, filter).await
+}
+
+/// Drop every chunk attributed to a specific file inside a repo. Used by
+/// the incremental dedup path when a file disappears from the worktree.
+#[allow(dead_code)]
+pub async fn delete_by_file(
+    client: &Qdrant,
+    cfg: &RagConfig,
+    repo_id: &str,
+    file: &str,
+) -> Result<(), RagBaseError> {
+    use qdrant_client::qdrant::Condition;
+    let filter = Filter::must([
+        Condition::matches("repo_id", repo_id.to_owned()),
+        Condition::matches("file", file.to_owned()),
+    ]);
+    delete_by_filter(client, cfg, filter).await
+}
+
+/// Lightweight metadata used by the incremental dedup path: maps every
+/// existing chunk for the supplied repo to its content hash. The S2
+/// pipeline diffs the result with the newly-emitted chunks to decide
+/// keep / upsert / delete sets without re-embedding unchanged content.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ChunkMeta {
+    pub id: String,
+    pub content_sha256: String,
+    pub file: String,
+}
+
+#[allow(dead_code)]
+pub async fn scroll_repo_chunk_metas(
+    client: &Qdrant,
+    cfg: &RagConfig,
+    repo_id: &str,
+    page_size: u32,
+) -> Result<Vec<ChunkMeta>, RagBaseError> {
+    use qdrant_client::qdrant::Condition;
+    let filter = Filter::must([Condition::matches("repo_id", repo_id.to_owned())]);
+    // Internal pagination loop — Qdrant's scroll API returns a cursor we
+    // do not surface to callers (the dedup pass needs the whole repo).
+    let mut all = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(&cfg.qdrant.collection)
+            .filter(filter.clone())
+            .with_payload(true)
+            .with_vectors(false)
+            .limit(page_size);
+        if let Some(off) = offset.take() {
+            builder = builder.offset(off);
+        }
+        let response = client
+            .scroll(builder)
+            .await
+            .map_err(|e| RagBaseError::Qdrant(format!("scroll_repo_chunk_metas: {e}")))?;
+        for point in &response.result {
+            let id = extract_payload_str(&point.payload, "id").unwrap_or_default();
+            let sha = extract_payload_str(&point.payload, "content_sha256").unwrap_or_default();
+            let file = extract_payload_str(&point.payload, "file").unwrap_or_default();
+            if id.is_empty() || sha.is_empty() {
+                debug!(target: "rag_base::vector_db", "scroll_repo_chunk_metas: skipping malformed point");
+                continue;
+            }
+            all.push(ChunkMeta { id, content_sha256: sha, file });
+        }
+        if let Some(next) = response.next_page_offset {
+            offset = Some(next);
+        } else {
+            break;
+        }
+    }
+    info!(
+        target: "rag_base::vector_db",
+        collection = %cfg.qdrant.collection,
+        repo_id,
+        total = all.len(),
+        "scroll_repo_chunk_metas: done"
+    );
+    Ok(all)
+}
+
+#[allow(dead_code)]
+fn extract_payload_str(
+    payload: &std::collections::HashMap<String, qdrant_client::qdrant::Value>,
+    key: &str,
+) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(|v| v.clone().into_json().as_str().map(str::to_owned))
 }
 
 /// Map a `ScoredPoint` into `SearchHit` (best-effort payload extraction).
