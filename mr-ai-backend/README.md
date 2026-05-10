@@ -3,6 +3,11 @@
 A **self-hosted backend** for automated Merge Request (MR) reviews powered by **local AI models**, **Qdrant**, and **Rust**.  
 It integrates with **GitLab / GitHub** via **SSH**, uses **RAG over your codebase**, and posts review comments back to MRs.
 
+> 📚 **Full developer documentation** lives in [`docs/`](docs/README.md) —
+> architecture, per-service deep-dives, configuration reference, how-tos
+> for adding new LLM providers, and observability guides. Start with
+> [docs/guides/getting-started.md](docs/guides/getting-started.md).
+
 ---
 
 ## 🧭 Table of Contents
