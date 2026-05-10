@@ -226,6 +226,107 @@ async fn webhook_event_dedup_and_status_transitions() {
     assert_eq!(status.0, "rejected");
 }
 
+/// Full webhook → enqueue → claim → complete flow exercised against a
+/// real Postgres. Substitutes for an HTTP-level E2E smoke until the
+/// review pipeline grows a mockable LlmGateway fixture.
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn webhook_to_queue_to_completion_flow() {
+    use persistence::repos::jobs::{self, EnqueueOptions};
+    use persistence::repos::webhook_events::{self, RecordOutcome, WebhookRecord};
+
+    let (pool, _container) = boot_pool().await;
+
+    // 1. Register the project group so the webhook resolves to a repo.
+    let group = sample_group();
+    projects::upsert_group(&pool, &group).await.unwrap();
+    let primary = group.repos.iter().find(|r| r.is_primary).unwrap();
+
+    // 2. Webhook arrives — record the event.
+    let payload = serde_json::json!({
+        "object_kind": "merge_request",
+        "project": { "git_ssh_url": primary.remote_url },
+        "object_attributes": {
+            "iid": 99,
+            "source_branch": "feat",
+            "target_branch": "main",
+            "last_commit": { "id": "deadbeef" }
+        }
+    });
+    let event = webhook_events::record(
+        &pool,
+        &WebhookRecord {
+            provider: ProviderKind::Gitlab,
+            event_id: "ev-1".into(),
+            event_kind: "merge_request".into(),
+            payload_hash: vec![0u8; 32],
+            payload: payload.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(event.outcome, RecordOutcome::Inserted);
+
+    // 3. Enqueue the IngestMr job that the webhook handler would create.
+    let job_id = jobs::enqueue(
+        &pool,
+        "IngestMr",
+        &serde_json::json!({
+            "provider": "gitlab",
+            "remote_url": primary.remote_url,
+            "mr_iid": "99"
+        }),
+        EnqueueOptions {
+            project_id: Some(primary.project_id),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    webhook_events::mark_enqueued(&pool, event.id).await.unwrap();
+
+    // 4. Worker claims and completes the job.
+    let claimed = jobs::claim_next(&pool, "smoke-worker")
+        .await
+        .unwrap()
+        .expect("queued job available");
+    assert_eq!(claimed.id, job_id);
+    assert_eq!(claimed.kind, "IngestMr");
+    jobs::complete(&pool, job_id).await.unwrap();
+
+    // 5. Idempotency: redelivery of the same webhook does not enqueue again.
+    let dup = webhook_events::record(
+        &pool,
+        &WebhookRecord {
+            provider: ProviderKind::Gitlab,
+            event_id: "ev-1".into(),
+            event_kind: "merge_request".into(),
+            payload_hash: vec![0u8; 32],
+            payload,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(dup.outcome, RecordOutcome::Duplicate);
+    assert_eq!(dup.id, event.id);
+
+    // 6. Final ledger: one event, one queue entry, both terminal.
+    let event_status: (String,) =
+        sqlx::query_as("SELECT status FROM webhook_events WHERE id = $1")
+            .bind(uuid::Uuid::from(event.id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(event_status.0, "enqueued");
+    let job_status: (String,) =
+        sqlx::query_as("SELECT status FROM jobs WHERE id = $1")
+            .bind(uuid::Uuid::from(job_id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(job_status.0, "done");
+}
+
 #[tokio::test]
 #[ignore = "requires Docker; run with --ignored"]
 async fn mr_reviews_lifecycle() {

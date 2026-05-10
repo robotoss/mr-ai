@@ -62,10 +62,38 @@ cargo test --workspace --tests -- --ignored
   cascade;
 - `webhook_events::record` dedup + status transitions;
 - `mr_reviews` lifecycle (`pending → running → published`);
-- `jobs` queue claim with `SKIP LOCKED` semantics.
+- `jobs` queue claim with `SKIP LOCKED` semantics;
+- end-to-end webhook → enqueue → claim → complete → redelivery dedup
+  flow (`webhook_to_queue_to_completion_flow`).
 
-Future additions: Qdrant container + `rag-base` round-trip, end-to-end
-`webhook → queue → review` smoke that actually drives the worker.
+Future additions: Qdrant container + `rag-base` round-trip; an
+HTTP-level smoke that drives the axum router once an `LlmGateway`
+test fixture lands.
+
+## Dart sidecar tests
+
+[`dart_sidecar/test/analyzer_engine_test.dart`](../../dart_sidecar/test/analyzer_engine_test.dart)
+covers the three AstVisitor passes (`dataFlowEdgesForUnit`,
+`controlFlowEdgesForUnit`, `asyncBoundaryEdgesForUnit`) using
+`package:analyzer`'s `parseString` helper — no Dart Analysis Server
+bring-up required. Run with:
+
+```bash
+cd dart_sidecar
+dart pub get
+dart test
+```
+
+Coverage:
+
+- `data_flow` — one edge per local-variable use (`total`, `i` in a
+  counted loop), zero for branch-free bodies;
+- `control_flow` — one edge per `if`/`for`/`while`/`do_while`/
+  `switch`/`try`, zero for arrow functions;
+- `async_boundary` — extracts the `MethodInvocation`/
+  `SimpleIdentifier`/`PropertyAccess` callee from each `await`;
+- owner chains (`<file>::<class>::<method>`) propagate into the emitted
+  `from_fqn`.
 
 ## Smoke / manual checks
 

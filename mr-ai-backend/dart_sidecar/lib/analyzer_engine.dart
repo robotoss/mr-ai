@@ -1,21 +1,25 @@
-// Skeleton analyzer engine.
+// Real AstVisitor-driven extractors for the three semantic edge kinds
+// Tree-sitter cannot supply: data flow, control flow, async boundaries.
 //
-// Today: returns empty edge sets so the Rust side can exercise the wiring
-// end-to-end against a real subprocess. Subsequent commits replace
-// `_extractDataFlow` / `_extractControlFlow` / `_extractAsyncBoundary` with
-// real `package:analyzer` AstVisitor + ElementResolver passes that walk
-// every supplied file and emit the canonical edge intents documented in
-// `bin/analyzer_sidecar.dart`.
+// Each `_extract*` method walks the resolved AST of a single Dart file and
+// emits edge intents whose `from_fqn` / `to_fqn` are stable across runs:
 //
-// The visitor work is intentionally non-trivial and lives behind the same
-// JSON-RPC contract, so this skeleton can ship + be exercised before the
-// full extractor is implemented.
+//   <file>::<owner_chain>::<symbol>          — top-level / class member fqn
+//   <function_fqn>::var:<name>               — variable definition node
+//   <function_fqn>::use:<name>@<offset>      — variable use site
+//   <function_fqn>::branch:<kind>@<offset>   — branch / loop / try entry point
+//   await:<callee>                           — async-boundary marker node
+//
+// The Rust side (`augment_with_sidecar`) folds these straight into the
+// existing graph_persist pipeline without translation.
 
 import 'dart:async';
 import 'dart:io';
 
 import 'package:analyzer/dart/analysis/analysis_context_collection.dart';
 import 'package:analyzer/dart/analysis/results.dart';
+import 'package:analyzer/dart/ast/ast.dart';
+import 'package:analyzer/dart/ast/visitor.dart';
 
 import 'json_rpc.dart';
 
@@ -58,18 +62,18 @@ class AnalyzerEngine {
       if (unit is! ResolvedUnitResult) continue;
 
       if (kinds.contains('data_flow')) {
-        final result = _extractDataFlow(unit, relative);
+        final result = dataFlowEdgesForUnit(unit.unit, relative);
         edges.addAll(result);
         coverage['data_flow'] = (coverage['data_flow'] ?? 0) + result.length;
       }
       if (kinds.contains('control_flow')) {
-        final result = _extractControlFlow(unit, relative);
+        final result = controlFlowEdgesForUnit(unit.unit, relative);
         edges.addAll(result);
         coverage['control_flow'] =
             (coverage['control_flow'] ?? 0) + result.length;
       }
       if (kinds.contains('async_boundary')) {
-        final result = _extractAsyncBoundary(unit, relative);
+        final result = asyncBoundaryEdgesForUnit(unit.unit, relative);
         edges.addAll(result);
         coverage['async_boundary'] =
             (coverage['async_boundary'] ?? 0) + result.length;
@@ -80,30 +84,272 @@ class AnalyzerEngine {
   }
 
   // --------------------------------------------------------------------
-  //  TODO(S8-B): replace the three stubs below with real analyzer passes.
+  //  Public for tests + direct callers (e.g. `dart test`).
   // --------------------------------------------------------------------
 
-  List<Map<String, Object?>> _extractDataFlow(
-    ResolvedUnitResult unit,
-    String relative,
-  ) =>
-      const [];
+  /// Walk every function/method in the unit, emit `var → use` edges for
+  /// each local declaration. Returned shape matches the JSON-RPC contract.
+  static List<Map<String, Object?>> dataFlowEdgesForUnit(
+    CompilationUnit unit,
+    String filePath,
+  ) {
+    final visitor = _DataFlowVisitor(filePath);
+    unit.accept(visitor);
+    return visitor.edges;
+  }
 
-  List<Map<String, Object?>> _extractControlFlow(
-    ResolvedUnitResult unit,
-    String relative,
-  ) =>
-      const [];
+  /// Emit one `function → branch:kind@offset` edge per branching /
+  /// looping / try statement found inside each function body.
+  static List<Map<String, Object?>> controlFlowEdgesForUnit(
+    CompilationUnit unit,
+    String filePath,
+  ) {
+    final visitor = _ControlFlowVisitor(filePath);
+    unit.accept(visitor);
+    return visitor.edges;
+  }
 
-  List<Map<String, Object?>> _extractAsyncBoundary(
-    ResolvedUnitResult unit,
-    String relative,
-  ) =>
-      const [];
+  /// Emit one `function → await:callee` edge per `await` expression.
+  static List<Map<String, Object?>> asyncBoundaryEdgesForUnit(
+    CompilationUnit unit,
+    String filePath,
+  ) {
+    final visitor = _AsyncBoundaryVisitor(filePath);
+    unit.accept(visitor);
+    return visitor.edges;
+  }
 
   String _absolute(String workspace, String relative) {
     if (relative.startsWith('/')) return relative;
     final separator = workspace.endsWith('/') ? '' : '/';
     return '$workspace$separator$relative';
+  }
+}
+
+// =====================================================================
+//  Visitor implementations
+// =====================================================================
+
+abstract class _ScopedVisitor extends RecursiveAstVisitor<void> {
+  _ScopedVisitor(this.filePath);
+
+  final String filePath;
+  final List<String> _ownerStack = <String>[];
+
+  String get currentFqn {
+    final base = filePath;
+    if (_ownerStack.isEmpty) return base;
+    return '$base::${_ownerStack.join('::')}';
+  }
+
+  void _enter(String name) => _ownerStack.add(name);
+  void _exit() => _ownerStack.removeLast();
+
+  @override
+  void visitClassDeclaration(ClassDeclaration node) {
+    _enter(node.name.lexeme);
+    super.visitClassDeclaration(node);
+    _exit();
+  }
+
+  @override
+  void visitMixinDeclaration(MixinDeclaration node) {
+    _enter(node.name.lexeme);
+    super.visitMixinDeclaration(node);
+    _exit();
+  }
+
+  @override
+  void visitExtensionDeclaration(ExtensionDeclaration node) {
+    final name = node.name?.lexeme ?? 'extension';
+    _enter(name);
+    super.visitExtensionDeclaration(node);
+    _exit();
+  }
+}
+
+class _DataFlowVisitor extends _ScopedVisitor {
+  _DataFlowVisitor(super.filePath);
+
+  final List<Map<String, Object?>> edges = [];
+
+  void _emitVarUseEdges(FunctionBody body, String functionFqn) {
+    final defs = <String, int>{};
+    body.visitChildren(_VarCollector(defs));
+    final uses = _IdentifierUseCollector(defs);
+    body.visitChildren(uses);
+    for (final use in uses.uses) {
+      edges.add({
+        'from_fqn': '$functionFqn::var:${use.name}',
+        'to_fqn': '$functionFqn::use:${use.name}@${use.offset}',
+        'edge_type': 'data_flow',
+        'weight': 1.0,
+        'meta': {'name': use.name, 'offset': use.offset},
+      });
+    }
+  }
+
+  @override
+  void visitFunctionDeclaration(FunctionDeclaration node) {
+    _enter(node.name.lexeme);
+    _emitVarUseEdges(node.functionExpression.body, currentFqn);
+    super.visitFunctionDeclaration(node);
+    _exit();
+  }
+
+  @override
+  void visitMethodDeclaration(MethodDeclaration node) {
+    _enter(node.name.lexeme);
+    _emitVarUseEdges(node.body, currentFqn);
+    super.visitMethodDeclaration(node);
+    _exit();
+  }
+}
+
+class _VarCollector extends RecursiveAstVisitor<void> {
+  _VarCollector(this.defs);
+  final Map<String, int> defs;
+
+  @override
+  void visitVariableDeclaration(VariableDeclaration node) {
+    defs.putIfAbsent(node.name.lexeme, () => node.offset);
+    super.visitVariableDeclaration(node);
+  }
+}
+
+class _IdentifierUse {
+  _IdentifierUse(this.name, this.offset);
+  final String name;
+  final int offset;
+}
+
+class _IdentifierUseCollector extends RecursiveAstVisitor<void> {
+  _IdentifierUseCollector(this.defs);
+  final Map<String, int> defs;
+  final List<_IdentifierUse> uses = [];
+
+  @override
+  void visitSimpleIdentifier(SimpleIdentifier node) {
+    final name = node.name;
+    if (!defs.containsKey(name)) return;
+    final defOffset = defs[name];
+    if (defOffset != null && node.offset == defOffset) {
+      // Skip the declaring identifier itself.
+      return;
+    }
+    uses.add(_IdentifierUse(name, node.offset));
+  }
+}
+
+class _ControlFlowVisitor extends _ScopedVisitor {
+  _ControlFlowVisitor(super.filePath);
+
+  final List<Map<String, Object?>> edges = [];
+
+  void _emitBranch(String kind, int offset) {
+    final fqn = currentFqn;
+    edges.add({
+      'from_fqn': fqn,
+      'to_fqn': '$fqn::branch:$kind@$offset',
+      'edge_type': 'control_flow',
+      'weight': 1.0,
+      'meta': {'kind': kind, 'offset': offset},
+    });
+  }
+
+  @override
+  void visitFunctionDeclaration(FunctionDeclaration node) {
+    _enter(node.name.lexeme);
+    super.visitFunctionDeclaration(node);
+    _exit();
+  }
+
+  @override
+  void visitMethodDeclaration(MethodDeclaration node) {
+    _enter(node.name.lexeme);
+    super.visitMethodDeclaration(node);
+    _exit();
+  }
+
+  @override
+  void visitIfStatement(IfStatement node) {
+    _emitBranch('if', node.offset);
+    super.visitIfStatement(node);
+  }
+
+  @override
+  void visitForStatement(ForStatement node) {
+    _emitBranch('for', node.offset);
+    super.visitForStatement(node);
+  }
+
+  @override
+  void visitWhileStatement(WhileStatement node) {
+    _emitBranch('while', node.offset);
+    super.visitWhileStatement(node);
+  }
+
+  @override
+  void visitDoStatement(DoStatement node) {
+    _emitBranch('do_while', node.offset);
+    super.visitDoStatement(node);
+  }
+
+  @override
+  void visitSwitchStatement(SwitchStatement node) {
+    _emitBranch('switch', node.offset);
+    super.visitSwitchStatement(node);
+  }
+
+  @override
+  void visitTryStatement(TryStatement node) {
+    _emitBranch('try', node.offset);
+    super.visitTryStatement(node);
+  }
+}
+
+class _AsyncBoundaryVisitor extends _ScopedVisitor {
+  _AsyncBoundaryVisitor(super.filePath);
+
+  final List<Map<String, Object?>> edges = [];
+
+  @override
+  void visitFunctionDeclaration(FunctionDeclaration node) {
+    _enter(node.name.lexeme);
+    super.visitFunctionDeclaration(node);
+    _exit();
+  }
+
+  @override
+  void visitMethodDeclaration(MethodDeclaration node) {
+    _enter(node.name.lexeme);
+    super.visitMethodDeclaration(node);
+    _exit();
+  }
+
+  @override
+  void visitAwaitExpression(AwaitExpression node) {
+    final callee = _calleeText(node.expression);
+    edges.add({
+      'from_fqn': currentFqn,
+      'to_fqn': 'await:$callee',
+      'edge_type': 'async_boundary',
+      'weight': 1.0,
+      'meta': {'callee': callee, 'offset': node.offset},
+    });
+    super.visitAwaitExpression(node);
+  }
+
+  String _calleeText(Expression expr) {
+    if (expr is MethodInvocation) {
+      return expr.methodName.name;
+    }
+    if (expr is SimpleIdentifier) {
+      return expr.name;
+    }
+    if (expr is PropertyAccess) {
+      return expr.propertyName.name;
+    }
+    return expr.toString();
   }
 }

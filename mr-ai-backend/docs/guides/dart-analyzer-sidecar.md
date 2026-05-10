@@ -6,15 +6,17 @@ fine-grained control-flow / data-flow facts we need for the higher-quality
 edge kinds (`data_flow`, `control_flow`, precise `async_boundary`). The
 **Dart Analyzer sidecar** fills the gap.
 
-> Status (S8): **shipped — skeleton with stub extractors**. The
+> Status (S10): **shipped with real extractors**. The
 > [Dart package](../../dart_sidecar) is in the tree; the
 > [Rust client](../../code-indexer/src/lsp/dart/sidecar.rs) drives it;
 > [`augment_with_sidecar`](../../code-indexer/src/analyzer/dart.rs)
 > folds the result into `AnalysisOutcome`; the
 > [`ReindexHandler`](../../worker/src/handlers.rs) opts in when configured.
-> The Dart-side `_extractDataFlow` / `_extractControlFlow` /
-> `_extractAsyncBoundary` are placeholders — replacing them with real
-> `package:analyzer` AstVisitor passes is the next item in the queue.
+> All three AstVisitor passes (data_flow / control_flow /
+> async_boundary) emit canonical edge intents — see
+> [`analyzer_engine.dart`](../../dart_sidecar/lib/analyzer_engine.dart)
+> and the
+> [Dart unit tests](../../dart_sidecar/test/analyzer_engine_test.dart).
 
 ## Why a separate process
 
@@ -89,17 +91,26 @@ path. The worker logs `Reindex: sidecar disabled` and continues.
 | `DART_SIDECAR_DART_ENTRYPOINT` | unset | Absolute path to `bin/analyzer_sidecar.dart`. The Rust worker spawns `dart run <entrypoint>`. Convenient for development. |
 | `DART_SDK` | unset | Optional override forwarded into the sidecar's `initialize` params. |
 
-## Coverage gap until S3-D
+## Coverage today
 
-| Edge | Today | After sidecar |
+| Edge | Source | Notes |
 | --- | --- | --- |
-| `imports`, `defines`, `calls`, `inherits`, `type_uses` | ✅ tree-sitter / chunk graph | ✅ same — sidecar fills missing references |
-| `async_boundary` | ⚠️ LSP-tag heuristic | ✅ exact `await`/`Future` boundaries |
-| `data_flow` | ❌ | ✅ intra-procedural (def → use), inter-procedural via Element model |
-| `control_flow` | ❌ | ✅ basic-block edges with branch labels |
+| `imports`, `defines`, `calls`, `inherits`, `type_uses` | tree-sitter / chunk graph (S3) | Stable, no sidecar required. |
+| `async_boundary` | sidecar AstVisitor | `<function_fqn>` → `await:<callee>` per `AwaitExpression`; falls back to the LSP-tag heuristic when the sidecar is disabled. |
+| `data_flow` | sidecar AstVisitor | Intra-procedural `<function_fqn>::var:<name>` → `<function_fqn>::use:<name>@<offset>`; one edge per identifier reference matching a local declaration. |
+| `control_flow` | sidecar AstVisitor | One `<function_fqn>` → `<function_fqn>::branch:<kind>@<offset>` edge per `if`/`for`/`while`/`do_while`/`switch`/`try` statement. |
 
-`DartAnalyzer` is wired so the missing edges materialise transparently
-once the sidecar is plugged in — no schema or pipeline change needed.
+Edge intents land in `graph_edges` via the existing
+[`graph_persist`](../../persistence/src/graph_persist.rs) helper — no
+schema change needed.
+
+### Future refinements
+
+- Inter-procedural data flow (uses Element/ElementResolver instead of
+  syntactic name match).
+- Jump-style control-flow edges (`break`, `continue`, `return`,
+  `throw`) with branch destinations resolved.
+- Effect-tracking on async boundaries (cancellation, error propagation).
 
 ## Related docs
 
