@@ -38,6 +38,10 @@ pub enum RagBaseError {
     #[error("embedding error: {0}")]
     Embedding(String),
 
+    /// Embedding came from the LLM Gateway and propagated through the rag-base.
+    #[error("gateway error: {0}")]
+    Gateway(#[from] ai_llm_service::GatewayError),
+
     // ── Generic operation errors ────────────────────────────────────────────
     /// A requested operation is not implemented (placeholder for TODOs).
     #[error("not implemented: {0}")]

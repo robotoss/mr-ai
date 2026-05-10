@@ -1,10 +1,10 @@
 [package]
 name = "ai-llm-service"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Yeftifeyev Konstantin <zoxo@outlook.com>"]
 license = "FSL-1.1"
-description = "Shared LLM service with providers (Ollama/OpenAI), unified errors, health checks, and fast/slow/embedding profiles."
+description = "Universal LLM Gateway: provider-agnostic chat completion and embeddings with token/cost analytics."
 
 [dependencies]
 reqwest   = { workspace = true, features = ["json", "brotli"] }
@@ -12,6 +12,24 @@ serde     = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tracing   = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 serde_json = { workspace = true }
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+async-trait = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+regex = { workspace = true }
+
+[features]
+default = []
+test-util = []
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+serde_json = { workspace = true }
+ai-llm-service = { path = ".", features = ["test-util"] }
+tempfile = "3"

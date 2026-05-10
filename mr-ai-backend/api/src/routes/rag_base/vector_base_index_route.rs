@@ -21,7 +21,7 @@ pub async fn vector_base_index_route(
         debug!(%id, "request id attached");
     }
 
-    let result = load_fresh_index(&state.config.project_name).await;
+    let result = load_fresh_index(state.gateway.clone(), &state.config.project_name).await;
 
     match result {
         Ok(_) => {}

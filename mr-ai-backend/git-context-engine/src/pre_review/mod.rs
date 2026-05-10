@@ -18,7 +18,7 @@ use std::fs;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ai_llm_service::service_profiles::LlmServiceProfiles;
+use ai_llm_service::{LlmGateway, ModelTier, UnifiedRequest, UnifiedMessage};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -151,7 +151,7 @@ pub async fn run_pre_review_planning(
     targets: &[ReviewTarget],
     rules: &RuleSet,
     rag_contexts: &[TargetRagContext],
-    llm_profiles: Arc<LlmServiceProfiles>,
+    gateway: Arc<LlmGateway>,
     save_logs: bool,
 ) -> GitContextEngineResult<PreReviewPlan> {
     info!(
@@ -184,12 +184,12 @@ pub async fn run_pre_review_planning(
             "pre_review: built planning prompt for target",
         );
 
-        let system_msg = Some(
-            "You are a planning assistant for automated code review. \
-                 You DO NOT perform the final review. Instead, you identify hypotheses and missing context.",
-        );
+        let system_msg = "You are a planning assistant for automated code review. \
+                 You DO NOT perform the final review. Instead, you identify hypotheses and missing context.";
 
-        let raw = llm_profiles.generate_slow(&prompt, system_msg).await?;
+        let mut req = UnifiedRequest::user_only(&prompt);
+        req.messages.insert(0, UnifiedMessage::system(system_msg));
+        let raw = gateway.complete(ModelTier::Smart, req).await?.content;
 
         debug!(
             file = %current.file_path,

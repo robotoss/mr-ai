@@ -16,7 +16,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ai_llm_service::service_profiles::LlmServiceProfiles;
+use ai_llm_service::LlmGateway;
 use tracing::{debug, info, warn};
 
 use crate::diff_model::build_review_targets;
@@ -41,6 +41,7 @@ use crate::{ast_context::NoopAstContextProvider, rag_layer::build_rag_contexts_f
 /// The returned value can be passed to any AI provider layer to
 /// actually run the model and turn model responses into comments.
 pub async fn get_ai_request_data(
+    gateway: Arc<LlmGateway>,
     project_name: &str,
     cfg: ProviderConfig,
     id: ChangeRequestId,
@@ -75,7 +76,8 @@ pub async fn get_ai_request_data(
     }
 
     // Build RAG contexts for each diff hunk.
-    let rag_contexts = build_rag_contexts_for_targets(project_name, &targets, Some(5)).await;
+    let rag_contexts =
+        build_rag_contexts_for_targets(gateway.clone(), project_name, &targets, Some(5)).await;
 
     // By default use a no-op AST context provider.
     // The host application can later construct a real provider
@@ -117,7 +119,7 @@ pub async fn build_two_phase_review(
     project_name: &str,
     cfg: ProviderConfig,
     id: ChangeRequestId,
-    llm_profiles: Arc<LlmServiceProfiles>,
+    gateway: Arc<LlmGateway>,
     save_logs: bool,
 ) -> GitContextEngineResult<LlmReviewRequest> {
     info!(
@@ -151,7 +153,8 @@ pub async fn build_two_phase_review(
     let rules = default_rule_set();
 
     // 1) short RAG for preview
-    let prereview_rag = build_rag_contexts_for_targets(project_name, &targets, Some(2)).await;
+    let prereview_rag =
+        build_rag_contexts_for_targets(gateway.clone(), project_name, &targets, Some(2)).await;
 
     // 2) pre-review plan (and his dump temp/pre_review — inside module)
     let prereview_plan = pre_review::run_pre_review_planning(
@@ -160,13 +163,14 @@ pub async fn build_two_phase_review(
         &targets,
         &rules,
         &prereview_rag,
-        llm_profiles,
+        gateway.clone(),
         save_logs,
     )
     .await?;
 
     // 3) Enriched RAG, with plan
     let enriched_rag = crate::rag_layer::build_enriched_rag_contexts(
+        gateway.clone(),
         project_name,
         &targets,
         &prereview_plan,

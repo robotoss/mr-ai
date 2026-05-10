@@ -95,7 +95,7 @@ pub async fn trigger_mr_route(
         &state.config.project_name,
         cfg,
         id,
-        state.llm_profiles.clone(),
+        state.gateway.clone(),
         false,
     )
     .await;
@@ -113,7 +113,7 @@ pub async fn trigger_mr_route(
             };
 
             let result =
-                review_merge_request(review_request, state.llm_profiles.clone(), &config).await;
+                review_merge_request(review_request, state.gateway.clone(), &config).await;
 
             match result {
                 Ok(_) => ApiResponse::success(TriggerMrResponse {

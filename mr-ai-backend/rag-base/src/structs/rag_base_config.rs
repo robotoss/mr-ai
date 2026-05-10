@@ -32,24 +32,21 @@ impl DistanceMetric {
     }
 }
 
-/// Embedding configuration (model, dimension, and concurrency).
+/// Embedding configuration consumed by `rag-base`.
+///
+/// Only `dim` is read by this crate today — model identity and concurrency
+/// live on the LLM Gateway (`ai-llm-service`). `dim` is retained as a
+/// strict invariant: every vector returned by the gateway is validated
+/// against it before upsert.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
-    /// Embedding model identifier (e.g., "bge-m3").
-    pub model: String,
     /// Embedding vector dimensionality (e.g., 1024 for bge-m3).
     pub dim: usize,
-    /// Max concurrent embedding workers.
-    pub concurrency: usize,
 }
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
-        Self {
-            model: "bge-m3".to_string(),
-            dim: 1024,
-            concurrency: 4,
-        }
+        Self { dim: 1024 }
     }
 }
 
@@ -158,9 +155,7 @@ impl RagConfig {
     /// - `QDRANT_COLLECTION` (default: "mr_ai_code")
     /// - `QDRANT_DISTANCE` (values: "Cosine" | "Dot" | "Euclid"; default: "Cosine")
     /// - `QDRANT_BATCH_SIZE` (default: 256)
-    /// - `EMBEDDING_MODEL` (default: "bge-m3")
-    /// - `EMBEDDING_DIM` (default: 1024)
-    /// - `EMBEDDING_CONCURRENCY` (default: 4)
+    /// - `EMBEDDING_DIM` (default: 1024) — must match the gateway's embedding model
     /// - `RAG_DISABLE` (default: false)
     /// - `RAG_TOP_K` (default: 20)
     /// - `RAG_MIN_SCORE` (default: 0.0)
@@ -172,6 +167,9 @@ impl RagConfig {
     /// - `CLAMP_EMBED_MAX_LINES` (default: 80)
     /// - `CHUNK_MIN_CHARS` (default: 16)
     /// - `INDEX_JSONL_PATH` (default: `code_data/out/<PROJECT_NAME>/code_chunks.jsonl`)
+    ///
+    /// The embedding **model** and **endpoint** are owned by the LLM Gateway
+    /// (`ai-llm-service`) — they are not read here.
     pub fn from_env(project_name: Option<&str>) -> Result<Self, RagBaseError> {
         let name = project_name
             .map(|s| s.to_string())
@@ -182,11 +180,10 @@ impl RagConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(format!("code_data/out/{name}/code_chunks.jsonl")));
 
-        // Embedding
+        // Embedding — only `dim` is consumed locally (used to validate
+        // vectors returned by the gateway and to size the Qdrant collection).
         let embedding = EmbeddingConfig {
-            model: std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "bge-m3".into()),
             dim: read_usize_env("EMBEDDING_DIM").unwrap_or(1024),
-            concurrency: read_usize_env("EMBEDDING_CONCURRENCY").unwrap_or(4),
         };
 
         // Qdrant

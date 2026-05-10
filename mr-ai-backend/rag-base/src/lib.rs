@@ -17,9 +17,10 @@ use std::sync::{
 };
 use std::time::Instant;
 
+use ai_llm_service::LlmGateway;
 use tracing::info;
 
-use embedding::embed_texts_ollama;
+use embedding::embed_texts;
 use errors::rag_base_error::RagBaseError;
 use jsonl_reader::read_jsonl_map_to_ingest_batched;
 use structs::rag_base_config::RagConfig;
@@ -33,7 +34,10 @@ pub use crate::structs::search_result::CodeSearchResult;
 /// - create collection with fresh vector configuration;
 /// - create payload indexes;
 /// - read JSONL and push all chunks to Qdrant.
-pub async fn load_fresh_index(project_name: &str) -> Result<IndexStats, RagBaseError> {
+pub async fn load_fresh_index(
+    gateway: Arc<LlmGateway>,
+    project_name: &str,
+) -> Result<IndexStats, RagBaseError> {
     info!(
         target: "rag_base::index",
         project = project_name,
@@ -63,10 +67,12 @@ pub async fn load_fresh_index(project_name: &str) -> Result<IndexStats, RagBaseE
             let client = client.clone();
             let indexed_counter = Arc::clone(&indexed_counter);
 
+            let gateway = gateway.clone();
             move |batch| {
                 let cfg = cfg.clone();
                 let client = client.clone();
                 let indexed_counter = Arc::clone(&indexed_counter);
+                let gateway = gateway.clone();
 
                 async move {
                     if batch.is_empty() {
@@ -74,7 +80,7 @@ pub async fn load_fresh_index(project_name: &str) -> Result<IndexStats, RagBaseE
                     }
 
                     let texts: Vec<String> = batch.iter().map(|(_, t, _)| t.clone()).collect();
-                    let vectors = embed_texts_ollama(&cfg, &texts).await?;
+                    let vectors = embed_texts(&gateway, &cfg, &texts).await?;
 
                     let points = batch
                         .into_iter()
@@ -119,11 +125,12 @@ pub async fn load_fresh_index(project_name: &str) -> Result<IndexStats, RagBaseE
 ///
 /// The result is JSON-serializable and can be returned directly from an HTTP API.
 pub async fn search_code(
+    gateway: Arc<LlmGateway>,
     project_name: &str,
     query: &str,
     k: Option<usize>,
 ) -> Result<Vec<CodeSearchResult>, RagBaseError> {
-    let hits = search::search_hits(project_name, query, k).await?;
+    let hits = search::search_hits(gateway, project_name, query, k).await?;
     let results = stitcher::search_hits_to_code_results(project_name, &hits, k).await?;
     Ok(results)
 }

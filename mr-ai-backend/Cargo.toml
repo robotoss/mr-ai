@@ -25,8 +25,16 @@ serde_json  = "1.0"
 anyhow = "1.0"
 chrono = "0.4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt",] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
 reqwest = { version = "0.12"}
 thiserror = "1.0"
 colored = "3.0"
 axum = "0.8"
+async-trait = "0.1"
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+wiremock = "0.6"
+hmac = "0.12"
+sha2 = "0.10"
+regex = "1"

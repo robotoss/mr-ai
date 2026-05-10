@@ -3,7 +3,7 @@ pub mod publish;
 
 use std::sync::Arc;
 
-use ai_llm_service::service_profiles::LlmServiceProfiles;
+use ai_llm_service::{LlmGateway, ModelTier, UnifiedRequest};
 use git_context_engine::prompt::LlmReviewRequest;
 use serde_json;
 use tracing::{debug, info, warn};
@@ -86,7 +86,7 @@ fn extract_line_numbers_from_diff_lines(lines: &[String]) -> Vec<u32> {
 /// the failing target is logged and skipped.
 pub async fn review_merge_request(
     review_request: LlmReviewRequest,
-    llm_profiles: Arc<LlmServiceProfiles>,
+    gateway: Arc<LlmGateway>,
     cfg: &ProviderConfig,
 ) -> Result<(), AiReviewEngineError> {
     let ctx = ChangeRequestContext {
@@ -113,9 +113,13 @@ pub async fn review_merge_request(
             target.file_path, target.hunk_index
         );
 
-        let ai_raw: String = llm_profiles
-            .generate_fast(target.prompt_text.as_str(), None)
-            .await?;
+        let ai_raw: String = gateway
+            .complete(
+                ModelTier::Fast,
+                UnifiedRequest::user_only(target.prompt_text.as_str()),
+            )
+            .await?
+            .content;
 
         // Log only a prefix of the raw JSON to keep logs readable.
         debug!(
