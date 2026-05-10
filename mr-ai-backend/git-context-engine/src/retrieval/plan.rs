@@ -213,4 +213,17 @@ mod tests {
         assert_eq!(hits[1].chunk_id, "m");
         assert_eq!(hits[2].chunk_id, "z");
     }
+
+    #[test]
+    fn heuristic_rerank_tolerates_nan_score() {
+        let mut plan = RetrievalPlan::new(RetrievalConfig::default());
+        plan.add_seeds(vec![
+            seed("nan", f32::NAN, SeedSource::Vector),
+            seed("ok", 0.5, SeedSource::Vector),
+        ]);
+        // partial_cmp returns None for NaN; the .unwrap_or(Equal)
+        // fallback in the comparator must keep this from panicking.
+        let hits = heuristic_rerank(&plan);
+        assert_eq!(hits.len(), 2);
+    }
 }

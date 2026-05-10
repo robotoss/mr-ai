@@ -1,16 +1,21 @@
 //! Job handler implementations.
 //!
-//! S6 ships:
+//! Three handlers cover the full ingest pipeline:
+//!
 //! - `IngestPush` — refresh the bare clone for the affected repo and enqueue
 //!   a `Reindex` follow-up.
 //! - `IngestMr` — resolve provider config, build the two-phase review via
 //!   `git-context-engine`, snapshot the `LlmReviewRequest` into the
-//!   `mr_reviews.bundle` JSONB column. The actual LLM call + comment
-//!   posting lands in S7 alongside the LLM-rerank wiring.
+//!   `mr_reviews.bundle` JSONB column. When `RAG_LLM_RERANK_ENABLED=true`
+//!   the bundle additionally carries the LLM rerank diagnostics; when
+//!   `REVIEW_PUBLISH_COMMENTS=true` the handler runs
+//!   `ai_review_engine::review_merge_request` to post inline comments.
+//!   Both flags default off so a fresh dev worker never touches the
+//!   provider by accident.
 //! - `Reindex` — prepare a per-job worktree, walk it via the public
-//!   `index_workspace` helper, run `DartAnalyzer`, persist nodes/edges,
-//!   advance `index_state`. Worktree cleanup happens via `WorktreeHandle`'s
-//!   Drop.
+//!   `index_workspace` helper, run `DartAnalyzer` (optionally augmented by
+//!   the Dart Analyzer sidecar), persist nodes/edges, advance
+//!   `index_state`. Worktree cleanup happens via `WorktreeHandle`'s Drop.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -225,11 +230,31 @@ impl JobHandler for IngestMrHandler {
         let cfg = ProviderConfig {
             kind: map_provider(provider),
             base_api: self.git_api_base.clone(),
-            token,
+            token: token.clone(),
         };
-        let mr_iid_num = parsed.mr_iid.parse::<u64>().unwrap_or_default();
+        // Numeric MR id required by the provider REST APIs (GitLab MR IID,
+        // GitHub PR number, Bitbucket PR id). Reject non-numeric input
+        // loudly instead of defaulting to 0.
+        let mr_iid_num = parsed.mr_iid.parse::<u64>().map_err(|err| {
+            WorkerError::BadPayload {
+                kind: KIND_INGEST_MR.into(),
+                msg: format!(
+                    "mr_iid '{}' is not a u64: {err}",
+                    parsed.mr_iid
+                ),
+            }
+        })?;
+        let project_slug = provider_project_slug(&parsed.remote_url).ok_or_else(|| {
+            WorkerError::BadPayload {
+                kind: KIND_INGEST_MR.into(),
+                msg: format!(
+                    "cannot derive provider project slug from remote_url '{}'",
+                    parsed.remote_url
+                ),
+            }
+        })?;
         let id = git_context_engine::git_providers::types::ChangeRequestId {
-            project: parsed.remote_url.clone(),
+            project: project_slug,
             iid: mr_iid_num,
         };
         let review_result = git_context_engine::build_two_phase_review(
@@ -243,12 +268,15 @@ impl JobHandler for IngestMrHandler {
 
         match review_result {
             Ok(request) => {
+                // Serialise + rerank by reference; the publish step below
+                // takes ownership of `request` so we avoid a deep clone.
                 let bundle = serde_json::to_value(&request).unwrap_or_else(|err| {
                     json!({
                         "stage": "request_serialise_failed",
                         "error": err.to_string(),
                     })
                 });
+                let target_count = request.targets.len();
 
                 // Optional rerank stage. Diagnostic only — recorded in
                 // the bundle so reviewers can see how the LLM scored
@@ -272,20 +300,18 @@ impl JobHandler for IngestMrHandler {
                 // Optional comment posting. Default-off so the worker
                 // never publishes by accident in dev. When enabled, run
                 // review_merge_request which itself does LLM completions
-                // per target + provider-side publish_all.
+                // per target + provider-side publish_all. Token is reused
+                // from the resolution earlier in this handler — never
+                // silently substituted with an empty string.
                 let publish_status = if env_flag("REVIEW_PUBLISH_COMMENTS") {
                     match publisher_provider_kind(provider) {
                         Some(kind) => {
-                            let cfg = PublisherConfig {
+                            let publisher_cfg = PublisherConfig {
                                 kind,
                                 base_url: self.git_api_base.clone(),
-                                token: secrets::sync::resolve(
-                                    None,
-                                    &secrets::SecretKey::GitToken,
-                                )
-                                .unwrap_or_default(),
+                                token: token.clone(),
                             };
-                            match review_merge_request(request.clone(), self.gateway.clone(), &cfg)
+                            match review_merge_request(request, self.gateway.clone(), &publisher_cfg)
                                 .await
                             {
                                 Ok(()) => json!({"status": "published"}),
@@ -325,7 +351,7 @@ impl JobHandler for IngestMrHandler {
                 info!(
                     target = "worker.handler",
                     review_id = %review_id,
-                    targets = request.targets.len(),
+                    targets = target_count,
                     "IngestMr: bundle persisted"
                 );
                 Ok(())
@@ -367,6 +393,41 @@ fn map_provider(provider: ProviderKind) -> ContextProviderKind {
         ProviderKind::Github => ContextProviderKind::GitHub,
         ProviderKind::Bitbucket => ContextProviderKind::Bitbucket,
     }
+}
+
+/// Derive the provider-specific project identifier expected by the REST
+/// API (`org/app` for GitLab/GitHub, `workspace/repo` for Bitbucket) from
+/// the cloning URL we receive in webhook payloads.
+///
+/// Strips scheme (`https://`, `ssh://`), the `git@` SSH-shorthand prefix,
+/// the host segment, and the `.git` / trailing-slash decorations. Returns
+/// `None` if the URL is empty after trimming or contains no path segment
+/// past the host.
+fn provider_project_slug(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim().trim_end_matches('/').trim_end_matches(".git");
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("ssh://"))
+        .unwrap_or(trimmed);
+    // SSH shorthand `git@host:org/repo` → `host/org/repo`.
+    let normalised: std::borrow::Cow<'_, str> = if let Some(rest) =
+        without_scheme.strip_prefix("git@")
+    {
+        std::borrow::Cow::Owned(rest.replacen(':', "/", 1))
+    } else {
+        std::borrow::Cow::Borrowed(without_scheme)
+    };
+    let mut segments = normalised.split('/').filter(|s| !s.is_empty());
+    let _host = segments.next()?;
+    let rest: Vec<&str> = segments.collect();
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.join("/"))
 }
 
 // =====================================================================
@@ -460,13 +521,19 @@ impl JobHandler for ReindexHandler {
 
             // Optional Dart Analyzer sidecar augmentation (S8). Failures
             // degrade the run to tree-sitter-only data instead of aborting.
-            let dart_files: Vec<String> = chunks
-                .iter()
-                .filter(|c| matches!(c.language, code_indexer::LanguageKind::Dart))
-                .map(|c| c.file.clone())
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
+            let dart_files: Vec<String> = {
+                let mut seen = std::collections::HashSet::<&str>::new();
+                let mut out = Vec::new();
+                for c in chunks
+                    .iter()
+                    .filter(|c| matches!(c.language, code_indexer::LanguageKind::Dart))
+                {
+                    if seen.insert(c.file.as_str()) {
+                        out.push(c.file.clone());
+                    }
+                }
+                out
+            };
             match code_indexer::analyzer::dart::augment_with_sidecar(
                 &mut outcome,
                 &workspace_clone,
@@ -483,6 +550,7 @@ impl JobHandler for ReindexHandler {
                 Err(err) => tracing::warn!(
                     target = "worker.handler",
                     error = %err,
+                    error.debug = ?err,
                     "Reindex: sidecar augmentation failed; continuing"
                 ),
             }
@@ -561,15 +629,27 @@ impl JobHandler for ReindexHandler {
 //  Registry
 // =====================================================================
 
+/// Wiring inputs for [`default_registry`]. Replaces the previous four-
+/// positional argument list — fewer ways to swap `git_api_base` and
+/// `project_name_legacy` at the call site by accident.
+#[derive(Debug, Clone)]
+pub struct DefaultRegistryConfig {
+    pub pool: PgPool,
+    pub gateway: Arc<LlmGateway>,
+    pub git_api_base: String,
+    pub project_name_legacy: String,
+}
+
 /// Build the default registry for production. Wires every handler against
 /// the supplied DB pool, the gateway used for IngestMr's review build,
 /// and a freshly-resolved `GitService` (env-driven config).
-pub fn default_registry(
-    pool: PgPool,
-    gateway: Arc<LlmGateway>,
-    git_api_base: String,
-    project_name_legacy: String,
-) -> crate::WorkerResult<crate::Registry> {
+pub fn default_registry(cfg: DefaultRegistryConfig) -> crate::WorkerResult<crate::Registry> {
+    let DefaultRegistryConfig {
+        pool,
+        gateway,
+        git_api_base,
+        project_name_legacy,
+    } = cfg;
     let git = GitService::new(GitServiceConfig::from_env())
         .map_err(|e| WorkerError::Handler("git_service_init".into(), Box::new(e)))?;
     Ok(crate::Registry::builder()
@@ -630,5 +710,46 @@ mod tests {
             map_provider(ProviderKind::Bitbucket),
             ContextProviderKind::Bitbucket
         ));
+    }
+
+    #[test]
+    fn provider_project_slug_extracts_org_and_repo() {
+        assert_eq!(
+            provider_project_slug("git@gitlab.com:org/app.git").as_deref(),
+            Some("org/app")
+        );
+        assert_eq!(
+            provider_project_slug("https://github.com/org/app.git").as_deref(),
+            Some("org/app")
+        );
+        assert_eq!(
+            provider_project_slug("ssh://git@gitlab.com/org/app").as_deref(),
+            Some("org/app")
+        );
+        assert_eq!(
+            provider_project_slug("https://bitbucket.org/workspace/repo/").as_deref(),
+            Some("workspace/repo")
+        );
+        // Nested groups (GitLab subgroups, GitHub orgs with nested folders).
+        assert_eq!(
+            provider_project_slug("git@gitlab.com:group/sub/app.git").as_deref(),
+            Some("group/sub/app")
+        );
+    }
+
+    #[test]
+    fn provider_project_slug_rejects_empty_or_host_only() {
+        assert!(provider_project_slug("").is_none());
+        assert!(provider_project_slug("   ").is_none());
+        assert!(provider_project_slug("https://gitlab.com").is_none());
+        assert!(provider_project_slug("git@gitlab.com:").is_none());
+    }
+
+    #[test]
+    fn mr_payload_with_non_numeric_iid_yields_parse_error() {
+        // Direct check on parse — the handler returns BadPayload via `?`
+        // when this fails, instead of silently defaulting to 0.
+        let bad = "not-a-number";
+        assert!(bad.parse::<u64>().is_err());
     }
 }

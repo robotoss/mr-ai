@@ -257,49 +257,55 @@ class _CallSiteVisitor extends RecursiveAstVisitor<void> {
     final args = node.argumentList.arguments;
     for (var index = 0; index < args.length; index++) {
       final arg = args[index];
-      String? localName;
-      int slot = index;
-      if (arg is SimpleIdentifier) {
-        localName = arg.name;
-      } else if (arg is NamedExpression) {
+      // Named arguments resolve to a labeled parameter slot; positional
+      // arguments resolve to `param@<index>`. Anything other than a bare
+      // SimpleIdentifier (or a NamedExpression wrapping one) is skipped
+      // so we don't emit edges for literals / constructor calls / etc.
+      if (arg is NamedExpression) {
         final inner = arg.expression;
-        if (inner is SimpleIdentifier) {
-          localName = inner.name;
-          // Named arg keeps its label as the slot identifier.
-          slot = -1;
+        if (inner is! SimpleIdentifier) {
+          continue;
         }
-        if (localName != null && defs.containsKey(localName)) {
-          edges.add({
-            'from_fqn': '$callerFqn::var:$localName',
-            'to_fqn': '$callee::param:${arg.name.label.name}',
-            'edge_type': 'data_flow',
-            'weight': 0.6,
-            'meta': {
-              'callee': callee,
-              'arg': localName,
-              'named': arg.name.label.name,
-              'offset': arg.offset,
-            },
-          });
+        final localName = inner.name;
+        if (!defs.containsKey(localName)) {
+          continue;
         }
-        super.visitMethodInvocation(node);
-        return;
-      }
-      if (localName != null && defs.containsKey(localName)) {
         edges.add({
           'from_fqn': '$callerFqn::var:$localName',
-          'to_fqn': '$callee::param@$slot',
+          'to_fqn': '$callee::param:${arg.name.label.name}',
           'edge_type': 'data_flow',
           'weight': 0.6,
           'meta': {
             'callee': callee,
             'arg': localName,
-            'positional': slot,
+            'named': arg.name.label.name,
             'offset': arg.offset,
           },
         });
+        continue;
       }
+      if (arg is! SimpleIdentifier) {
+        continue;
+      }
+      final localName = arg.name;
+      if (!defs.containsKey(localName)) {
+        continue;
+      }
+      edges.add({
+        'from_fqn': '$callerFqn::var:$localName',
+        'to_fqn': '$callee::param@$index',
+        'edge_type': 'data_flow',
+        'weight': 0.6,
+        'meta': {
+          'callee': callee,
+          'arg': localName,
+          'positional': index,
+          'offset': arg.offset,
+        },
+      });
     }
+    // Recurse exactly once into nested expressions so chained / nested
+    // method invocations also get their own call-site edges.
     super.visitMethodInvocation(node);
   }
 }

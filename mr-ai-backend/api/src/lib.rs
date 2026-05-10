@@ -100,7 +100,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(60),
     );
-    let (llm_health_monitor, _llm_health_handle) =
+    let (llm_health_monitor, llm_health_supervisor) =
         services::llm_health::LlmHealthMonitor::start(gateway.clone(), llm_health_interval).await;
     println!("{}", "✅ LLM health monitor warmed up".green());
 
@@ -119,10 +119,12 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     let worker_pool = if let Some(pool) = db_pool.as_ref() {
         let cfg = worker::WorkerConfig::from_env();
         let registry = worker::handlers::default_registry(
-            pool.clone(),
-            gateway.clone(),
-            config.git_api_base.clone(),
-            config.project_name.clone(),
+            worker::handlers::DefaultRegistryConfig {
+                pool: pool.clone(),
+                gateway: gateway.clone(),
+                git_api_base: config.git_api_base.clone(),
+                project_name_legacy: config.project_name.clone(),
+            },
         )
         .map_err(|e| AppError::Http {
             status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -184,6 +186,10 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         pool.shutdown().await;
         println!("{}", "✅ Worker pool drained".green());
     }
+
+    println!("{}", "🔧 Draining LLM health monitor...".yellow());
+    llm_health_supervisor.shutdown().await;
+    println!("{}", "✅ LLM health monitor drained".green());
 
     println!("{}", "👋 Server shutdown complete".yellow().bold());
     Ok(())

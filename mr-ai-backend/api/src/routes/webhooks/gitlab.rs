@@ -94,7 +94,7 @@ pub async fn gitlab_webhook_route(
     })?;
 
     // 4. Build per-event decision.
-    let decision = build_decision(&payload, &event_kind, event_id.clone()).await;
+    let decision = build_decision(&payload, &event_kind, event_id.clone());
     let decision = match decision {
         Some(decision_with_url) => match decision_with_url {
             DecisionDraft::Enqueue {
@@ -144,7 +144,7 @@ enum DecisionDraft {
     Ack,
 }
 
-async fn build_decision(
+fn build_decision(
     payload: &Value,
     event_kind: &str,
     event_id: String,

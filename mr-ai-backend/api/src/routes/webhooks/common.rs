@@ -141,8 +141,19 @@ pub async fn record_and_enqueue(
                 payload_hash: payload_hash.to_vec(),
                 payload: payload.clone(),
             };
-            let recorded = webhook_events::record(pool, &rec).await?;
+            // Atomic record + enqueue + status-update so a crash mid-
+            // pipeline cannot leave a "received" event without a matching
+            // queued job (which would never re-enqueue thanks to the
+            // ON CONFLICT DO NOTHING dedup on retry).
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(persistence::PersistenceError::from)?;
+            let recorded = webhook_events::record_in_tx(&mut tx, &rec).await?;
             if recorded.outcome == RecordOutcome::Duplicate {
+                tx.commit()
+                    .await
+                    .map_err(persistence::PersistenceError::from)?;
                 info!(target = "webhook", provider = %provider, event_id = %event_id, "duplicate event ignored");
                 return Ok(WebhookOutcome {
                     status: StatusCode::OK,
@@ -156,8 +167,11 @@ pub async fn record_and_enqueue(
                 project_id: Some(repo.project_id),
                 ..Default::default()
             };
-            let job_id = jobs::enqueue(pool, job_kind, &job_payload, opts).await?;
-            webhook_events::mark_enqueued(pool, recorded.id).await?;
+            let job_id = jobs::enqueue_in_tx(&mut tx, job_kind, &job_payload, opts).await?;
+            webhook_events::mark_enqueued_in_tx(&mut tx, recorded.id).await?;
+            tx.commit()
+                .await
+                .map_err(persistence::PersistenceError::from)?;
             info!(
                 target = "webhook",
                 provider = %provider,

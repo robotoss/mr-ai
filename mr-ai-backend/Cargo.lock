@@ -130,6 +130,7 @@ dependencies = [
  "services",
  "sha2",
  "sqlx",
+ "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 1.0.69",

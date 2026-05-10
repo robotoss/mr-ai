@@ -245,7 +245,9 @@ pub fn augment_with_sidecar(
             domain::EdgeKind::AsyncBoundary.as_str().to_owned(),
         ],
     )?;
-    let _ = client.shutdown();
+    if let Err(err) = client.shutdown() {
+        tracing::warn!(target = "analyzer.dart", error = %err, error.debug = ?err, "sidecar shutdown failed");
+    }
 
     for edge in result.edges {
         let edge_kind: domain::EdgeKind = edge

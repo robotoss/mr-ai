@@ -51,13 +51,17 @@ pub(crate) fn index_project(base_dir: &Path, enable_lsp: bool) -> Result<Vec<Cod
 pub fn index_workspace(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChunk>> {
     let mut chunks = index_project(base_dir, enable_lsp)?;
     for chunk in &mut chunks {
-        if let Ok(rel) = std::path::Path::new(&chunk.file).strip_prefix(base_dir) {
-            chunk.file = rel.to_string_lossy().into_owned();
-            // Re-anchor symbol_path so it stays consistent with file.
-            if let Some(rest) = chunk.symbol_path.split_once("::").map(|(_, r)| r.to_owned()) {
-                chunk.symbol_path = format!("{}::{rest}", chunk.file);
-            }
-        }
+        let Ok(rel) = std::path::Path::new(&chunk.file).strip_prefix(base_dir) else {
+            continue;
+        };
+        let new_file = rel.to_string_lossy().into_owned();
+        // Replace prefix references in `id` and `symbol_path` so every
+        // identity field stays consistent with the rebased `file`.
+        // Symbols whose IDs/paths happen not to embed the path are left
+        // untouched by `replacen` — safe.
+        let old_file = std::mem::replace(&mut chunk.file, new_file.clone());
+        chunk.id = chunk.id.replacen(&old_file, &new_file, 1);
+        chunk.symbol_path = chunk.symbol_path.replacen(&old_file, &new_file, 1);
     }
     Ok(chunks)
 }

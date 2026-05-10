@@ -46,17 +46,18 @@ impl SecretKey {
     }
 
     /// Conventional environment variable name (uppercase, prefixed) when the
-    /// secret is fetched without a project scope.
-    pub fn env_var(&self) -> String {
+    /// secret is fetched without a project scope. `Custom(...)` callers are
+    /// expected to pass an already-uppercased static identifier.
+    pub fn env_var(&self) -> &'static str {
         match self {
-            SecretKey::GitToken => "GIT_TOKEN".into(),
-            SecretKey::SshKeyPath => "SSH_KEY_PATH".into(),
-            SecretKey::SshKeyPassphrase => "SSH_KEY_PASSPHRASE".into(),
-            SecretKey::GitHttpToken => "GIT_HTTP_TOKEN".into(),
-            SecretKey::GitHttpUser => "GIT_HTTP_USER".into(),
-            SecretKey::WebhookHmac => "WEBHOOK_HMAC_SECRET".into(),
-            SecretKey::TriggerSecret => "TRIGGER_SECRET".into(),
-            SecretKey::Custom(name) => name.to_ascii_uppercase(),
+            SecretKey::GitToken => "GIT_TOKEN",
+            SecretKey::SshKeyPath => "SSH_KEY_PATH",
+            SecretKey::SshKeyPassphrase => "SSH_KEY_PASSPHRASE",
+            SecretKey::GitHttpToken => "GIT_HTTP_TOKEN",
+            SecretKey::GitHttpUser => "GIT_HTTP_USER",
+            SecretKey::WebhookHmac => "WEBHOOK_HMAC_SECRET",
+            SecretKey::TriggerSecret => "TRIGGER_SECRET",
+            SecretKey::Custom(name) => name,
         }
     }
 }
@@ -119,7 +120,7 @@ impl EnvSecretProvider {
 impl SecretProvider for EnvSecretProvider {
     async fn get(&self, _project: Option<ProjectId>, key: &SecretKey) -> Result<String> {
         let name = key.env_var();
-        match env::var(&name) {
+        match env::var(name) {
             Ok(v) if !v.is_empty() => Ok(v),
             _ => Err(SecretError::NotFound {
                 key: key.as_str().to_owned(),

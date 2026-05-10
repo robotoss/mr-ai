@@ -6,7 +6,7 @@
 
 use domain::{ProviderKind, WebhookEventId};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::Result;
 
@@ -39,6 +39,19 @@ pub struct RecordedEvent {
 /// Insert a webhook record. When `(provider, event_id)` already exists the
 /// existing row's id is returned and outcome is `Duplicate`.
 pub async fn record(pool: &PgPool, rec: &WebhookRecord) -> Result<RecordedEvent> {
+    let mut tx = pool.begin().await?;
+    let result = record_in_tx(&mut tx, rec).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Transaction-aware variant — used by callers that bundle the record +
+/// enqueue + status-update into a single atomic step (so a crash mid-
+/// pipeline cannot leave a "received" event without a matching job).
+pub async fn record_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    rec: &WebhookRecord,
+) -> Result<RecordedEvent> {
     let new_id = WebhookEventId::new();
     let new_uuid: uuid::Uuid = new_id.into();
 
@@ -62,7 +75,7 @@ pub async fn record(pool: &PgPool, rec: &WebhookRecord) -> Result<RecordedEvent>
     .bind(&rec.event_kind)
     .bind(&rec.payload_hash)
     .bind(&rec.payload)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await?;
 
     let id = WebhookEventId::from_uuid(row.0);
@@ -80,6 +93,18 @@ pub async fn mark_enqueued(pool: &PgPool, id: WebhookEventId) -> Result<()> {
     sqlx::query("UPDATE webhook_events SET status = 'enqueued' WHERE id = $1")
         .bind(id_uuid)
         .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn mark_enqueued_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: WebhookEventId,
+) -> Result<()> {
+    let id_uuid: uuid::Uuid = id.into();
+    sqlx::query("UPDATE webhook_events SET status = 'enqueued' WHERE id = $1")
+        .bind(id_uuid)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }

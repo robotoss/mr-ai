@@ -149,10 +149,11 @@ impl LlmGateway {
         })
     }
 
-    /// Build a gateway from explicit provider trait objects. Intended for
-    /// tests and other callers that already own concrete provider
-    /// implementations and do not want the env-driven `from_config` path
-    /// (with its `pricing.toml` lookup).
+    /// Build a gateway from explicit provider trait objects. **Test- and
+    /// fixture-only.** This bypasses `pricing.toml`, so cost analytics
+    /// always report `0.0` regardless of provider — production code paths
+    /// must go through [`LlmGateway::from_config`]. Recorder is hardwired
+    /// to `NoopUsageRecorder`; previews are disabled.
     pub fn with_providers(
         fast: Arc<dyn crate::traits::LlmProvider>,
         smart: Arc<dyn crate::traits::LlmProvider>,

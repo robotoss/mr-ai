@@ -38,6 +38,21 @@ pub async fn enqueue(
     payload: &Value,
     opts: EnqueueOptions,
 ) -> Result<JobId> {
+    let mut tx = pool.begin().await?;
+    let id = enqueue_in_tx(&mut tx, kind, payload, opts).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Transaction-aware variant — bundle inside a `webhook_events::record_in_tx`
+/// + `mark_enqueued_in_tx` window so retried deliveries cannot end up with
+/// a "received" row but no job to drive them.
+pub async fn enqueue_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: &str,
+    payload: &Value,
+    opts: EnqueueOptions,
+) -> Result<JobId> {
     let id = JobId::new();
     let id_uuid: uuid::Uuid = id.into();
     let project_uuid: Option<uuid::Uuid> = opts.project_id.map(|p| p.into());
@@ -54,7 +69,7 @@ pub async fn enqueue(
     .bind(payload)
     .bind(max_attempts)
     .bind(run_at)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(id)

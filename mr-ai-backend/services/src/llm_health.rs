@@ -17,7 +17,7 @@ use std::time::Duration;
 use ai_llm_service::{HealthSnapshot, LlmGateway};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -57,29 +57,44 @@ impl LlmHealthMonitor {
         self.inner.read().await.clone()
     }
 
-    /// Spawn a background refresher. Returns the join handle plus the
-    /// monitor that should be cloned into AppState. The first refresh is
-    /// awaited synchronously so subsequent probes never see the empty
-    /// default.
+    /// Spawn a background refresher and return both the monitor (clone into
+    /// `AppState`) and a `LlmHealthSupervisor` that must be drained on
+    /// graceful shutdown to avoid leaking the background task. The first
+    /// refresh is awaited synchronously so subsequent probes never see the
+    /// empty default.
     pub async fn start(
         gateway: Arc<LlmGateway>,
         interval: Duration,
-    ) -> (Self, JoinHandle<()>) {
+    ) -> (Self, LlmHealthSupervisor) {
         let monitor = Self::empty();
-        // Warm-up refresh before the loop spins up.
         monitor.refresh_now(&gateway).await;
 
+        let cancel = Arc::new(Notify::new());
+        let cancel_for_task = cancel.clone();
         let handle_monitor = monitor.clone();
         let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             // First tick fires immediately; we already refreshed, so skip.
             ticker.tick().await;
             loop {
-                ticker.tick().await;
-                handle_monitor.refresh_now(&gateway).await;
+                tokio::select! {
+                    _ = cancel_for_task.notified() => {
+                        debug!(target = "llm_health", "supervisor received shutdown");
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        handle_monitor.refresh_now(&gateway).await;
+                    }
+                }
             }
         });
-        (monitor, handle)
+        (
+            monitor,
+            LlmHealthSupervisor {
+                handle: Some(handle),
+                cancel,
+            },
+        )
     }
 
     async fn refresh_now(&self, gateway: &Arc<LlmGateway>) {
@@ -102,7 +117,17 @@ impl LlmHealthMonitor {
                 if healthy {
                     info!(target = "llm_health", "all providers healthy");
                 } else {
-                    warn!(target = "llm_health", "at least one provider unhealthy");
+                    let failing: Vec<String> = state
+                        .items
+                        .iter()
+                        .filter(|s| !s.ok)
+                        .map(|s| format!("{:?}/{}: {}", s.role, s.model, s.message))
+                        .collect();
+                    warn!(
+                        target = "llm_health",
+                        failing = ?failing,
+                        "at least one provider unhealthy"
+                    );
                 }
             }
             Err(_) => {
@@ -114,6 +139,33 @@ impl LlmHealthMonitor {
                     "health probe timed out"
                 );
             }
+        }
+    }
+}
+
+/// Owns the background refresh task. Drop or `shutdown()` to drain it —
+/// dropping without shutdown still aborts the task (`JoinHandle::abort`)
+/// so the monitor never outlives the host process, but explicit
+/// `shutdown().await` is the clean path that lets the in-flight refresh
+/// finish first.
+pub struct LlmHealthSupervisor {
+    handle: Option<JoinHandle<()>>,
+    cancel: Arc<Notify>,
+}
+
+impl LlmHealthSupervisor {
+    pub async fn shutdown(mut self) {
+        self.cancel.notify_waiters();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for LlmHealthSupervisor {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
         }
     }
 }

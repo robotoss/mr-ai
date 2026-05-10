@@ -21,7 +21,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{ProjectId, ProviderKind, RepoId};
 use persistence::repos::{jobs, projects, webhook_events};
-use secrets::EnvSecretProvider;
+use secrets::FileSecretProvider;
 use services::llm_health::LlmHealthMonitor;
 use sqlx::PgPool;
 use testcontainers::runners::AsyncRunner;
@@ -71,7 +71,13 @@ async fn register_repo(
     (project_id, repo.id)
 }
 
-fn build_state(pool: PgPool) -> Arc<api::core::app_state::AppState> {
+/// Build state backed by a `FileSecretProvider` rooted in a temp dir so
+/// the test can plant `webhook_hmac` without mutating process-global env
+/// (race-free with any other `#[ignore]` test that needs the same key).
+fn build_state(
+    pool: PgPool,
+    secrets_root: &std::path::Path,
+) -> Arc<api::core::app_state::AppState> {
     let config = Arc::new(api::core::app_state::AppConfig {
         project_name: "smoke".into(),
         git_api_base: "https://gitlab.example/api/v4".into(),
@@ -81,7 +87,7 @@ fn build_state(pool: PgPool) -> Arc<api::core::app_state::AppState> {
     Arc::new(api::core::app_state::AppState::new(
         config,
         dummy_gateway(),
-        Arc::new(EnvSecretProvider::new()),
+        Arc::new(FileSecretProvider::new(secrets_root.to_path_buf())),
         Some(pool),
         LlmHealthMonitor::empty(),
     ))
@@ -97,17 +103,15 @@ async fn webhook_gitlab_full_round_trip() {
     let remote = "git@gitlab.com:org/smoke.git";
     let (_project_id, _repo_id) = register_repo(&pool, remote).await;
 
-    // Webhook secret comes from SecretProvider — set it inline so the
-    // route's `verify_gitlab_token` matches.
+    // Webhook secret comes from SecretProvider — plant it on disk via
+    // FileSecretProvider so we don't race other tests on env state.
     let secret = "smoke-secret";
-    // Use a dedicated env var that does not clash with other tests.
-    let secret_var = "WEBHOOK_HMAC_SECRET";
-    let prev = std::env::var(secret_var).ok();
-    unsafe {
-        std::env::set_var(secret_var, secret);
-    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let global_dir = tmp.path().join("_global");
+    std::fs::create_dir_all(&global_dir).expect("create _global dir");
+    std::fs::write(global_dir.join("webhook_hmac"), secret).expect("write secret");
 
-    let state = build_state(pool.clone());
+    let state = build_state(pool.clone(), tmp.path());
     let app = Router::new()
         .route("/webhooks/gitlab", post(gitlab_webhook_route))
         .with_state(state);
@@ -191,17 +195,6 @@ async fn webhook_gitlab_full_round_trip() {
         .unwrap()
         .expect("queued job should be claimable");
     assert_eq!(claimed.kind, worker::handlers::KIND_INGEST_MR);
-
-    // Cleanup the env override.
-    if let Some(value) = prev {
-        unsafe {
-            std::env::set_var(secret_var, value);
-        }
-    } else {
-        unsafe {
-            std::env::remove_var(secret_var);
-        }
-    }
 
     // Webhook_events module isn't strictly required at this point but the
     // import keeps the assertion neighbourhood honest; force the import

@@ -204,12 +204,26 @@ async fn process_one(
     worker_id: &str,
     job: ClaimedJob,
 ) {
+    // Pull the upstream webhook event_id off the payload (when present) so
+    // a single correlation key threads webhook → queue → handler logs.
+    let event_id = job
+        .payload
+        .get("event_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-")
+        .to_owned();
+    let project_id = job
+        .project_id
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "-".to_owned());
     let span = tracing::info_span!(
         "job",
         worker = worker_id,
         job_id = %job.id,
         kind = %job.kind,
-        attempt = job.attempt
+        attempt = job.attempt,
+        event_id = %event_id,
+        project_id = %project_id
     );
     let _enter = span.enter();
     debug!("dispatch");
