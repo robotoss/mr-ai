@@ -199,6 +199,57 @@ async fn complete_propagates_provider_failure() {
 }
 
 #[tokio::test]
+async fn usage_snapshot_aggregates_completion_and_embedding() {
+    let fast: Arc<dyn LlmProvider> = Arc::new(MockLlm {
+        provider: ProviderKind::OpenAI,
+        model: "gpt-4o-mini".into(),
+        endpoint: "https://test".into(),
+        fixed_content: "ok".into(),
+        usage: TokenUsage::new(1_000_000, 1_000_000),
+        fail: false,
+    });
+    let smart = fast.clone();
+    let embedding: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbed {
+        provider: ProviderKind::OpenAI,
+        model: "text-embedding-3-small".into(),
+        endpoint: "https://test".into(),
+        dim: 4,
+    });
+
+    let gw = LlmGateway::from_parts(fast, smart, embedding, fixture_pricing());
+
+    // Two completions on the fast tier.
+    gw.complete(ModelTier::Fast, UnifiedRequest::user_only("a"))
+        .await
+        .unwrap();
+    gw.complete(ModelTier::Fast, UnifiedRequest::user_only("b"))
+        .await
+        .unwrap();
+    // One embedding batch of size 3.
+    gw.embed_batch(
+        EmbeddingTier::Default,
+        EmbeddingRequest::new(vec!["x".into(), "y".into(), "z".into()]),
+    )
+    .await
+    .unwrap();
+
+    let snap = gw.usage_snapshot();
+    assert_eq!(snap.total_calls, 3);
+    assert_eq!(snap.total_completions, 2);
+    assert_eq!(snap.total_embeddings, 1);
+    assert_eq!(snap.total_prompt_tokens, 2_000_000 + (3 * 4));
+    assert_eq!(snap.total_completion_tokens, 2_000_000);
+    // Per-model breakdown.
+    let fast_key = "fast/openai/gpt-4o-mini";
+    let bucket = snap.by_tier_model.get(fast_key).expect("fast bucket");
+    assert_eq!(bucket.calls, 2);
+    let embed_key = "default/openai/text-embedding-3-small";
+    let embed_bucket = snap.by_tier_model.get(embed_key).expect("embed bucket");
+    assert_eq!(embed_bucket.calls, 1);
+    assert!(snap.last_call_at.is_some());
+}
+
+#[tokio::test]
 async fn embed_batch_returns_aligned_vectors() {
     let fast: Arc<dyn LlmProvider> = Arc::new(MockLlm {
         provider: ProviderKind::OpenAI,

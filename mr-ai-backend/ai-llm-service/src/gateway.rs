@@ -10,19 +10,24 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::analytics::CostEstimator;
 use crate::config::pricing::PriceTable;
 use crate::config::provider_kind::ProviderKind;
-use crate::config::{GatewayConfig, ProviderConfig};
+use crate::config::{GatewayConfig, ProviderConfig, UsageConfig};
 use crate::errors::GatewayError;
 use crate::health::{HealthRole, HealthSnapshot};
 use crate::providers::{BedrockProvider, OllamaProvider, OpenAiProvider};
 use crate::traits::{EmbeddingProvider, LlmProvider};
 use crate::unified::{
     EmbeddingRequest, EmbeddingResponse, UnifiedRequest, UnifiedResponse,
+};
+use crate::usage::{
+    JsonlUsageRecorder, NoopUsageRecorder, UsageCounters, UsageKind, UsageRecord, UsageRecorder,
+    UsageSnapshot, truncate_preview,
 };
 
 /// Logical completion tiers exposed to callers.
@@ -50,6 +55,10 @@ pub struct LlmGateway {
     fast_meta: ProviderMeta,
     smart_meta: ProviderMeta,
     embedding_meta: ProviderMeta,
+    counters: UsageCounters,
+    recorder: Arc<dyn UsageRecorder>,
+    record_previews: bool,
+    preview_chars: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +85,7 @@ impl std::fmt::Debug for LlmGateway {
             .field("smart", &self.smart_meta)
             .field("embedding", &self.embedding_meta)
             .field("price_table_entries", &self.cost.table().len())
+            .field("recorder", &self.recorder)
             .finish()
     }
 }
@@ -108,6 +118,8 @@ impl LlmGateway {
         let mut embeddings: HashMap<EmbeddingTier, Arc<dyn EmbeddingProvider>> = HashMap::new();
         embeddings.insert(EmbeddingTier::Default, embedding);
 
+        let recorder = build_recorder(&cfg.usage);
+
         info!(
             fast.provider = %fast_meta.provider,
             fast.model = %fast_meta.model,
@@ -115,6 +127,9 @@ impl LlmGateway {
             smart.model = %smart_meta.model,
             embed.provider = %embedding_meta.provider,
             embed.model = %embedding_meta.model,
+            usage.enabled = !cfg.usage.disabled,
+            usage.path = %cfg.usage.path.display(),
+            usage.previews = cfg.usage.include_prompts,
             "LlmGateway initialised"
         );
 
@@ -125,6 +140,10 @@ impl LlmGateway {
             fast_meta,
             smart_meta,
             embedding_meta,
+            counters: UsageCounters::new(),
+            recorder,
+            record_previews: cfg.usage.include_prompts,
+            preview_chars: cfg.usage.preview_chars,
         })
     }
 
@@ -140,6 +159,7 @@ impl LlmGateway {
             .ok_or(GatewayError::ProviderNotConfigured(tier))?;
 
         let request_id = req.request_id.clone();
+        let prompt_preview = self.maybe_prompt_preview(&req);
         let mut resp = provider.complete(req).await?;
         resp.cost = self.cost.estimate(resp.provider, &resp.model, resp.usage);
 
@@ -155,6 +175,28 @@ impl LlmGateway {
             latency_ms = resp.latency_ms,
             "completion ok"
         );
+
+        let response_preview = if self.record_previews {
+            Some(truncate_preview(&resp.content, self.preview_chars))
+        } else {
+            None
+        };
+        self.observe(UsageRecord {
+            timestamp: Utc::now(),
+            request_id: request_id.clone(),
+            kind: UsageKind::Completion,
+            tier: tier_label(tier).to_string(),
+            provider: resp.provider,
+            model: resp.model.clone(),
+            prompt_tokens: resp.usage.prompt,
+            completion_tokens: resp.usage.completion,
+            total_tokens: resp.usage.total,
+            cost_usd: resp.cost.usd,
+            latency_ms: resp.latency_ms,
+            batch_size: None,
+            prompt_preview,
+            response_preview,
+        });
 
         Ok(resp)
     }
@@ -172,6 +214,7 @@ impl LlmGateway {
 
         let request_id = req.request_id.clone();
         let batch_size = req.inputs.len();
+        let prompt_preview = self.maybe_embed_preview(&req);
         let mut resp = provider.embed_batch(req).await?;
         resp.cost = self.cost.estimate(resp.provider, &resp.model, resp.usage);
 
@@ -187,7 +230,57 @@ impl LlmGateway {
             "embedding ok"
         );
 
+        self.observe(UsageRecord {
+            timestamp: Utc::now(),
+            request_id: request_id.clone(),
+            kind: UsageKind::Embedding,
+            tier: embedding_tier_label(tier).to_string(),
+            provider: resp.provider,
+            model: resp.model.clone(),
+            prompt_tokens: resp.usage.prompt,
+            completion_tokens: 0,
+            total_tokens: resp.usage.total,
+            cost_usd: resp.cost.usd,
+            latency_ms: resp.latency_ms,
+            batch_size: Some(batch_size),
+            prompt_preview,
+            response_preview: None,
+        });
+
         Ok(resp)
+    }
+
+    /// Returns a snapshot of cumulative usage since process start.
+    ///
+    /// Cheap (one read lock + clone) and suitable for `/usage` HTTP polling.
+    pub fn usage_snapshot(&self) -> UsageSnapshot {
+        self.counters.snapshot()
+    }
+
+    fn observe(&self, rec: UsageRecord) {
+        self.counters.observe(&rec);
+        self.recorder.record(&rec);
+    }
+
+    fn maybe_prompt_preview(&self, req: &UnifiedRequest) -> Option<String> {
+        if !self.record_previews {
+            return None;
+        }
+        let joined = req
+            .messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role.as_str(), m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(truncate_preview(&joined, self.preview_chars))
+    }
+
+    fn maybe_embed_preview(&self, req: &EmbeddingRequest) -> Option<String> {
+        if !self.record_previews {
+            return None;
+        }
+        let joined = req.inputs.join(" | ");
+        Some(truncate_preview(&joined, self.preview_chars))
     }
 
     /// Probes every configured provider, returning a snapshot per tier.
@@ -221,6 +314,25 @@ impl LlmGateway {
         embedding: Arc<dyn EmbeddingProvider>,
         price_table: PriceTable,
     ) -> Self {
+        Self::from_parts_with_recorder(
+            fast,
+            smart,
+            embedding,
+            price_table,
+            Arc::new(NoopUsageRecorder),
+        )
+    }
+
+    /// Test-only constructor that also lets the caller plug a custom
+    /// [`UsageRecorder`] (e.g. an in-memory recorder for assertions).
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn from_parts_with_recorder(
+        fast: Arc<dyn LlmProvider>,
+        smart: Arc<dyn LlmProvider>,
+        embedding: Arc<dyn EmbeddingProvider>,
+        price_table: PriceTable,
+        recorder: Arc<dyn UsageRecorder>,
+    ) -> Self {
         let fast_meta = ProviderMeta {
             provider: fast.provider_kind(),
             model: fast.model().to_string(),
@@ -251,6 +363,10 @@ impl LlmGateway {
             fast_meta,
             smart_meta,
             embedding_meta,
+            counters: UsageCounters::new(),
+            recorder,
+            record_previews: false,
+            preview_chars: 0,
         }
     }
 }
@@ -287,6 +403,36 @@ async fn probe_embedding(
         Err(e) => {
             warn!(role = ?role, error = %e, "embedding health probe failed");
             HealthSnapshot::fail(role, meta.provider, &meta.model, &meta.endpoint, e.to_string())
+        }
+    }
+}
+
+fn tier_label(tier: ModelTier) -> &'static str {
+    match tier {
+        ModelTier::Fast => "fast",
+        ModelTier::Smart => "smart",
+    }
+}
+
+fn embedding_tier_label(tier: EmbeddingTier) -> &'static str {
+    match tier {
+        EmbeddingTier::Default => "default",
+    }
+}
+
+fn build_recorder(cfg: &UsageConfig) -> Arc<dyn UsageRecorder> {
+    if cfg.disabled {
+        return Arc::new(NoopUsageRecorder);
+    }
+    match JsonlUsageRecorder::new(cfg.path.clone()) {
+        Ok(r) => Arc::new(r),
+        Err(e) => {
+            warn!(
+                path = %cfg.path.display(),
+                error = %e,
+                "failed to initialise JsonlUsageRecorder; falling back to NoopUsageRecorder"
+            );
+            Arc::new(NoopUsageRecorder)
         }
     }
 }

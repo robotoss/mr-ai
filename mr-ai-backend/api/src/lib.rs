@@ -26,6 +26,7 @@ use crate::{
             vector_base_index_route::vector_base_index_route,
         },
         sync_git::sync_git_route::sync_git_route,
+        usage::usage_route::usage_route,
     },
 };
 
@@ -54,6 +55,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         .route("/vector_base_index", get(vector_base_index_route))
         .route("/search_vector_base", post(search_vector_base_route))
         .route("/trigger_git_mr", axum::routing::post(trigger_mr_route))
+        .route("/usage", get(usage_route))
         .fallback(handler_404)
         .layer(middleware::from_fn(json_error_mapper))
         .with_state(shared_state);

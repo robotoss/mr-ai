@@ -36,6 +36,8 @@ The crate exposes a small, deliberate surface:
 | `ProviderConfig`, `ProviderKind` | [`config/`](../../ai-llm-service/src/config/) | Per-provider configuration. |
 | `GatewayConfig` | [`config/mod.rs`](../../ai-llm-service/src/config/mod.rs) | Top-level typed env tree. |
 | `init_tracing(&LogConfig)` | [`telemetry.rs`](../../ai-llm-service/src/telemetry.rs) | Pretty stdout + JSON daily-rotated file. |
+| `LlmGateway::usage_snapshot()` | [`gateway.rs`](../../ai-llm-service/src/gateway.rs) | Cumulative counters: calls, tokens, cost, breakdown. |
+| `UsageRecorder`, `UsageRecord`, `UsageSnapshot` | [`usage.rs`](../../ai-llm-service/src/usage.rs) | Per-call audit trail. |
 | `GatewayError` | [`errors.rs`](../../ai-llm-service/src/errors.rs) | Top-level error. |
 
 Full schema reference: [reference/unified-schema](../reference/unified-schema.md).
@@ -140,6 +142,7 @@ ai-llm-service/src/
 ├── traits.rs               # LlmProvider, EmbeddingProvider, HealthInfo
 ├── unified.rs              # UnifiedRequest/Response/Message/Role/TokenUsage
 ├── analytics.rs            # CostEstimator
+├── usage.rs                # UsageRecorder, JsonlUsageRecorder, UsageCounters, UsageSnapshot
 ├── health.rs               # HealthSnapshot, HealthRole
 ├── errors.rs               # GatewayError + variants
 ├── telemetry.rs            # init_tracing (stdout + JSON file rotation)
@@ -203,5 +206,6 @@ Full table: [reference/errors](../reference/errors.md).
 - [Add a new LLM Provider](../guides/add-llm-provider.md)
 - [Unified Schema](../reference/unified-schema.md)
 - [Pricing](../reference/pricing.md)
+- [Usage Log](../reference/usage-log.md)
 - [Errors](../reference/errors.md)
 - [Observability](../guides/observability.md)

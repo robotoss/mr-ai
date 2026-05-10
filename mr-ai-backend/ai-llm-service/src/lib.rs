@@ -21,8 +21,9 @@ pub mod sigv4;
 pub mod telemetry;
 pub mod traits;
 pub mod unified;
+pub mod usage;
 
-pub use config::{GatewayConfig, LogConfig, PriceTable, ProviderConfig, ProviderKind};
+pub use config::{GatewayConfig, LogConfig, PriceTable, ProviderConfig, ProviderKind, UsageConfig};
 pub use errors::GatewayError;
 pub use gateway::{EmbeddingTier, LlmGateway, ModelTier};
 pub use health::{HealthRole, HealthSnapshot};
@@ -31,4 +32,8 @@ pub use traits::{EmbeddingProvider, HealthInfo, LlmProvider};
 pub use unified::{
     CostEstimate, EmbeddingRequest, EmbeddingResponse, Role, TokenUsage, UnifiedMessage,
     UnifiedRequest, UnifiedResponse, new_request_id,
+};
+pub use usage::{
+    JsonlUsageRecorder, NoopUsageRecorder, TierModelStats, UsageKind, UsageRecord, UsageRecorder,
+    UsageSnapshot,
 };

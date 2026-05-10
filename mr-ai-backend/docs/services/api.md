@@ -31,6 +31,7 @@ adapter over the lower layers.
 | `GET` | `/vector_base_index` | [`vector_base_index_route`](../../api/src/routes/rag_base/vector_base_index_route.rs) | Triggers `rag_base::load_fresh_index` against Qdrant. |
 | `POST` | `/search_vector_base` | [`search_vector_base_route`](../../api/src/routes/rag_base/search_vector_base_route.rs) | Semantic search via `rag_base::search_code`. |
 | `POST` | `/trigger_git_mr` | [`trigger_mr_route`](../../api/src/routes/check_mr/trigger_mr_route.rs) | End-to-end MR review pipeline. |
+| `GET` | `/usage` | [`usage_route`](../../api/src/routes/usage/usage_route.rs) | Live snapshot: total calls, tokens, USD cost, per-(tier,provider,model) breakdown. |
 | (any) | `/*` | `handler_404` | Fallback. |
 
 ## Architecture

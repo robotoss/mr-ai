@@ -19,6 +19,19 @@ the code as truth and update this page.
 
 Loaded by [`init_tracing`](../../ai-llm-service/src/telemetry.rs).
 
+## Usage history
+
+Append-only per-call audit log. See
+[reference/usage-log](../reference/usage-log.md) for the full schema and
+`jq` cookbook.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `USAGE_LOG_PATH` | `logs/usage.jsonl` | JSONL file; one record per gateway call. |
+| `USAGE_LOG_DISABLED` | `false` | Replace persister with a no-op. Counters still run. |
+| `USAGE_LOG_INCLUDE_PROMPTS` | `false` | Add truncated prompt/response previews to records. |
+| `USAGE_LOG_PREVIEW_CHARS` | `200` | Preview truncation length (Unicode chars). |
+
 ## Gateway
 
 | Var | Default | Purpose |

@@ -129,8 +129,30 @@ Field-level fan-out you can build directly on the JSON log file:
 - **Health flapping**: count of `health_all` snapshots with `ok=false` per
   tier per minute.
 
+## Usage history & live counters
+
+Beyond the per-call `info!` line, the gateway also persists every call to
+`logs/usage.jsonl` (append-only) and exposes an in-memory aggregate
+through `gateway.usage_snapshot()`.
+
+The `api` crate serves it as **`GET /usage`**:
+
+```bash
+curl http://localhost:8080/usage | jq .
+# => total_calls / total_tokens / total_cost_usd / by_tier_model breakdown
+```
+
+The JSONL file is a faithful, replayable record of every call (timestamp,
+tokens, cost, latency, request_id) — survives process restarts and is
+designed for `jq` / SQL-on-files.
+
+Full schema, retention guidance, and a jq cookbook:
+[reference/usage-log](../reference/usage-log.md).
+
 ## Related docs
 
-- [Configuration](configuration.md) — `LOG_DIR`, `LOG_LEVEL`, `LOG_FILE_PREFIX`.
+- [Configuration](configuration.md) — `LOG_DIR`, `LOG_LEVEL`, `LOG_FILE_PREFIX`,
+  `USAGE_LOG_*`.
+- [reference/usage-log](../reference/usage-log.md) — per-call audit schema and jq queries.
 - [reference/pricing](../reference/pricing.md) — adding cost rows.
 - [reference/errors](../reference/errors.md) — what each error means.

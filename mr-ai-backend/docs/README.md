@@ -52,6 +52,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | --- | --- |
 | [Unified Schema](reference/unified-schema.md) | `UnifiedRequest` / `UnifiedResponse` and their provider-specific translations. |
 | [Pricing](reference/pricing.md) | `pricing.toml` schema and cost-estimation math. |
+| [Usage Log](reference/usage-log.md) | Per-call JSONL history, `/usage` endpoint, jq cookbook. |
 | [Errors](reference/errors.md) | Error hierarchy, where each variant comes from, how it's mapped at boundaries. |
 
 ## Conventions

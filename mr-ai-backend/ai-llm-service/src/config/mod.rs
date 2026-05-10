@@ -26,6 +26,31 @@ pub struct GatewayConfig {
     pub pricing_path: PathBuf,
     pub log: LogConfig,
     pub health_timeout_secs: u64,
+    pub usage: UsageConfig,
+}
+
+/// Usage history & cost analytics persistence settings.
+#[derive(Debug, Clone)]
+pub struct UsageConfig {
+    /// JSONL file where per-call records are appended.
+    pub path: PathBuf,
+    /// When `true`, the recorder is replaced with a no-op.
+    pub disabled: bool,
+    /// When `true`, records also include truncated prompt + response previews.
+    pub include_prompts: bool,
+    /// Preview truncation length in Unicode characters.
+    pub preview_chars: usize,
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from("logs/usage.jsonl"),
+            disabled: false,
+            include_prompts: false,
+            preview_chars: 200,
+        }
+    }
 }
 
 impl GatewayConfig {
@@ -61,6 +86,35 @@ impl GatewayConfig {
 
         let health_timeout_secs = env_opt_u64("LLM_HEALTH_TIMEOUT_SECS")?.unwrap_or(10);
 
+        let usage = UsageConfig {
+            path: std::env::var("USAGE_LOG_PATH")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("logs/usage.jsonl")),
+            disabled: matches!(
+                std::env::var("USAGE_LOG_DISABLED")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim)
+                    .map(str::to_lowercase)
+                    .as_deref(),
+                Some("1") | Some("true") | Some("yes") | Some("on")
+            ),
+            include_prompts: matches!(
+                std::env::var("USAGE_LOG_INCLUDE_PROMPTS")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim)
+                    .map(str::to_lowercase)
+                    .as_deref(),
+                Some("1") | Some("true") | Some("yes") | Some("on")
+            ),
+            preview_chars: env_opt_u32("USAGE_LOG_PREVIEW_CHARS")?
+                .map(|v| v as usize)
+                .unwrap_or(200),
+        };
+
         Ok(Self {
             fast,
             smart,
@@ -68,6 +122,7 @@ impl GatewayConfig {
             pricing_path,
             log,
             health_timeout_secs,
+            usage,
         })
     }
 }
