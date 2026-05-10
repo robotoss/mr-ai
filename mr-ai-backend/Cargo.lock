@@ -1039,6 +1039,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "urlencoding",
@@ -2652,7 +2653,11 @@ dependencies = [
 name = "services"
 version = "0.1.0"
 dependencies = [
+ "ai-llm-service",
  "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "uuid",

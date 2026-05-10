@@ -63,11 +63,37 @@ rerank so the reranker never overspends.
 
 ## Rerank
 
-S4-A ships [`heuristic_rerank`](../../git-context-engine/src/retrieval/plan.rs)
-— stable-sort by score, break ties by `hops` then `file`. S4-B replaces
-it with an LLM call routed through `LlmGateway`. The reranker boundary
-is a free function, not a trait, so swapping it out is a one-line change
-at the call site.
+Two reranker functions are available. Choose the one that matches your
+context budget and SLA:
+
+- [`heuristic_rerank`](../../git-context-engine/src/retrieval/plan.rs) —
+  stable-sort by score, break ties by `hops` then `file`. Free, instant,
+  good baseline.
+- [`llm_rerank`](../../git-context-engine/src/retrieval/llm_rerank.rs)
+  (S7) — calls `LlmGateway::complete(Smart, …)` with a JSON-shaped
+  prompt asking the model to score each seed in `[0, 1]`. Tolerates
+  Markdown code-fence wrapping and prose preambles. **Falls back to the
+  heuristic on any failure** (timeout, gateway error, malformed JSON,
+  no items returned), so the pipeline always produces hits.
+
+Prompt outline:
+
+```text
+You are reranking code retrieval candidates for a code review.
+Return STRICTLY a JSON object of the form:
+{"items":[{"chunk_id":"<id>","score":<float in [0,1]>},…]}
+Only include the chunk_ids supplied below; do not invent new ones.
+
+QUERY:
+<diff hunk / target description>
+
+SEEDS:
+- chunk_id: <id>; file: <path>; symbol: <symbol_path>; source: <Vector|...>; current_score: <f>
+…
+```
+
+Both reranker boundaries are free functions, not traits — swapping is a
+one-line change at the call site.
 
 ## Configuration
 

@@ -100,20 +100,29 @@ async fn check_secrets(state: &Arc<AppState>, _timeout: std::time::Duration) -> 
 }
 
 async fn check_llm_gateway(
-    _state: &Arc<AppState>,
+    state: &Arc<AppState>,
     _timeout: std::time::Duration,
 ) -> ComponentReport {
-    // The gateway exposes its own `health_all` at boot. A live probe per
-    // request would be expensive (every detail call would burn LLM
-    // credits). Surface the last-known status from process boot for now;
-    // S5-B replaces this with a cached snapshot updated by a background
-    // task.
+    let snapshot = state.llm_health.current().await;
+    let note = match snapshot.last_refreshed_at {
+        Some(ts) => Some(format!(
+            "{} provider(s); last refreshed {}; failures {}",
+            snapshot.items.len(),
+            ts.to_rfc3339(),
+            snapshot.refresh_failures
+        )),
+        None => Some("not yet refreshed".into()),
+    };
     ComponentReport {
         name: "llm_gateway",
-        healthy: true,
+        healthy: snapshot.healthy,
         latency_ms: None,
-        error: None,
-        note: Some("checked at boot; live probe lands in S5-B".into()),
+        error: snapshot
+            .items
+            .iter()
+            .find(|s| !s.ok)
+            .map(|s| format!("{:?}: {}", s.role, s.message)),
+        note,
     }
 }
 

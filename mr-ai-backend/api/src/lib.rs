@@ -93,12 +93,24 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         );
     }
 
+    // Live LLM gateway health probe (background-refreshed snapshot).
+    let llm_health_interval = std::time::Duration::from_secs(
+        env::var("LLM_HEALTH_REFRESH_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60),
+    );
+    let (llm_health_monitor, _llm_health_handle) =
+        services::llm_health::LlmHealthMonitor::start(gateway.clone(), llm_health_interval).await;
+    println!("{}", "✅ LLM health monitor warmed up".green());
+
     // Build shared state
     let shared_state = Arc::new(AppState::new(
         config.clone(),
         gateway.clone(),
         secrets_provider,
         db_pool.clone(),
+        llm_health_monitor,
     ));
     println!("{}", "✅ Shared state initialized".green());
 

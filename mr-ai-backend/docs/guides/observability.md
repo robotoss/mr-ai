@@ -23,6 +23,24 @@ A single hung dependency cannot stall the probe — every check runs under
 counts in the `note` field; the component flips to unhealthy when the
 dead-letter row count crosses `1000`.
 
+## Live LLM gateway probe (S7)
+
+The `llm_gateway` component is no longer a boot-time snapshot —
+[`services::llm_health::LlmHealthMonitor`](../../services/src/llm_health.rs)
+runs a background task that calls `LlmGateway::health_all()` on a fixed
+interval and caches the latest result. Probes serve from the cache so
+`/health/detailed` does not pay an LLM round-trip per request.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `LLM_HEALTH_REFRESH_SECS` | `60` | Interval between background refreshes. |
+
+The monitor warms up synchronously on boot — `/health/detailed` already
+returns a current snapshot by the time the HTTP listener starts. Each
+refresh has a 15 s hard timeout; failures increment `refresh_failures`
+in the snapshot so dashboards can flag a stuck provider while still
+serving the previous good payload.
+
 ## Retry helper (S5)
 
 [`services::retry::retry_async`](../../services/src/retry.rs) wraps any

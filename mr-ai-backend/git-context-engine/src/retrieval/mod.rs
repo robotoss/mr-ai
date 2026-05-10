@@ -13,6 +13,10 @@
 //! `crate::rag_layer::build_rag_contexts_for_targets` continues to back
 //! the existing `/trigger_git_mr` flow until the worker takes over.
 
+pub mod llm_rerank;
 pub mod plan;
 
+pub use llm_rerank::{
+    build_rerank_prompt, llm_rerank, parse_rerank_response, LlmRerankError,
+};
 pub use plan::{RetrievalPlan, RetrievalSeed, ScoredHit};
