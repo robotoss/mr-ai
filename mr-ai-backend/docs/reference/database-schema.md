@@ -13,12 +13,13 @@ and are managed via `sqlx-cli`.
 | Range | Sprint | Tables |
 | --- | --- | --- |
 | `0001..0006` | **S1** | projects, project_repos, project_dependencies, webhook_events, jobs, mr_reviews, secrets_metadata, index_state |
-| `0007..0009` | S2 | (queue evolution: indexes, retry_after) |
-| `0010..0012` | S3 | graph_nodes, graph_edges |
+| `0007..0009` | S2 | (queue evolution: indexes, retry_after) — folded into S1 migrations |
+| `0010..0011` | **S3** | graph_nodes, graph_edges |
+| `0012` | S3-D | (sidecar-derived data_flow / control_flow markers, when they land) |
 | `0013..0014` | S4 | overlay metrics, delta tracking |
 | `0015+`      | S5 | retention TTLs, cleanup |
 
-This page documents what is shipped today (S1).
+This page documents S1 + S3.
 
 ## Tables (S1)
 
@@ -147,6 +148,45 @@ incremental delta updater (S4) can compute `last_indexed_sha → HEAD`.
 | `last_indexed_at` | TIMESTAMPTZ | |
 | `last_error` | TEXT | |
 
+## Tables (S3 — graph layer)
+
+### `graph_nodes`
+
+Addressable code entity (file, package, class, method, field, …). The
+language analyzer produces these via [`LanguageAnalyzer::analyze_chunks`](../../code-indexer/src/analyzer/mod.rs)
+and they are persisted by [`graph_persist::persist_graph`](../../persistence/src/graph_persist.rs).
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | UUID PK | Surrogate identity stable across re-indexing. |
+| `repo_id` | UUID FK → project_repos.id | `ON DELETE CASCADE`. |
+| `fqn` | TEXT | Stable identity inside a repo (e.g. `lib/main.dart::AppRouter::goToHome`). |
+| `kind` | TEXT | One of file/package/module/class/interface/mixin/extension/enum/function/method/constructor/field/variable/typedef + `Custom`. |
+| `file` | TEXT | Repo-relative file path. |
+| `symbol` | TEXT | Short name. |
+| `language` | TEXT | Language tag (`dart`, `rust`, `unknown` for placeholders). |
+| `content_sha256` | TEXT | Hash of the chunk body that defined the node. |
+| `span_start` / `span_end` | INTEGER | Byte offsets within the file. |
+| `created_at` / `updated_at` | TIMESTAMPTZ | Auto-set; `updated_at` rewritten on upsert. |
+| | | Unique `(repo_id, fqn)`. |
+
+Indexes: `graph_nodes_repo_kind_idx (repo_id, kind)`, `graph_nodes_file_idx
+(repo_id, file)`, `graph_nodes_symbol_idx (symbol)`.
+
+### `graph_edges`
+
+Directed edges keyed by `(from_node, to_node, edge_type)`.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | BIGSERIAL PK | Surrogate. |
+| `from_node` / `to_node` | UUID FK → graph_nodes.id | `ON DELETE CASCADE`. |
+| `edge_type` | TEXT | `imports` / `defines` / `calls` / `inherits` / `type_uses` / `package_dep` / `data_flow` / `control_flow` / `async_boundary` (+ language-specific custom). |
+| `weight` | REAL | Default `1.0`; analyzers set `0.7` for soft relations like `with` / `implements`. |
+| `meta` | JSONB | Optional small payload (call-site row, alias, branch label). |
+
+Indexes: `graph_edges_from_idx`, `graph_edges_to_idx`, `graph_edges_type_idx`.
+
 ## Migration workflow
 
 ```bash
@@ -185,6 +225,9 @@ erDiagram
     project_repos ||--o{ project_dependencies : "to"
     project_repos ||--|| index_state : "tracks"
     project_repos ||--o{ mr_reviews : "primary"
+    project_repos ||--o{ graph_nodes : "owns"
+    graph_nodes ||--o{ graph_edges : "from"
+    graph_nodes ||--o{ graph_edges : "to"
     webhook_events ||--o{ jobs : "spawns (logical)"
 ```
 

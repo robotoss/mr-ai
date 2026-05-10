@@ -35,6 +35,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `code-indexer` | AST + LSP-style indexer producing JSONL chunks. | [code-indexer](services/code-indexer.md) |
 | `project-code-store` | Async git cloning over SSH / HTTPS. | [project-code-store](services/project-code-store.md) |
 | `git-service` | Bare clones + per-MR worktrees inside `project_code_store`. | [git-service](services/git-service.md) |
+| `graph-rag` | Postgres-backed code graph + retrieval pipeline. | [graph-rag](services/graph-rag.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 
@@ -46,6 +47,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Installation](guides/installation.md) | Full local environment with Postgres + Qdrant via Docker. |
 | [Secrets](guides/secrets.md) | `SecretProvider` model — env vs file-mount backends, layout, rotation. |
 | [Webhooks](guides/webhooks.md) | Native GitLab/GitHub/Bitbucket endpoints — signature, dedup, payloads. |
+| [Dart Analyzer sidecar](guides/dart-analyzer-sidecar.md) | Plan + RPC contract for the upcoming control-flow / data-flow extractor. |
 | [Add a new LLM Provider](guides/add-llm-provider.md) | Plug Anthropic / Groq / a custom backend behind the gateway. |
 | [Configuration](guides/configuration.md) | Every environment variable, where it's read, and what it controls. |
 | [Observability](guides/observability.md) | Log structure, file rotation, per-request analytics. |

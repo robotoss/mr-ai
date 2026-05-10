@@ -53,6 +53,7 @@ uuid_id!(ProjectId);
 uuid_id!(RepoId);
 uuid_id!(JobId);
 uuid_id!(WebhookEventId);
+uuid_id!(NodeId);
 
 /// MR / PR external identifier as reported by the provider (e.g. GitLab `iid`,
 /// GitHub PR number). Kept as a string because providers differ in shape.

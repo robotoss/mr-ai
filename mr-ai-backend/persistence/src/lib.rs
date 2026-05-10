@@ -12,6 +12,7 @@ use sqlx::{PgPool, migrate::Migrator};
 use thiserror::Error;
 use tracing::{info, warn};
 
+pub mod graph_persist;
 pub mod projects_config;
 pub mod repos;
 

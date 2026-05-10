@@ -1,5 +1,6 @@
 //! Public entrypoints for cross-platform code indexing with AST and optional LSP enrichment.
 
+pub mod analyzer;
 pub mod ast;
 pub mod diff_types;
 pub mod errors;

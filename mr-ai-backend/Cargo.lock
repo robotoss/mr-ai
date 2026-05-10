@@ -467,6 +467,8 @@ dependencies = [
 name = "code-indexer"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "domain",
  "lsp-types",
  "pathdiff",
  "regex",
