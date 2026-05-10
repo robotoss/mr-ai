@@ -16,9 +16,10 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -94,6 +95,22 @@ impl JsonlUsageRecorder {
     pub fn new(path: PathBuf) -> std::io::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+        // Pre-create the file with 0600 on Unix so even an external reader on
+        // the same host can't slurp it without explicit permission. The first
+        // write would create it with the umask-default mode otherwise.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&path);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = OpenOptions::new().create(true).append(true).open(&path);
         }
         Ok(Self {
             path,
@@ -244,6 +261,58 @@ pub fn truncate_preview(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// High-confidence secret patterns. Each entry is `(name, regex)`.
+///
+/// Matches are replaced with `[REDACTED:NAME]`. Patterns are anchored at
+/// well-known prefixes / shapes to keep false positives near zero on real
+/// code-review prompts.
+fn secret_patterns() -> &'static [(&'static str, Regex)] {
+    static PATTERNS: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        let raw: &[(&str, &str)] = &[
+            // OpenAI & Anthropic style: sk-..., sk-ant-..., sk-proj-...
+            ("OPENAI_OR_ANTHROPIC_KEY", r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,}\b"),
+            // AWS access key id (AKIA…, ASIA… for STS, AGPA…/AIDA… service principals).
+            ("AWS_ACCESS_KEY_ID", r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[0-9A-Z]{16}\b"),
+            // GitHub tokens (PAT, OAuth, server-to-server, refresh).
+            ("GITHUB_TOKEN", r"\bgh[opusr]_[A-Za-z0-9]{30,}\b"),
+            // GitLab personal access token.
+            ("GITLAB_PAT", r"\bglpat-[A-Za-z0-9_\-]{20,}\b"),
+            // Slack tokens.
+            ("SLACK_TOKEN", r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+            // Google API keys.
+            ("GOOGLE_API_KEY", r"\bAIza[0-9A-Za-z_\-]{35}\b"),
+            // JWT (header.payload.signature, all base64url).
+            (
+                "JWT",
+                r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b",
+            ),
+            // `Authorization: Bearer …` headers.
+            ("BEARER_TOKEN", r"(?i)\bbearer\s+[A-Za-z0-9._\-]{10,}\b"),
+            // Private keys — match the BEGIN line; full block redacted via the
+            // surrounding truncation since it'll exceed the preview budget.
+            ("PRIVATE_KEY", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+        ];
+        raw.iter()
+            .map(|(name, p)| (*name, Regex::new(p).expect("hard-coded regex is valid")))
+            .collect()
+    })
+}
+
+/// Replaces high-confidence secret patterns in `s` with `[REDACTED:KIND]`.
+///
+/// Designed for previews persisted in the usage log: even when an operator
+/// turns on `USAGE_LOG_INCLUDE_PROMPTS`, well-known credentials embedded in
+/// prompts (think: someone pasted an `Authorization: Bearer …` header into a
+/// review request) do not land on disk verbatim.
+pub fn redact_secrets(s: &str) -> String {
+    let mut out = s.to_string();
+    for (name, re) in secret_patterns() {
+        out = re.replace_all(&out, format!("[REDACTED:{name}]")).into_owned();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +384,67 @@ mod tests {
         assert_eq!(truncate_preview("café", 3), "caf…");
         assert_eq!(truncate_preview("", 10), "");
         assert_eq!(truncate_preview("anything", 0), "");
+    }
+
+    #[test]
+    fn redact_openai_anthropic_keys() {
+        let s = "use sk-proj-abcdefghijKLMNOPQRSTUVWXYZ012345 here";
+        let out = redact_secrets(s);
+        assert!(out.contains("[REDACTED:OPENAI_OR_ANTHROPIC_KEY]"));
+        assert!(!out.contains("sk-proj-abcdef"));
+
+        let s2 = "key=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        assert!(redact_secrets(s2).contains("[REDACTED:OPENAI_OR_ANTHROPIC_KEY]"));
+    }
+
+    #[test]
+    fn redact_aws_access_key_id() {
+        let s = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+        assert_eq!(
+            redact_secrets(s),
+            "AWS_ACCESS_KEY_ID=[REDACTED:AWS_ACCESS_KEY_ID]"
+        );
+
+        // STS session credentials.
+        let s2 = "creds: ASIAY34FZKBOKMUTVV7A end";
+        assert!(redact_secrets(s2).contains("[REDACTED:AWS_ACCESS_KEY_ID]"));
+    }
+
+    #[test]
+    fn redact_github_gitlab_slack_google() {
+        assert!(
+            redact_secrets("token=ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+                .contains("[REDACTED:GITHUB_TOKEN]")
+        );
+        assert!(
+            redact_secrets("glpat-AAAAAAAAAAAAAAAAAAAA").contains("[REDACTED:GITLAB_PAT]")
+        );
+        assert!(
+            redact_secrets("xoxb-1234567890-ABCDEFGHIJ").contains("[REDACTED:SLACK_TOKEN]")
+        );
+        // Google API keys are AIza + exactly 35 chars (39 total).
+        let google_key = format!("AIza{}", "B".repeat(35));
+        assert!(
+            redact_secrets(&google_key).contains("[REDACTED:GOOGLE_API_KEY]"),
+            "missed: {google_key}"
+        );
+    }
+
+    #[test]
+    fn redact_jwt_and_bearer_and_private_key() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.SflKxwRJSMeKKF2QT4fwpMeJf36";
+        assert!(redact_secrets(jwt).contains("[REDACTED:JWT]"));
+
+        let auth = "Authorization: Bearer abc.def-XYZ_0123456789";
+        assert!(redact_secrets(auth).contains("[REDACTED:BEARER_TOKEN]"));
+
+        let pk = "-----BEGIN RSA PRIVATE KEY-----\nMIIE...";
+        assert!(redact_secrets(pk).contains("[REDACTED:PRIVATE_KEY]"));
+    }
+
+    #[test]
+    fn redact_leaves_innocuous_text_untouched() {
+        let s = "Refactor `LlmGateway::complete` to log token usage and emit info!()";
+        assert_eq!(redact_secrets(s), s);
     }
 }

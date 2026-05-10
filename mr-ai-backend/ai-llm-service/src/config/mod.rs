@@ -37,7 +37,13 @@ pub struct UsageConfig {
     /// When `true`, the recorder is replaced with a no-op.
     pub disabled: bool,
     /// When `true`, records also include truncated prompt + response previews.
+    /// **Privacy-sensitive** — see `redact_secrets`.
     pub include_prompts: bool,
+    /// When `true` (default), high-confidence secret patterns
+    /// (API keys, tokens, JWTs, Bearer headers, PEM private-key markers) are
+    /// replaced with `[REDACTED:KIND]` before previews land on disk.
+    /// Only disable for short-lived debugging in trusted environments.
+    pub redact_secrets: bool,
     /// Preview truncation length in Unicode characters.
     pub preview_chars: usize,
 }
@@ -48,6 +54,7 @@ impl Default for UsageConfig {
             path: PathBuf::from("logs/usage.jsonl"),
             disabled: false,
             include_prompts: false,
+            redact_secrets: true,
             preview_chars: 200,
         }
     }
@@ -109,6 +116,16 @@ impl GatewayConfig {
                     .map(str::to_lowercase)
                     .as_deref(),
                 Some("1") | Some("true") | Some("yes") | Some("on")
+            ),
+            redact_secrets: !matches!(
+                std::env::var("USAGE_LOG_REDACT_SECRETS")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim)
+                    .map(str::to_lowercase)
+                    .as_deref(),
+                // Default ON; allow explicit opt-out only.
+                Some("0") | Some("false") | Some("no") | Some("off")
             ),
             preview_chars: env_opt_u32("USAGE_LOG_PREVIEW_CHARS")?
                 .map(|v| v as usize)

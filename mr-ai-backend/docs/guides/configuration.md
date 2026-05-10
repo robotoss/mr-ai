@@ -29,7 +29,8 @@ Append-only per-call audit log. See
 | --- | --- | --- |
 | `USAGE_LOG_PATH` | `logs/usage.jsonl` | JSONL file; one record per gateway call. |
 | `USAGE_LOG_DISABLED` | `false` | Replace persister with a no-op. Counters still run. |
-| `USAGE_LOG_INCLUDE_PROMPTS` | `false` | Add truncated prompt/response previews to records. |
+| `USAGE_LOG_INCLUDE_PROMPTS` | `false` | Add truncated prompt/response previews to records. **Privacy-sensitive.** |
+| `USAGE_LOG_REDACT_SECRETS` | `true` | Mask API keys / tokens / JWTs in previews before they hit disk. |
 | `USAGE_LOG_PREVIEW_CHARS` | `200` | Preview truncation length (Unicode chars). |
 
 ## Gateway

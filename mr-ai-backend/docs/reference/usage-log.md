@@ -42,7 +42,8 @@ Embedding records additionally carry `"batch_size": <n>` and
 `"completion_tokens": 0`.
 
 When `USAGE_LOG_INCLUDE_PROMPTS=true`, two extra fields are populated
-(both truncated to `USAGE_LOG_PREVIEW_CHARS` characters):
+(both truncated to `USAGE_LOG_PREVIEW_CHARS` characters, then the
+recorder writes the JSONL with mode `0600` on Unix):
 
 ```json
 {
@@ -52,8 +53,50 @@ When `USAGE_LOG_INCLUDE_PROMPTS=true`, two extra fields are populated
 }
 ```
 
-⚠️ **Privacy.** Previews may contain proprietary source code. Only enable
-the flag in trusted, audited environments.
+## Security considerations
+
+Previews are **privacy-sensitive** by nature: they're a verbatim slice of
+prompts and completions that flow through the gateway. In an MR-review
+context that means proprietary source code, internal architecture
+descriptions, and occasionally tokens that someone pasted into a diff.
+The system applies four protective layers before anything lands on disk:
+
+| Layer | Default | What it does |
+| --- | --- | --- |
+| `USAGE_LOG_INCLUDE_PROMPTS=false` | OFF | Previews aren't stored at all. The JSONL keeps only metrics — token counts, cost, latency, ids. |
+| `USAGE_LOG_REDACT_SECRETS=true` | ON | High-confidence secret patterns (see below) are replaced with `[REDACTED:KIND]` **before** truncation, so a token can't leak via its head half. |
+| Truncation | 200 chars | `USAGE_LOG_PREVIEW_CHARS` caps the stored slice; full prompts/responses never persist. |
+| File mode `0600` (Unix) | always | The recorder pre-creates `usage.jsonl` with owner-only RW. Other users on the host can't read the file. |
+
+**Patterns currently redacted** (regex anchored at the well-known
+prefix/shape, false positives are essentially zero on real prompts):
+
+- OpenAI / Anthropic API keys: `sk-…`, `sk-proj-…`, `sk-ant-…`
+- AWS access-key ids: `AKIA…`, `ASIA…`, `AGPA…`, `AIDA…`, `AROA…`, `AIPA…`, `ANPA…`, `ANVA…`, `ASCA…`
+- GitHub tokens: `ghp_…`, `gho_…`, `ghu_…`, `ghs_…`, `ghr_…`
+- GitLab personal access tokens: `glpat-…`
+- Slack tokens: `xoxb-…`, `xoxa-…`, `xoxp-…`, `xoxr-…`, `xoxs-…`
+- Google API keys: `AIza…`
+- JSON Web Tokens: `eyJ…\.eyJ…\..*`
+- `Authorization: Bearer …` headers
+- `-----BEGIN … PRIVATE KEY-----` markers (the body is then dropped by
+  truncation since the file budget is far smaller than a PEM block)
+
+**What the redactor cannot catch:**
+- Custom or vendor-specific tokens with no recognisable prefix.
+- Free-form passwords / passphrases.
+- Personally-identifiable information (emails, phone numbers, names).
+
+If your environment can produce any of those in prompts, keep
+`USAGE_LOG_INCLUDE_PROMPTS=false` — the in-memory counters and JSONL
+metrics still work exactly the same.
+
+**External controls you should still consider:**
+- Filesystem ACLs / `umask` aligned with `0600`.
+- Volume encryption at rest (FileVault, LUKS, EBS-encrypted disks).
+- Disk-level retention via `logrotate` / cron (the gateway never rotates
+  this file itself — see *Rotation & retention* below).
+- For multi-tenant hosts, run the process under a dedicated user.
 
 ## Live snapshot — `GET /usage`
 
@@ -168,6 +211,7 @@ env-var matrix.
 | `USAGE_LOG_PATH` | `logs/usage.jsonl` | Path to the append-only JSONL. |
 | `USAGE_LOG_DISABLED` | `false` | Replace the recorder with a no-op. In-memory counters still run. |
 | `USAGE_LOG_INCLUDE_PROMPTS` | `false` | Add truncated `prompt_preview` / `response_preview` fields. |
+| `USAGE_LOG_REDACT_SECRETS` | `true` | Redact known token / API-key patterns before previews are stored. |
 | `USAGE_LOG_PREVIEW_CHARS` | `200` | Preview truncation length (Unicode chars). |
 
 ## Related docs

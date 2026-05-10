@@ -27,7 +27,7 @@ use crate::unified::{
 };
 use crate::usage::{
     JsonlUsageRecorder, NoopUsageRecorder, UsageCounters, UsageKind, UsageRecord, UsageRecorder,
-    UsageSnapshot, truncate_preview,
+    UsageSnapshot, redact_secrets, truncate_preview,
 };
 
 /// Logical completion tiers exposed to callers.
@@ -58,6 +58,7 @@ pub struct LlmGateway {
     counters: UsageCounters,
     recorder: Arc<dyn UsageRecorder>,
     record_previews: bool,
+    redact_secrets: bool,
     preview_chars: usize,
 }
 
@@ -143,6 +144,7 @@ impl LlmGateway {
             counters: UsageCounters::new(),
             recorder,
             record_previews: cfg.usage.include_prompts,
+            redact_secrets: cfg.usage.redact_secrets,
             preview_chars: cfg.usage.preview_chars,
         })
     }
@@ -177,7 +179,7 @@ impl LlmGateway {
         );
 
         let response_preview = if self.record_previews {
-            Some(truncate_preview(&resp.content, self.preview_chars))
+            Some(self.shape_preview(&resp.content))
         } else {
             None
         };
@@ -272,7 +274,7 @@ impl LlmGateway {
             .map(|m| format!("{}: {}", m.role.as_str(), m.content))
             .collect::<Vec<_>>()
             .join("\n");
-        Some(truncate_preview(&joined, self.preview_chars))
+        Some(self.shape_preview(&joined))
     }
 
     fn maybe_embed_preview(&self, req: &EmbeddingRequest) -> Option<String> {
@@ -280,7 +282,19 @@ impl LlmGateway {
             return None;
         }
         let joined = req.inputs.join(" | ");
-        Some(truncate_preview(&joined, self.preview_chars))
+        Some(self.shape_preview(&joined))
+    }
+
+    /// Apply redaction (if enabled) **before** truncation. Order matters:
+    /// patterns must see the full prefix to recognise a secret; truncating
+    /// first could split a token mid-string and leak the head half.
+    fn shape_preview(&self, raw: &str) -> String {
+        let redacted: std::borrow::Cow<'_, str> = if self.redact_secrets {
+            std::borrow::Cow::Owned(redact_secrets(raw))
+        } else {
+            std::borrow::Cow::Borrowed(raw)
+        };
+        truncate_preview(&redacted, self.preview_chars)
     }
 
     /// Probes every configured provider, returning a snapshot per tier.
@@ -366,6 +380,7 @@ impl LlmGateway {
             counters: UsageCounters::new(),
             recorder,
             record_previews: false,
+            redact_secrets: true,
             preview_chars: 0,
         }
     }

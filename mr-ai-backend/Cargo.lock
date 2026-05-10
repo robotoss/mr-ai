@@ -34,6 +34,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "hmac",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

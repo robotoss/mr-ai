@@ -35,5 +35,5 @@ pub use unified::{
 };
 pub use usage::{
     JsonlUsageRecorder, NoopUsageRecorder, TierModelStats, UsageKind, UsageRecord, UsageRecorder,
-    UsageSnapshot,
+    UsageSnapshot, redact_secrets,
 };
