@@ -64,6 +64,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Usage Log](reference/usage-log.md) | Per-call JSONL history, `/usage` endpoint, jq cookbook. |
 | [Errors](reference/errors.md) | Error hierarchy, where each variant comes from, how it's mapped at boundaries. |
 | [Database Schema](reference/database-schema.md) | Postgres tables, migration workflow, ER diagram. |
+| [Qdrant Schema](reference/qdrant-schema.md) | Vector collection layout, payload fields, indexes, mutation API. |
 | [Job Queue](reference/job-queue.md) | Postgres-backed background queue, retry policy, kinds. |
 
 ## Conventions

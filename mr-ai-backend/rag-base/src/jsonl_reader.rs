@@ -190,12 +190,20 @@ fn map_line_to_triple(
         &keywords,
     );
 
-    // Lightweight payload
+    // Lightweight payload. project_id / repo_id / chunk_kind / parent_symbol_id
+    // are filled by callers that have multi-tenant scope (the worker pipeline
+    // in S2+). JSONL reader path is single-project legacy and leaves them
+    // None; reset_collection still indexes the columns so future migrations
+    // backfill cleanly.
     let payload = VectorPayload {
         id: chunk.id.clone(),
         file: chunk.file.clone(),
         language: language.clone(),
         kind: kind.clone(),
+        project_id: None,
+        repo_id: None,
+        chunk_kind: chunk.chunk_kind.map(|k| k.as_str().to_owned()),
+        parent_symbol_id: chunk.parent_symbol_id.clone(),
         symbol: chunk.symbol.clone(),
         symbol_path: chunk.symbol_path.clone(),
         signature: chunk.signature.clone().or(lsp_signature),
