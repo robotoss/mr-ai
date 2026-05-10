@@ -4,7 +4,7 @@ pub mod analyzer;
 pub mod ast;
 pub mod diff_types;
 pub mod errors;
-mod lsp;
+pub mod lsp;
 pub mod types;
 mod util;
 

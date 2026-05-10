@@ -1,0 +1,22 @@
+name: mr_ai_dart_analyzer_sidecar
+description: >
+  Dart Analyzer sidecar for mr-ai-backend. Hosts package:analyzer and exposes
+  control-flow / data-flow / async-boundary edge extraction over a Content-
+  Length-framed JSON-RPC channel on stdio. The Rust worker spawns this binary
+  as a long-lived subprocess; it never accepts TCP traffic.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  analyzer: ^7.0.0
+  meta: ^1.16.0
+
+dev_dependencies:
+  lints: ^4.0.0
+  test: ^1.25.0
+
+executables:
+  analyzer_sidecar: analyzer_sidecar

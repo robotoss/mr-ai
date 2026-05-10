@@ -42,14 +42,30 @@ unique key per case (see `secrets::tests::env_provider_*` for the
 pattern). One env-mutation test in a parallel runner can crash any other
 test that reads the same variable.
 
-## Integration tests (planned)
+## Integration tests
 
-The S2 plan reserves [`testcontainers-rs`](https://docs.rs/testcontainers/)
-for Postgres + Qdrant against real images, plus git fixture repos under
-`tests/fixtures/`. The first integration suite ships in S5-B alongside
-the E2E `webhook → review` smoke test. Today every integration-shaped
-test that does not require Docker lives as a unit test in the relevant
-crate.
+[`persistence/tests/integration.rs`](../../persistence/tests/integration.rs)
+boots a real Postgres via [`testcontainers-rs`](https://docs.rs/testcontainers/)
+and exercises the persistence layer end-to-end. The suite is gated by
+`#[ignore]` so the default `cargo test` path stays Docker-free. Run it
+with:
+
+```bash
+cargo test --workspace --tests -- --ignored
+```
+
+(Docker daemon must be running.) Today the suite covers:
+
+- migrations apply against a fresh database;
+- `upsert_group` / `load_by_slug` round-trip with idempotent re-runs;
+- graph node + edge upsert, neighbour lookup, edge-counts, `purge_repo`
+  cascade;
+- `webhook_events::record` dedup + status transitions;
+- `mr_reviews` lifecycle (`pending → running → published`);
+- `jobs` queue claim with `SKIP LOCKED` semantics.
+
+Future additions: Qdrant container + `rag-base` round-trip, end-to-end
+`webhook → queue → review` smoke that actually drives the worker.
 
 ## Smoke / manual checks
 

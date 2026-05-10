@@ -21,3 +21,7 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 toml = { workspace = true }
 domain = { workspace = true }
+
+[dev-dependencies]
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }

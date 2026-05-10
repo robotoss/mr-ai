@@ -32,6 +32,7 @@ use tracing::{debug, trace};
 
 use crate::analyzer::intent::{AnalysisOutcome, EdgeIntent, NodeIntent};
 use crate::analyzer::LanguageAnalyzer;
+use crate::lsp::dart::sidecar::{SidecarClient, SidecarError};
 use crate::types::{CodeChunk, LanguageKind, SymbolKind};
 
 #[derive(Debug, Default, Clone)]
@@ -211,6 +212,57 @@ impl LanguageAnalyzer for DartAnalyzer {
         trace!(target = "analyzer.dart", outcome = ?outcome);
         outcome
     }
+}
+
+/// Augment an `AnalysisOutcome` with the Dart Analyzer sidecar's
+/// `data_flow` / `control_flow` / `async_boundary` edges.
+///
+/// `workspace` must be the directory the sidecar is rooted in (typically
+/// the per-job worktree); `relative_files` are the repo-relative paths
+/// the sidecar should analyse.
+///
+/// The sidecar is optional — when neither `DART_SIDECAR_BINARY` nor
+/// `DART_SIDECAR_DART_ENTRYPOINT` is configured, this returns
+/// `Ok(false)` and the outcome is left untouched. Hard failures
+/// surface as `Err(SidecarError)` so the caller can decide between
+/// fail-fast and degrade-quietly.
+pub fn augment_with_sidecar(
+    outcome: &mut AnalysisOutcome,
+    workspace: &std::path::Path,
+    relative_files: Vec<String>,
+) -> Result<bool, SidecarError> {
+    let mut client = match SidecarClient::start() {
+        Ok(client) => client,
+        Err(SidecarError::Disabled) => return Ok(false),
+        Err(other) => return Err(other),
+    };
+    client.initialize(workspace)?;
+    let result = client.extract_edges(
+        relative_files,
+        vec![
+            domain::EdgeKind::DataFlow.as_str().to_owned(),
+            domain::EdgeKind::ControlFlow.as_str().to_owned(),
+            domain::EdgeKind::AsyncBoundary.as_str().to_owned(),
+        ],
+    )?;
+    let _ = client.shutdown();
+
+    for edge in result.edges {
+        let edge_kind: domain::EdgeKind = edge
+            .edge_type
+            .parse()
+            .unwrap_or_else(|_| domain::EdgeKind::Custom(edge.edge_type.clone()));
+        let intent = EdgeIntent {
+            from_fqn: edge.from_fqn,
+            to_fqn: edge.to_fqn,
+            edge_type: edge_kind.clone(),
+            weight: edge.weight,
+            meta: edge.meta,
+        };
+        outcome.coverage.record(&intent.edge_type);
+        outcome.edges.push(intent);
+    }
+    Ok(true)
 }
 
 fn map_symbol_kind(kind: &SymbolKind) -> NodeKind {

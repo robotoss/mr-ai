@@ -5,6 +5,7 @@
 mod client;
 mod merge;
 mod parse;
+pub mod sidecar;
 mod util;
 
 use crate::errors::{Error, Result};

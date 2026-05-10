@@ -375,7 +375,36 @@ impl JobHandler for ReindexHandler {
         let analysis = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let chunks = code_indexer::index_workspace(&workspace_clone, false)
                 .map_err(|e| e.to_string())?;
-            let outcome = DartAnalyzer::new().analyze_chunks(&chunks);
+            let mut outcome = DartAnalyzer::new().analyze_chunks(&chunks);
+
+            // Optional Dart Analyzer sidecar augmentation (S8). Failures
+            // degrade the run to tree-sitter-only data instead of aborting.
+            let dart_files: Vec<String> = chunks
+                .iter()
+                .filter(|c| matches!(c.language, code_indexer::LanguageKind::Dart))
+                .map(|c| c.file.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            match code_indexer::analyzer::dart::augment_with_sidecar(
+                &mut outcome,
+                &workspace_clone,
+                dart_files,
+            ) {
+                Ok(true) => tracing::info!(
+                    target = "worker.handler",
+                    "Reindex: sidecar augmentation applied"
+                ),
+                Ok(false) => tracing::debug!(
+                    target = "worker.handler",
+                    "Reindex: sidecar disabled"
+                ),
+                Err(err) => tracing::warn!(
+                    target = "worker.handler",
+                    error = %err,
+                    "Reindex: sidecar augmentation failed; continuing"
+                ),
+            }
             Ok((chunks.len(), outcome))
         })
         .await

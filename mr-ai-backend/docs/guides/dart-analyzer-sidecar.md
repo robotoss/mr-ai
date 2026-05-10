@@ -6,11 +6,15 @@ fine-grained control-flow / data-flow facts we need for the higher-quality
 edge kinds (`data_flow`, `control_flow`, precise `async_boundary`). The
 **Dart Analyzer sidecar** fills the gap.
 
-> Status (S3): **planned**. The Rust side is wired
-> ([`DartAnalyzer`](../../code-indexer/src/analyzer/dart.rs)) and ready to
-> consume sidecar output. The sidecar binary itself ships in S3-D — until
-> then, `data_flow` / `control_flow` edges are not produced and a
-> heuristic stand-in fills `async_boundary`.
+> Status (S8): **shipped — skeleton with stub extractors**. The
+> [Dart package](../../dart_sidecar) is in the tree; the
+> [Rust client](../../code-indexer/src/lsp/dart/sidecar.rs) drives it;
+> [`augment_with_sidecar`](../../code-indexer/src/analyzer/dart.rs)
+> folds the result into `AnalysisOutcome`; the
+> [`ReindexHandler`](../../worker/src/handlers.rs) opts in when configured.
+> The Dart-side `_extractDataFlow` / `_extractControlFlow` /
+> `_extractAsyncBoundary` are placeholders — replacing them with real
+> `package:analyzer` AstVisitor passes is the next item in the queue.
 
 ## Why a separate process
 
@@ -60,28 +64,30 @@ Edge entries match the in-memory shape:
 }
 ```
 
-## Running it locally (S3-D plan)
+## Running it locally
 
 ```bash
-# 1. Install Dart SDK 3.x.
-# 2. Resolve sidecar deps:
+# 1. Install Dart SDK 3.3+.
+# 2. Resolve sidecar deps once (fetches package:analyzer):
 cd dart_sidecar && dart pub get
-# 3. Smoke test:
-echo '{"id":1,"method":"initialize","params":{"workspace":"."}}' \
-  | dart run bin/analyzer_sidecar.dart
+# 3. Tell the Rust worker to launch it:
+export DART_SIDECAR_DART_ENTRYPOINT=$(pwd)/bin/analyzer_sidecar.dart
+# OR build a standalone binary and point at that:
+# dart compile exe bin/analyzer_sidecar.dart -o /usr/local/bin/mr_ai_dart_sidecar
+# export DART_SIDECAR_BINARY=/usr/local/bin/mr_ai_dart_sidecar
 ```
 
-The Rust side picks up the path from `DART_SIDECAR_BINARY` (default:
-`dart_sidecar/bin/analyzer_sidecar.dart`) and the SDK from `dart` on
-`$PATH`.
+When neither variable is set, [`SidecarClient::start`](../../code-indexer/src/lsp/dart/sidecar.rs)
+returns `Disabled` and the analyzer falls back to its tree-sitter-only
+path. The worker logs `Reindex: sidecar disabled` and continues.
 
-## Configuration (placeholder)
+## Configuration
 
 | Var | Default | Purpose |
 | --- | --- | --- |
-| `DART_SIDECAR_URL` | unset | RPC endpoint when the sidecar runs as a long-lived service (Docker `dart-analyzer-sidecar`). |
-| `DART_SIDECAR_BINARY` | `dart_sidecar/bin/analyzer_sidecar.dart` | Path used for inline subprocess spawning. |
-| `DART_SIDECAR_TIMEOUT_SECS` | `30` | Per-call timeout. |
+| `DART_SIDECAR_BINARY` | unset | Absolute path to a compiled sidecar executable. Preferred in production. |
+| `DART_SIDECAR_DART_ENTRYPOINT` | unset | Absolute path to `bin/analyzer_sidecar.dart`. The Rust worker spawns `dart run <entrypoint>`. Convenient for development. |
+| `DART_SDK` | unset | Optional override forwarded into the sidecar's `initialize` params. |
 
 ## Coverage gap until S3-D
 

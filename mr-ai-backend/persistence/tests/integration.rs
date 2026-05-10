@@ -1,0 +1,257 @@
+//! Integration tests against a real Postgres instance via testcontainers.
+//!
+//! Marked `#[ignore]` so the default `cargo test` path stays Docker-free —
+//! run with `cargo test --workspace --tests -- --ignored` (and Docker
+//! running) to exercise them. CI flips that switch in the
+//! `--features integration` job once it ships in S8-B.
+
+#![allow(clippy::needless_return)]
+
+use domain::{
+    EdgeKind, GraphEdge, GraphNode, NodeKind, NodeSpan, ProjectGroup, ProjectId, ProjectRepo,
+    ProviderKind, RepoDependency, RepoId,
+};
+use persistence::repos::{graph, projects};
+use sqlx::PgPool;
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::postgres::Postgres as PgImage;
+
+async fn boot_pool() -> (PgPool, testcontainers::ContainerAsync<PgImage>) {
+    let container = PgImage::default()
+        .start()
+        .await
+        .expect("start postgres container");
+    let host = container.get_host().await.expect("container host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("container port");
+    let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+    let pool = persistence::init_pool(&persistence::PoolConfig {
+        url,
+        max_connections: 4,
+        acquire_timeout: std::time::Duration::from_secs(10),
+    })
+    .await
+    .expect("connect");
+    persistence::run_migrations(&pool)
+        .await
+        .expect("migrations apply");
+    (pool, container)
+}
+
+fn sample_group() -> ProjectGroup {
+    let project_id = ProjectId::new();
+    let primary = ProjectRepo {
+        id: RepoId::new(),
+        project_id,
+        provider: ProviderKind::Gitlab,
+        remote_url: "git@gitlab.com:org/app.git".into(),
+        default_branch: "main".into(),
+        is_primary: true,
+    };
+    let shared = ProjectRepo {
+        id: RepoId::new(),
+        project_id,
+        provider: ProviderKind::Gitlab,
+        remote_url: "git@gitlab.com:org/shared.git".into(),
+        default_branch: "main".into(),
+        is_primary: false,
+    };
+    ProjectGroup {
+        id: project_id,
+        slug: "monorepo".into(),
+        name: "Monorepo".into(),
+        repos: vec![primary.clone(), shared.clone()],
+        dependencies: vec![RepoDependency {
+            from_repo: primary.id,
+            to_repo: shared.id,
+            kind: "manual".into(),
+        }],
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn migrations_apply_cleanly() {
+    let (pool, _container) = boot_pool().await;
+    // Smoke: SELECT 1 from a known migrated table.
+    let count: (i64,) = sqlx::query_as("SELECT count(*)::bigint FROM projects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count.0, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn project_group_upsert_round_trip() {
+    let (pool, _container) = boot_pool().await;
+    let group = sample_group();
+    projects::upsert_group(&pool, &group).await.unwrap();
+
+    // Re-running with the same content should be idempotent.
+    projects::upsert_group(&pool, &group).await.unwrap();
+
+    let loaded = projects::load_by_slug(&pool, "monorepo").await.unwrap();
+    let loaded = loaded.expect("group present");
+    assert_eq!(loaded.repos.len(), 2);
+    assert_eq!(loaded.dependencies.len(), 1);
+    assert!(loaded.repos.iter().any(|r| r.is_primary));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn graph_persist_round_trip() {
+    let (pool, _container) = boot_pool().await;
+    let group = sample_group();
+    projects::upsert_group(&pool, &group).await.unwrap();
+    let primary = group
+        .repos
+        .iter()
+        .find(|r| r.is_primary)
+        .unwrap()
+        .id;
+
+    let file_node = GraphNode {
+        id: None,
+        repo_id: primary,
+        fqn: "lib/main.dart".into(),
+        kind: NodeKind::File,
+        file: "lib/main.dart".into(),
+        symbol: "main.dart".into(),
+        language: "dart".into(),
+        content_sha256: None,
+        span: None,
+    };
+    let class_node = GraphNode {
+        id: None,
+        repo_id: primary,
+        fqn: "lib/main.dart::App".into(),
+        kind: NodeKind::Class,
+        file: "lib/main.dart".into(),
+        symbol: "App".into(),
+        language: "dart".into(),
+        content_sha256: Some("aa".into()),
+        span: Some(NodeSpan { start: 0, end: 10 }),
+    };
+
+    let file_id = graph::upsert_node(&pool, &file_node).await.unwrap();
+    let class_id = graph::upsert_node(&pool, &class_node).await.unwrap();
+    graph::upsert_edge(
+        &pool,
+        &GraphEdge {
+            from: file_id,
+            to: class_id,
+            edge_type: EdgeKind::Defines,
+            weight: 1.0,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Idempotent re-upsert of the same identities.
+    let class_id_2 = graph::upsert_node(&pool, &class_node).await.unwrap();
+    assert_eq!(class_id, class_id_2);
+
+    let neighbours = graph::neighbours(&pool, file_id, Some(&EdgeKind::Defines))
+        .await
+        .unwrap();
+    assert_eq!(neighbours, vec![class_id]);
+
+    let counts = graph::edge_counts_by_type(&pool).await.unwrap();
+    assert!(counts.iter().any(|(t, n)| t == "defines" && *n >= 1));
+
+    // Cascade: dropping the repo nukes the graph.
+    graph::purge_repo(&pool, primary).await.unwrap();
+    let neighbours_after = graph::neighbours(&pool, file_id, None).await.unwrap();
+    assert!(neighbours_after.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn jobs_claim_skip_locked_round_trip() {
+    use persistence::repos::jobs;
+    let (pool, _container) = boot_pool().await;
+    // No project_id needed for the queue smoke.
+    let payload = serde_json::json!({"hello": "world"});
+    let id = jobs::enqueue(&pool, "TestKind", &payload, jobs::EnqueueOptions::default())
+        .await
+        .unwrap();
+    let claimed = jobs::claim_next(&pool, "worker-test")
+        .await
+        .unwrap()
+        .expect("claim returns the queued job");
+    assert_eq!(claimed.id, id);
+    jobs::complete(&pool, id).await.unwrap();
+    let again = jobs::claim_next(&pool, "worker-test").await.unwrap();
+    assert!(again.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn webhook_event_dedup_and_status_transitions() {
+    use persistence::repos::webhook_events::{self, RecordOutcome, WebhookRecord};
+    let (pool, _container) = boot_pool().await;
+    let rec = WebhookRecord {
+        provider: ProviderKind::Gitlab,
+        event_id: "test-event-1".into(),
+        event_kind: "merge_request".into(),
+        payload_hash: vec![1, 2, 3],
+        payload: serde_json::json!({"object_kind": "merge_request"}),
+    };
+    let first = webhook_events::record(&pool, &rec).await.unwrap();
+    assert_eq!(first.outcome, RecordOutcome::Inserted);
+    let dup = webhook_events::record(&pool, &rec).await.unwrap();
+    assert_eq!(dup.outcome, RecordOutcome::Duplicate);
+    assert_eq!(dup.id, first.id);
+
+    webhook_events::mark_enqueued(&pool, first.id).await.unwrap();
+    let status: (String,) =
+        sqlx::query_as("SELECT status FROM webhook_events WHERE id = $1")
+            .bind(uuid::Uuid::from(first.id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status.0, "enqueued");
+
+    webhook_events::mark_rejected(&pool, first.id).await.unwrap();
+    let status: (String,) =
+        sqlx::query_as("SELECT status FROM webhook_events WHERE id = $1")
+            .bind(uuid::Uuid::from(first.id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status.0, "rejected");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn mr_reviews_lifecycle() {
+    use persistence::repos::mr_reviews;
+    let (pool, _container) = boot_pool().await;
+    let group = sample_group();
+    projects::upsert_group(&pool, &group).await.unwrap();
+    let primary = group.repos.iter().find(|r| r.is_primary).unwrap();
+    let mr = domain::MrId::new("42");
+    let id = mr_reviews::upsert_pending(
+        &pool,
+        primary.project_id,
+        primary.id,
+        &mr,
+        &serde_json::json!({"stage": "received"}),
+    )
+    .await
+    .unwrap();
+    mr_reviews::mark_running(&pool, id).await.unwrap();
+    mr_reviews::finish(&pool, id, "published", &serde_json::json!({"final": true}))
+        .await
+        .unwrap();
+    let row: (String,) = sqlx::query_as("SELECT status FROM mr_reviews WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.0, "published");
+}

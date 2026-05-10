@@ -27,9 +27,9 @@ pub enum LlmRerankError {
 
 /// JSON shape we ask the model to emit. One entry per seed, score in [0, 1].
 #[derive(Debug, Serialize, Deserialize)]
-struct RerankItem {
-    chunk_id: String,
-    score: f32,
+pub struct RerankItem {
+    pub chunk_id: String,
+    pub score: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
