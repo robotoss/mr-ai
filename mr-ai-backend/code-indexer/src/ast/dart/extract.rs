@@ -645,6 +645,8 @@ fn emit_symbol_chunk(
         hints: Some(hints),
         lsp: Some(lsp_enr),
         extras,
+        parent_symbol_id: None,
+        chunk_kind: None,
     });
 }
 
@@ -708,6 +710,8 @@ fn emit_varlist_chunks(
             hints: Some(hints),
             lsp: None,
             extras: None,
+            parent_symbol_id: None,
+            chunk_kind: None,
         });
     }
 }
@@ -748,6 +752,8 @@ fn emit_barrel_file_chunk(out: &mut Vec<CodeChunk>, code: &str, file: &str, impo
         hints: Some(hints),
         lsp: None,
         extras: None,
+        parent_symbol_id: None,
+        chunk_kind: None,
     });
 }
 

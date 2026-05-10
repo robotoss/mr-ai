@@ -200,6 +200,18 @@ Loaded by [`GitService`](../../project_code_store/src/git_service.rs). See
 | `GIT_CACHE_DIR` | `code_data/git_cache` | Bare clones (long-lived). |
 | `WORKTREE_DIR` | `code_data/worktrees` | Per-job worktrees (ephemeral). |
 
+## Hybrid retrieval (S4)
+
+Loaded by [`RetrievalConfig::from_env`](../../domain/src/retrieval.rs).
+Overrides apply per process; per-project overrides land in S5.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `RAG_TOP_K` | `8` | Seeds per review target before graph expansion. |
+| `RAG_MAX_HOPS` | `1` | Maximum graph BFS depth. |
+| `RAG_TOKEN_BUDGET` | `8000` | Char ceiling fed to the reranker. |
+| `RAG_MIN_SCORE` | `0.0` | Drop seeds below this score (reuses the legacy var). |
+
 ## Configuration patterns
 
 - **Ollama-only smoke**: set the three tiers to Ollama and pull the

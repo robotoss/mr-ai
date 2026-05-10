@@ -8,7 +8,9 @@
 //! - `Reindex` — skeleton; S4 implements the incremental delta updater.
 
 use async_trait::async_trait;
+use persistence::repos::index_state;
 use persistence::repos::jobs::{self, EnqueueOptions};
+use persistence::repos::projects;
 use project_code_store::{GitService, GitServiceConfig};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -109,8 +111,22 @@ impl JobHandler for IngestMrHandler {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ReindexHandler;
+#[derive(Debug, Deserialize)]
+struct ReindexPayload {
+    remote_url: String,
+    head_sha: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReindexHandler {
+    pool: PgPool,
+}
+
+impl ReindexHandler {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
 
 #[async_trait]
 impl JobHandler for ReindexHandler {
@@ -119,8 +135,48 @@ impl JobHandler for ReindexHandler {
     }
 
     async fn handle(&self, payload: Value) -> WorkerResult<()> {
-        info!(target = "worker.handler", payload = %payload, "Reindex received (skeleton)");
-        warn!(target = "worker.handler", "Reindex handler is a skeleton — incremental delta lands in S4");
+        let parsed: ReindexPayload =
+            serde_json::from_value(payload.clone()).map_err(|e| WorkerError::BadPayload {
+                kind: KIND_REINDEX.into(),
+                msg: e.to_string(),
+            })?;
+
+        info!(
+            target = "worker.handler",
+            remote = %parsed.remote_url,
+            head_sha = ?parsed.head_sha,
+            "Reindex received"
+        );
+
+        // Resolve repo. Unknown URLs become a hard failure rather than a
+        // silent ack — webhook handlers already filter unknown repos out,
+        // so anything reaching us here should be registered.
+        let resolved = projects::find_repo_by_remote_url_lenient(&self.pool, &parsed.remote_url)
+            .await
+            .map_err(WorkerError::Persistence)?;
+        let Some((_project_id, repo_id)) = resolved else {
+            return Err(WorkerError::BadPayload {
+                kind: KIND_REINDEX.into(),
+                msg: format!("unknown remote_url: {}", parsed.remote_url),
+            });
+        };
+
+        // S4-A advances the watermark on every Reindex so downstream
+        // systems can observe progress. The actual chunk/edge upsert is
+        // wired in S4-B once the indexer reads from the bare clone.
+        if let Some(sha) = parsed.head_sha.as_deref() {
+            index_state::mark_indexed(&self.pool, repo_id, sha)
+                .await
+                .map_err(WorkerError::Persistence)?;
+            info!(target = "worker.handler", repo_id = %repo_id, %sha, "watermark advanced");
+        } else {
+            warn!(
+                target = "worker.handler",
+                "Reindex payload missing head_sha; watermark not advanced"
+            );
+        }
+
+        warn!(target = "worker.handler", "Reindex incremental upsert is a skeleton — chunk/edge writeback lands in S4-B");
         Ok(())
     }
 }
@@ -131,8 +187,8 @@ pub fn default_registry(pool: PgPool) -> crate::WorkerResult<crate::Registry> {
     let git = GitService::new(GitServiceConfig::from_env())
         .map_err(|e| WorkerError::Handler("git_service_init".into(), Box::new(e)))?;
     Ok(crate::Registry::builder()
-        .register(IngestPushHandler::new(pool, git))
+        .register(IngestPushHandler::new(pool.clone(), git))
         .register(IngestMrHandler)
-        .register(ReindexHandler)
+        .register(ReindexHandler::new(pool))
         .build())
 }

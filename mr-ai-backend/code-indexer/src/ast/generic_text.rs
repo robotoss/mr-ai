@@ -323,6 +323,8 @@ impl AstProvider for GenericTextAst {
             lsp: None,
             // No per-language extras in the generic provider.
             extras: None,
+            parent_symbol_id: None,
+            chunk_kind: None,
         }])
     }
 }

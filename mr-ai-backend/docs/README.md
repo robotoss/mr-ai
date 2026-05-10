@@ -35,7 +35,8 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `code-indexer` | AST + LSP-style indexer producing JSONL chunks. | [code-indexer](services/code-indexer.md) |
 | `project-code-store` | Async git cloning over SSH / HTTPS. | [project-code-store](services/project-code-store.md) |
 | `git-service` | Bare clones + per-MR worktrees inside `project_code_store`. | [git-service](services/git-service.md) |
-| `graph-rag` | Postgres-backed code graph + retrieval pipeline. | [graph-rag](services/graph-rag.md) |
+| `graph-rag` (graph) | Postgres-backed code graph (nodes / edges / analyzer). | [graph-rag (part 1)](services/graph-rag.md) |
+| `graph-rag` (retrieval) | Seeds + k-hop expansion + rerank pipeline; transient overlay. | [graph-rag (part 2)](services/graph-rag-retrieval.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 

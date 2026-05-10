@@ -1032,6 +1032,7 @@ dependencies = [
  "ai-llm-service",
  "chrono",
  "code-indexer",
+ "domain",
  "futures",
  "rag-base",
  "reqwest",

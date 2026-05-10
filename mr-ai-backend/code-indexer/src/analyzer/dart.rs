@@ -30,7 +30,7 @@ use domain::{EdgeKind, NodeKind, ProviderKind};
 use serde_json::Value as JsonValue;
 use tracing::{debug, trace};
 
-use crate::analyzer::intent::{AnalysisOutcome, Coverage, EdgeIntent, NodeIntent};
+use crate::analyzer::intent::{AnalysisOutcome, EdgeIntent, NodeIntent};
 use crate::analyzer::LanguageAnalyzer;
 use crate::types::{CodeChunk, LanguageKind, SymbolKind};
 
@@ -364,6 +364,8 @@ mod tests {
             hints: None,
             lsp: None,
             extras: None,
+            parent_symbol_id: None,
+            chunk_kind: None,
         }
     }
 

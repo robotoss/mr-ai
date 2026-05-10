@@ -3,9 +3,11 @@ pub mod git_providers;
 
 pub mod ast_context;
 pub mod diff_model;
+pub mod overlay;
 mod pre_review;
 pub mod prompt;
 mod rag_layer;
+pub mod retrieval;
 pub mod rules;
 
 mod parser; // already used by git_providers; left as-is

@@ -371,6 +371,44 @@ pub struct CodeChunk {
     /// - Use namespaced keys, e.g., "dart.is_widget", "rust.unsafe_blocks", "python.decorators".
     /// - Keep it small and essential for retrieval/explainability.
     pub extras: Option<serde_json::Value>,
+
+    /// Hierarchical chunking metadata (S4): when this chunk is a sub-slice
+    /// or the symbol child of a parent chunk, this points at the parent's
+    /// `id`. `None` for top-level file/parent/symbol chunks. `serde(default)`
+    /// keeps legacy JSONL files loadable.
+    #[serde(default)]
+    pub parent_symbol_id: Option<String>,
+
+    /// Hierarchical chunking metadata (S4): file / parent / symbol / sub.
+    /// `None` defaults to "symbol" for legacy chunks (the previous code
+    /// path emitted only symbol-level chunks).
+    #[serde(default)]
+    pub chunk_kind: Option<ChunkKind>,
+}
+
+/// Coarse classification of a chunk used for hierarchical retrieval.
+///
+/// Mirrors `domain::retrieval::ChunkKind` — kept in this crate so consumers
+/// of `CodeChunk` need not pull `domain` directly. The two definitions stay
+/// in sync structurally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkKind {
+    File,
+    Parent,
+    Symbol,
+    Sub,
+}
+
+impl ChunkKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChunkKind::File => "file",
+            ChunkKind::Parent => "parent",
+            ChunkKind::Symbol => "symbol",
+            ChunkKind::Sub => "sub",
+        }
+    }
 }
 
 /// Secondary slicing for long bodies (optional, language-agnostic).

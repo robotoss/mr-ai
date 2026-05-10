@@ -2,6 +2,10 @@
 
 `BETA`
 
+> Looking for the retrieval pipeline that consumes this graph? See
+> [Graph RAG (part 2 — retrieval)](graph-rag-retrieval.md).
+
+
 S3 lays down the graph foundation that S4's hybrid retrieval will sit on
 top of. The graph captures structural relationships between code symbols
 that pure vector search misses: who calls whom, who inherits from whom,
