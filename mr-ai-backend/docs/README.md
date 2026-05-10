@@ -34,6 +34,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `rag-base` | Qdrant-backed semantic search over indexed code. | [rag-base](services/rag-base.md) |
 | `code-indexer` | AST + LSP-style indexer producing JSONL chunks. | [code-indexer](services/code-indexer.md) |
 | `project-code-store` | Async git cloning over SSH / HTTPS. | [project-code-store](services/project-code-store.md) |
+| `git-service` | Bare clones + per-MR worktrees inside `project_code_store`. | [git-service](services/git-service.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 
@@ -44,6 +45,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Getting Started](guides/getting-started.md) | First-time local setup and smoke run. |
 | [Installation](guides/installation.md) | Full local environment with Postgres + Qdrant via Docker. |
 | [Secrets](guides/secrets.md) | `SecretProvider` model — env vs file-mount backends, layout, rotation. |
+| [Webhooks](guides/webhooks.md) | Native GitLab/GitHub/Bitbucket endpoints — signature, dedup, payloads. |
 | [Add a new LLM Provider](guides/add-llm-provider.md) | Plug Anthropic / Groq / a custom backend behind the gateway. |
 | [Configuration](guides/configuration.md) | Every environment variable, where it's read, and what it controls. |
 | [Observability](guides/observability.md) | Log structure, file rotation, per-request analytics. |
@@ -57,6 +59,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Usage Log](reference/usage-log.md) | Per-call JSONL history, `/usage` endpoint, jq cookbook. |
 | [Errors](reference/errors.md) | Error hierarchy, where each variant comes from, how it's mapped at boundaries. |
 | [Database Schema](reference/database-schema.md) | Postgres tables, migration workflow, ER diagram. |
+| [Job Queue](reference/job-queue.md) | Postgres-backed background queue, retry policy, kinds. |
 
 ## Conventions
 

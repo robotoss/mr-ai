@@ -4,3 +4,4 @@ pub mod rag_base;
 pub mod sync_git;
 pub mod trigger_gitlab_mr;
 pub mod usage;
+pub mod webhooks;

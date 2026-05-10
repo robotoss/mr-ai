@@ -3,9 +3,11 @@
 //! This module defines a small abstraction (`ReviewTarget`) that
 //! represents a single "unit" of review work, usually one diff hunk.
 
+pub mod aggregate;
 pub mod builder;
 pub mod render;
 
+pub use aggregate::{aggregate_review_targets, MultiRepoBundle, RepoContribution};
 pub use builder::build_review_targets;
 pub use render::render_review_target_diff;
 
@@ -26,4 +28,7 @@ pub struct ReviewTarget {
     /// Short textual preview of the hunk, used for search terms
     /// and as the first section of the AI prompt.
     pub diff_preview: String,
+    /// Logical repository slug this target originated from. `None` for
+    /// single-repo flows that pre-date the multi-repo fan-out.
+    pub repo_label: Option<String>,
 }

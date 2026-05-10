@@ -16,7 +16,9 @@ use tokio::{sync::Semaphore, task};
 use tracing::{debug, error, info, instrument, warn};
 
 pub mod errors;
+pub mod git_service;
 use errors::Result;
+pub use git_service::{GitService, GitServiceConfig, WorktreeHandle};
 
 /// Clone multiple repositories concurrently (bounded by `max_concurrency`).
 ///

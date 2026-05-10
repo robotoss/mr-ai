@@ -172,6 +172,34 @@ Loaded by [`secrets`](../../secrets/src/lib.rs). See the dedicated
 | `SECRET_PROVIDER` | `env` | `env` or `file`. |
 | `SECRETS_DIR` | `/var/secrets` | Root for `file` backend. Layout: `<dir>/<project_uuid>/<key>` or `<dir>/_global/<key>`. |
 
+## Webhooks
+
+Loaded by [`secrets::webhook`](../../secrets/src/webhook.rs) and the
+webhook routes in `api`. See [Webhooks](webhooks.md) for the full pipeline.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `WEBHOOK_HMAC_SECRET` | (required for webhooks) | Shared secret. GitLab compares plain text against `X-Gitlab-Token`; GitHub/Bitbucket compute HMAC-SHA256 of the body. |
+
+## Worker pool
+
+Loaded by [`worker::WorkerConfig::from_env`](../../worker/src/lib.rs).
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `WORKER_POOL_SIZE` | `4` | Number of async tasks polling the queue. |
+| `WORKER_POLL_INTERVAL_MS` | `500` | Sleep when there is no work. |
+
+## Git service
+
+Loaded by [`GitService`](../../project_code_store/src/git_service.rs). See
+[Git service](../services/git-service.md).
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `GIT_CACHE_DIR` | `code_data/git_cache` | Bare clones (long-lived). |
+| `WORKTREE_DIR` | `code_data/worktrees` | Per-job worktrees (ephemeral). |
+
 ## Configuration patterns
 
 - **Ollama-only smoke**: set the three tiers to Ollama and pull the

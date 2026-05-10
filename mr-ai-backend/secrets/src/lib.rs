@@ -14,6 +14,8 @@ use thiserror::Error;
 use tokio::fs;
 use tracing::{debug, warn};
 
+pub mod webhook;
+
 /// Strongly-typed key for a known secret. Stringly-typed escape hatch lives in
 /// `SecretKey::Custom` for migration ergonomics — prefer adding variants over
 /// abusing it.
@@ -291,27 +293,25 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // Each test uses a unique env-var name via SecretKey::Custom so cargo's
+    // parallel test runner cannot race on shared state.
+
     #[tokio::test]
     async fn env_provider_returns_value_when_set() {
-        // SAFETY: tests are single-threaded for env mutation in this module.
-        unsafe {
-            env::set_var("GIT_TOKEN", "abc123");
-        }
+        let key = SecretKey::Custom("MR_AI_TEST_ENV_HIT");
+        unsafe { env::set_var(key.env_var(), "abc123") };
         let p = EnvSecretProvider::new();
-        let v = p.get(None, &SecretKey::GitToken).await.unwrap();
+        let v = p.get(None, &key).await.unwrap();
         assert_eq!(v, "abc123");
-        unsafe {
-            env::remove_var("GIT_TOKEN");
-        }
+        unsafe { env::remove_var(key.env_var()) };
     }
 
     #[tokio::test]
     async fn env_provider_not_found_when_unset() {
-        unsafe {
-            env::remove_var("GIT_TOKEN");
-        }
+        let key = SecretKey::Custom("MR_AI_TEST_ENV_MISS");
+        unsafe { env::remove_var(key.env_var()) };
         let p = EnvSecretProvider::new();
-        let err = p.get(None, &SecretKey::GitToken).await.unwrap_err();
+        let err = p.get(None, &key).await.unwrap_err();
         assert!(matches!(err, SecretError::NotFound { .. }));
     }
 

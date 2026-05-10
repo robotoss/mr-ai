@@ -1,0 +1,27 @@
+[package]
+name = "worker"
+version = "0.1.0"
+edition = "2024"
+license = "FSL-1.1"
+description = "Background job worker pool for mr-ai-backend (Postgres-backed queue)."
+
+[lib]
+name = "worker"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+domain = { workspace = true }
+persistence = { workspace = true }
+project-code-store = { path = "../project_code_store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -27,6 +27,10 @@ use crate::{
         },
         sync_git::sync_git_route::sync_git_route,
         usage::usage_route::usage_route,
+        webhooks::{
+            bitbucket::bitbucket_webhook_route, github::github_webhook_route,
+            gitlab::gitlab_webhook_route,
+        },
     },
 };
 
@@ -91,9 +95,27 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         config.clone(),
         gateway,
         secrets_provider,
-        db_pool,
+        db_pool.clone(),
     ));
     println!("{}", "✅ Shared state initialized".green());
+
+    // Background worker pool. Spawned only when persistence is enabled —
+    // jobs live in Postgres. Returns a handle we drain on graceful shutdown.
+    let worker_pool = if let Some(pool) = db_pool.as_ref() {
+        let cfg = worker::WorkerConfig::from_env();
+        let registry = worker::handlers::default_registry(pool.clone()).map_err(|e| {
+            AppError::Http {
+                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                code: "WORKER_INIT_ERROR",
+                message: e.to_string(),
+            }
+        })?;
+        let pool_handle = worker::spawn_pool(pool.clone(), registry, cfg);
+        println!("{}", "✅ Worker pool spawned".green());
+        Some(pool_handle)
+    } else {
+        None
+    };
 
     // Routes
     let app = Router::new()
@@ -102,6 +124,9 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         .route("/vector_base_index", get(vector_base_index_route))
         .route("/search_vector_base", post(search_vector_base_route))
         .route("/trigger_git_mr", axum::routing::post(trigger_mr_route))
+        .route("/webhooks/gitlab", post(gitlab_webhook_route))
+        .route("/webhooks/github", post(github_webhook_route))
+        .route("/webhooks/bitbucket", post(bitbucket_webhook_route))
         .route("/usage", get(usage_route))
         .fallback(handler_404)
         .layer(middleware::from_fn(json_error_mapper))
@@ -131,6 +156,12 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(AppError::Server)?;
+
+    if let Some(pool) = worker_pool {
+        println!("{}", "🔧 Draining worker pool...".yellow());
+        pool.shutdown().await;
+        println!("{}", "✅ Worker pool drained".green());
+    }
 
     println!("{}", "👋 Server shutdown complete".yellow().bold());
     Ok(())

@@ -19,6 +19,7 @@ members = [
     "domain",
     "secrets",
     "persistence",
+    "worker",
 ]
 
 [dependencies]
@@ -55,3 +56,4 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 domain = { path = "domain" }
 secrets = { path = "secrets" }
 persistence = { path = "persistence" }
+worker = { path = "worker" }

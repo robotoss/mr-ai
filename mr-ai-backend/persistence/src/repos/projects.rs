@@ -19,6 +19,106 @@ pub async fn find_project_id_by_slug(pool: &PgPool, slug: &str) -> Result<Option
     Ok(row.map(|(id,)| ProjectId::from_uuid(id)))
 }
 
+/// Locate a repo by its remote URL. Webhook routers use this to resolve the
+/// inbound event to the right project group. Comparison is exact; callers
+/// should normalise (`.git` suffix, scheme) upstream when matching against
+/// provider payloads that may differ on those.
+pub async fn find_repo_by_remote_url(
+    pool: &PgPool,
+    remote_url: &str,
+) -> Result<Option<(ProjectId, RepoId)>> {
+    let row: Option<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+        "SELECT project_id, id FROM project_repos WHERE remote_url = $1 LIMIT 1",
+    )
+    .bind(remote_url)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(project_uuid, repo_uuid)| {
+        (ProjectId::from_uuid(project_uuid), RepoId::from_uuid(repo_uuid))
+    }))
+}
+
+/// Walk one hop of `project_dependencies` outbound from the given repo and
+/// return the dependent repo IDs. Used by the multi-repo fan-out in S2 to
+/// discover sibling repos that should contribute diffs to the review.
+pub async fn find_dependent_repos(pool: &PgPool, from_repo: RepoId) -> Result<Vec<RepoId>> {
+    let from_uuid: uuid::Uuid = from_repo.into();
+    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT to_repo_id FROM project_dependencies WHERE from_repo_id = $1",
+    )
+    .bind(from_uuid)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| RepoId::from_uuid(id)).collect())
+}
+
+/// Reverse direction: who depends on this repo? Useful when a shared package
+/// changes and its consumers must be re-reviewed.
+pub async fn find_dependents_of(pool: &PgPool, repo: RepoId) -> Result<Vec<RepoId>> {
+    let to_uuid: uuid::Uuid = repo.into();
+    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT from_repo_id FROM project_dependencies WHERE to_repo_id = $1",
+    )
+    .bind(to_uuid)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| RepoId::from_uuid(id)).collect())
+}
+
+/// Hydrate a repo by id (provider, remote_url, default_branch).
+pub async fn load_repo(
+    pool: &PgPool,
+    repo: RepoId,
+) -> Result<Option<ProjectRepo>> {
+    let id_uuid: uuid::Uuid = repo.into();
+    let row: Option<(uuid::Uuid, uuid::Uuid, String, String, String, bool)> = sqlx::query_as(
+        "SELECT id, project_id, provider, remote_url, default_branch, is_primary \
+         FROM project_repos WHERE id = $1",
+    )
+    .bind(id_uuid)
+    .fetch_optional(pool)
+    .await?;
+    let Some((id, project_id, provider, remote_url, default_branch, is_primary)) = row else {
+        return Ok(None);
+    };
+    let provider = provider
+        .parse()
+        .map_err(|e| sqlx::Error::Protocol(format!("invalid provider in row: {e}")))?;
+    Ok(Some(ProjectRepo {
+        id: RepoId::from_uuid(id),
+        project_id: ProjectId::from_uuid(project_id),
+        provider,
+        remote_url,
+        default_branch,
+        is_primary,
+    }))
+}
+
+/// Try a small set of normalised variants when the inbound URL doesn't match
+/// verbatim. Covers the common `.git` suffix mismatch and `git@host:org/x` ↔
+/// `ssh://git@host/org/x` differences.
+pub async fn find_repo_by_remote_url_lenient(
+    pool: &PgPool,
+    remote_url: &str,
+) -> Result<Option<(ProjectId, RepoId)>> {
+    if let Some(found) = find_repo_by_remote_url(pool, remote_url).await? {
+        return Ok(Some(found));
+    }
+    let variants = [
+        remote_url.trim_end_matches(".git").to_owned(),
+        format!("{}.git", remote_url.trim_end_matches(".git")),
+    ];
+    for v in variants {
+        if v == remote_url {
+            continue;
+        }
+        if let Some(found) = find_repo_by_remote_url(pool, &v).await? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
 /// Resolve a project group by slug — returns `None` when the slug is unknown.
 pub async fn load_by_slug(pool: &PgPool, slug: &str) -> Result<Option<ProjectGroup>> {
     let Some(project_id) = find_project_id_by_slug(pool, slug).await? else {

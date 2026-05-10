@@ -45,6 +45,7 @@ fn build_targets_for_file(file_path: &str, file: &FileChange, out: &mut Vec<Revi
             hunk_index: idx,
             hunk: hunk.clone(),
             diff_preview,
+            repo_label: None,
         });
     }
 }
