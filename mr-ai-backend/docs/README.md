@@ -42,6 +42,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `chunking` | Hierarchical chunk emission (file / parent / symbol / sub) + `parent_symbol_id` linking. | [chunking](services/chunking.md) |
 | `rust-analyzer` | Tree-sitter Rust provider + `RustAnalyzer` graph edges (S4A). | [rust-analyzer](services/rust-analyzer.md) |
 | `typescript-analyzer` | Tree-sitter TypeScript / TSX provider + `TypescriptAnalyzer` graph edges (S4B). | [typescript-analyzer](services/typescript-analyzer.md) |
+| `overlay` | In-memory `OverlayGraph` builder + transitive walker for MR retrieval (S7). | [overlay](services/overlay.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 

@@ -117,6 +117,18 @@ serves Dart (S3) and Rust (S4A); TypeScript joins in S4B. See
 | `SUB_CHUNK_MIN_BYTES` | `1500` | Minimum body size before a `parent`/`symbol` chunk is sliced into `sub` chunks. Clamped to `>= 64`. |
 | `SUB_CHUNK_OVERLAP_BYTES` | `150` | Overlap between adjacent `sub` slices so callers / types near a slice boundary stay co-embedded. Clamped to `<= SUB_CHUNK_MIN_BYTES / 2`. |
 
+## MR overlay fan-out (S7)
+
+Caps consumed by `git_context_engine::overlay::build::OverlayCaps::from_env`
+to bound the transitive walker that builds the in-memory `OverlayGraph`
+for an MR retrieval call. See [Overlay Builder](../services/overlay.md).
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `MR_FANOUT_MAX_HOPS` | `5` | Max BFS depth across `project_dependencies` starting from the primary repo (hop 0). |
+| `MR_FANOUT_MAX_REPOS` | `20` | Total repo cap; the walker emits `truncated=true` when reached. |
+| `MR_FANOUT_MAX_CHUNKS` | `5000` | Total chunk cap; enforced during ingest so one pathological repo can't blow the budget. |
+
 ## Mandatory sidecars (S4C — staged in S4A)
 
 `REQUIRE_SIDECAR_*` toggles tell the worker to refuse to run `Reindex`

@@ -133,6 +133,20 @@ sequenceDiagram
     Re->>Index: persist via graph_persist (S4-B)
 ```
 
+## Transient overlay (S7)
+
+When the retrieval call carries an `mr_iid`, an in-memory
+[`OverlayGraph`](overlay.md) is built lazily via
+`overlay::build::build_for_mr`. The builder walks `project_dependencies`
+in both directions starting from the primary repo, capped by
+`MR_FANOUT_MAX_HOPS` / `MR_FANOUT_MAX_REPOS` / `MR_FANOUT_MAX_CHUNKS`, and
+folds the new / changed chunks into the overlay. Worktrees are created
+per visit and bulk-dropped at the end of the call.
+
+The overlay never touches Qdrant or Postgres — retrieval merges its
+chunks with the stable search hits at rerank time. See
+[Overlay Builder](overlay.md) for the contract.
+
 ## Hierarchical chunking
 
 `CodeChunk` carries two metadata fields (`parent_symbol_id`, `chunk_kind`).

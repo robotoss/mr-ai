@@ -1156,15 +1156,19 @@ dependencies = [
  "code-indexer",
  "domain",
  "futures",
+ "persistence",
+ "project-code-store",
  "rag-base",
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]
