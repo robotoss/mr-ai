@@ -38,6 +38,43 @@ sequenceDiagram
 See [Ingestion Pipeline](../services/ingestion-pipeline.md) for the full
 contract and failure modes.
 
+## Flow 1c — Retrieve (S8)
+
+`POST /retrieve` is the canonical read path. Mechanical pipeline — no
+LLM rerank — that surfaces vector hits, graph-expanded neighbours, and
+(when an MR is being reviewed) overlay-merged chunks.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Caller
+    participant API as POST /retrieve
+    participant GW as LlmGateway
+    participant QD as Qdrant
+    participant PG as Postgres (graph_*)
+    participant OV as overlay::build_for_mr
+
+    Caller->>API: { query, repo_id?, mr_iid?, head_sha?, expand?, ... }
+    API->>GW: embed_batch(query)
+    GW-->>API: query_vec
+    API->>QD: search_top_k_with_filter(project_id, repo_id, kinds)
+    QD-->>API: SearchHit[] (via=vector)
+    opt expand && repo_id
+        API->>PG: find_nodes_by_fqns + expand_k_hops + load_nodes
+        PG-->>API: GraphNode[] (via=graph, hops>=1)
+    end
+    opt mr_iid && repo_id && head_sha
+        API->>OV: build_for_mr(project_id, repo_id, head_sha, caps)
+        OV-->>API: (OverlayGraph, OverlayBuildReport)
+        API->>GW: embed_batch(overlay snippets)
+        Note over API: cosine vs query_vec → via=overlay hits
+    end
+    API-->>Caller: { hits, expanded_node_count, overlay_meta? }
+```
+
+See [Retrieve API](../reference/retrieve-api.md) for the request /
+response contract and status codes.
+
 ## Flow 2 — Review an MR
 
 Triggered by `POST /trigger_git_mr` with `{project_id, mr_iid, secret}`.

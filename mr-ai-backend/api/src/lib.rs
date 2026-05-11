@@ -27,6 +27,7 @@ use crate::{
             detailed::detailed_route, live::live_route, ready::ready_route,
         },
         rag_base::search_vector_base_route::search_vector_base_route,
+        retrieve::retrieve_route::retrieve_route,
         usage::usage_route::usage_route,
         webhooks::{
             bitbucket::bitbucket_webhook_route, github::github_webhook_route,
@@ -164,6 +165,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     let app = Router::new()
         .route("/admin/reindex_repo", post(reindex_repo_route))
         .route("/admin/reindex_all", post(reindex_all_route))
+        .route("/retrieve", post(retrieve_route))
         .route("/search_vector_base", post(search_vector_base_route))
         .route("/trigger_git_mr", axum::routing::post(trigger_mr_route))
         .route("/webhooks/gitlab", post(gitlab_webhook_route))

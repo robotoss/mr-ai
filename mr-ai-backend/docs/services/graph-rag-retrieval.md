@@ -133,6 +133,30 @@ sequenceDiagram
     Re->>Index: persist via graph_persist (S4-B)
 ```
 
+## Retrieve pipeline (S8)
+
+`POST /retrieve` is the canonical entry point. The handler is mechanical
+— no LLM rerank, no answer generation. Steps:
+
+1. Resolve `project_id` from the cached single-project invariant
+   ([`AppConfig`](../../api/src/core/app_state.rs)) or from the
+   request override (must match).
+2. Embed the query via `LlmGateway::embed_batch`.
+3. Run filtered Qdrant search via
+   `rag_base::vector_db::search_top_k_with_filter` with a
+   `Filter::must([project_id, repo_id?, chunk_kind IN kinds?])`.
+4. When `expand=true` and `repo_id` is supplied: resolve seed
+   `symbol_path` → `NodeId` via `graph::find_nodes_by_fqns`, walk
+   `graph::expand_k_hops` to `max_hops` (clamped to 3), hydrate via
+   `graph::load_nodes`, emit them as `via=graph` hits.
+5. When `mr_iid` + `repo_id` + `head_sha` are supplied: build an
+   in-memory [`OverlayGraph`](overlay.md) via `overlay::build_for_mr`,
+   embed every overlay chunk, compute cosine similarity vs the query,
+   merge the chunks above `min_score` as `via=overlay` hits.
+
+The full request / response contract is documented in
+[Retrieve API](../reference/retrieve-api.md).
+
 ## Transient overlay (S7)
 
 When the retrieval call carries an `mr_iid`, an in-memory

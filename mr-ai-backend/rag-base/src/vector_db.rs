@@ -286,6 +286,79 @@ pub async fn search_top_k(
     Ok(hits)
 }
 
+/// Compose a `Filter::must` for `/retrieve` (S8). Caller passes
+/// stringified UUIDs; the helper keeps the Qdrant types out of the api
+/// crate so route handlers don't have to depend on `qdrant_client`.
+pub fn build_retrieve_filter(
+    project_id: &str,
+    repo_id: Option<&str>,
+    kinds: Option<&[String]>,
+) -> Filter {
+    use qdrant_client::qdrant::Condition;
+    let mut must: Vec<Condition> = vec![Condition::matches("project_id", project_id.to_owned())];
+    if let Some(repo) = repo_id {
+        must.push(Condition::matches("repo_id", repo.to_owned()));
+    }
+    if let Some(list) = kinds {
+        if !list.is_empty() {
+            let should: Vec<Condition> = list
+                .iter()
+                .map(|k| Condition::matches("chunk_kind", k.clone()))
+                .collect();
+            must.push(Condition::from(Filter::should(should)));
+        }
+    }
+    Filter::must(must)
+}
+
+/// Filtered top-k search. Same fetch-wide semantics as
+/// [`search_top_k`] but applies a `Filter::must` server-side so the
+/// vector candidate pool already respects tenancy / hierarchy / file
+/// scoping. Returns `Vec<SearchHit>` with payload populated.
+pub async fn search_top_k_with_filter(
+    client: &Qdrant,
+    cfg: &RagConfig,
+    query_vec: Vec<f32>,
+    filter: Filter,
+    k: usize,
+) -> Result<Vec<SearchHit>, RagBaseError> {
+    if query_vec.len() != cfg.embedding.dim {
+        return Err(RagBaseError::InvalidConfig(format!(
+            "query vector length {} != EMBEDDING_DIM {}",
+            query_vec.len(),
+            cfg.embedding.dim
+        )));
+    }
+    let fetch_k = (k.saturating_mul(8)).min(400).max(k);
+    info!(
+        target: "rag_base::vector_db",
+        collection = %cfg.qdrant.collection,
+        k,
+        fetch_k,
+        "search_top_k_with_filter: start"
+    );
+
+    let builder = SearchPointsBuilder::new(&cfg.qdrant.collection, query_vec, fetch_k as u64)
+        .with_payload(true)
+        .filter(filter);
+
+    let resp = client.search_points(builder).await.map_err(|e| {
+        error!(
+            target: "rag_base::vector_db",
+            error = %e,
+            "search_top_k_with_filter: qdrant search failed"
+        );
+        RagBaseError::Qdrant(format!("search_points: {e}"))
+    })?;
+
+    let hits = resp
+        .result
+        .into_iter()
+        .map(map_scored_point_to_hit)
+        .collect::<Vec<_>>();
+    Ok(hits)
+}
+
 /// Scroll points in Qdrant collection with a given filter.
 ///
 /// The function returns up to `limit` points with payloads and without vectors.
