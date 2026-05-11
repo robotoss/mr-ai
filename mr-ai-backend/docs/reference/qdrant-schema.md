@@ -89,8 +89,9 @@ Defined by
 | `search_blob` | `string` | Full-text searchable concatenation. |
 
 Legacy points (pre-S1) deserialise cleanly: all newly added fields are
-`#[serde(default)]`. They will be backfilled by the first explicit
-`/admin/reindex_all` once the route lands in S5.
+`#[serde(default)]`. Run `POST /admin/reindex_all`
+(see [Admin API](admin-api.md)) once after deployment to backfill the
+new payload fields across every existing point.
 
 ## Payload indexes
 

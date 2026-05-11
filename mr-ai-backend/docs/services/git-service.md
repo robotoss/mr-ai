@@ -102,12 +102,12 @@ should prefer `GitService`.
 | Worktree dir already exists | replaced (idempotent). |
 | `git worktree add` non-zero exit | `GitCloneError::Git`. |
 
-## Future (post-S2)
+## Future work
 
 - Per-remote async lock so two workers cannot fetch the same bare in
   parallel.
-- TTL-based GC for stale worktrees (`WORKTREE_TTL_HOURS` placeholder
-  documented in `.env.example`; sweeper lands in S5).
+- TTL-based GC for stale worktrees (the `WORKTREE_TTL_HOURS` knob in
+  `.env.example` is a placeholder until the sweeper ships).
 - Optional shallow clones (`--depth`) for very large repos.
 
 ## Related docs

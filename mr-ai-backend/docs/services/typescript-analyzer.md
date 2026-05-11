@@ -1,6 +1,6 @@
 # TypeScript Analyzer
 
-> **Status:** ACTIVE (S4B — tree-sitter only; `ts-morph` sidecar lands in S4C)
+> **Status:** ACTIVE (S4B — tree-sitter only; `ts-morph` sidecar is future work)
 > **Crate:** [`code-indexer/`](../../code-indexer) ·
 > **Layer:** L2 — Capabilities
 
@@ -59,7 +59,7 @@ so a single-language workspace doesn't pay for the others.
 ## What S4B intentionally leaves out
 
 - **Sidecar.** `ts-morph`-based DataFlow / ControlFlow / AsyncBoundary
-  extraction lands in S4C alongside `REQUIRE_SIDECAR_TS` enforcement.
+  extraction is future work alongside `REQUIRE_SIDECAR_TS` enforcement.
   Until then the current `AsyncBoundary` marker is a cheap proxy.
 - **`package.json` dependency graph.** `PackageDep` edges are emitted
   by a separate scanner (mirroring the Dart pubspec story).

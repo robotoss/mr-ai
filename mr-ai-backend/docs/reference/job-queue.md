@@ -75,8 +75,8 @@ UPDATE jobs SET status = 'queued', run_at = now(), attempt = 0
 | Kind | Producer | Handler | Status |
 | --- | --- | --- | --- |
 | `IngestPush` | webhook handlers | [`IngestPushHandler`](../../worker/src/handlers.rs) | refreshes the bare clone, enqueues `Reindex` |
-| `IngestMr` | webhook handlers | `IngestMrHandler` | skeleton — review pipeline lands in S2-D / S3 |
-| `Reindex` | `IngestPush` (and S4 admin endpoint) | `ReindexHandler` | skeleton — incremental delta lands in S4 |
+| `IngestMr` | webhook handlers | [`IngestMrHandler`](../../worker/src/handlers.rs) | builds the two-phase review bundle and (optionally) publishes inline comments |
+| `Reindex` | `IngestPush` + `/admin/reindex_*` (S5) | [`ReindexHandler`](../../worker/src/handlers.rs) | worktree → analyzer fan-out → graph_persist → Qdrant content-sha dedup; auto-splits at `REINDEX_SPLIT_FILES` and times out at `REINDEX_JOB_TIMEOUT_MIN` (S9) |
 
 Adding a new kind:
 

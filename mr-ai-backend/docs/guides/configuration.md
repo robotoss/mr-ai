@@ -117,6 +117,17 @@ serves Dart (S3) and Rust (S4A); TypeScript joins in S4B. See
 | `SUB_CHUNK_MIN_BYTES` | `1500` | Minimum body size before a `parent`/`symbol` chunk is sliced into `sub` chunks. Clamped to `>= 64`. |
 | `SUB_CHUNK_OVERLAP_BYTES` | `150` | Overlap between adjacent `sub` slices so callers / types near a slice boundary stay co-embedded. Clamped to `<= SUB_CHUNK_MIN_BYTES / 2`. |
 
+## Worker reindex (S9)
+
+Bounds the worker's `Reindex` handler so a pathological workspace can't
+hold a slot indefinitely. See [Operations](../operations.md) for the
+playbook.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `REINDEX_JOB_TIMEOUT_MIN` | `30` | Maximum wall time for a single `Reindex` job. On timeout the handler writes `index_state.last_indexed_path_prefix` and returns a retryable error; the SKIP-LOCKED queue replays it via the standard backoff path. |
+| `REINDEX_SPLIT_FILES` | `5000` | When the workspace contains more files than this *and* the job has no `path_prefix`, the handler enqueues one sub-job per top-level directory and exits immediately. Set to `0` to disable auto-split. |
+
 ## MR overlay fan-out (S7)
 
 Caps consumed by `git_context_engine::overlay::build::OverlayCaps::from_env`

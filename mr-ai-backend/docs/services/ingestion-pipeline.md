@@ -104,6 +104,47 @@ Persistent `embedded == upserted == chunks_total` across re-runs means the
 content-sha contract is broken upstream (usually a non-determinism in
 `extract.rs` ordering or whitespace handling).
 
+## Timeout + auto-split (S9)
+
+Two safety valves bound how much work a single `Reindex` job can do.
+
+### `REINDEX_JOB_TIMEOUT_MIN`
+
+The handler wraps its entire pipeline in `tokio::time::timeout`. When
+the deadline fires:
+
+1. Look up the repo (lenient match on `remote_url`).
+2. Persist `index_state.last_indexed_path_prefix = current_prefix` via
+   `mark_checkpoint` — empty string when the parent job timed out,
+   the active sub-job's prefix otherwise.
+3. Return a retryable `WorkerError::Handler` with
+   `ErrorKind::TimedOut`. The SKIP-LOCKED queue replays the job under
+   the standard exponential backoff.
+
+A retry sees the checkpoint via `index_state::get`; future sprints can
+use it to skip already-finished prefixes. S9 only persists the
+checkpoint — the producer side wires the resume reader once retrieval
+needs partial progress visibility.
+
+### `REINDEX_SPLIT_FILES`
+
+Before the parse, the handler counts files via the cheap
+`code_indexer::list_workspace_files` walk. When the count exceeds
+the threshold *and* the job has no `path_prefix` (i.e. it's a parent
+job), the handler groups files by top-level directory, enqueues one
+sub-job per directory with `payload.path_prefix = "<dir>/"`, and
+returns `Ok(())` immediately — graph persist and Qdrant upsert are
+deferred to the sub-jobs.
+
+Each sub-job invokes `index_workspace_filtered(base_dir, false, Some(prefix))`
+so only chunks under its slice land in the analyzer / overlay paths.
+The deterministic chunk-id scheme (S1) means sub-jobs never collide:
+each chunk's id includes the file path, so two sub-jobs targeting
+disjoint directories upsert disjoint Qdrant points.
+
+Set `REINDEX_SPLIT_FILES=0` to opt out — useful for small repos and
+for integration tests that need to assert a single-job flow.
+
 ## Failure handling
 
 | Stage | Failure mode | Effect |

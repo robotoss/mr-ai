@@ -38,6 +38,15 @@ fn index_project(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChunk>> {
     Ok(chunks)
 }
 
+/// Cheap scan: return the list of supported source files under
+/// `base_dir`. Used by the S9 auto-split path in the worker — it needs
+/// to know the file count and top-level directory shape *without*
+/// paying for the full parse. Symlink-safe (same `walkdir` semantics
+/// as the full pass).
+pub fn list_workspace_files(base_dir: &Path) -> Vec<PathBuf> {
+    util::fs_scan::scan_project_files(base_dir)
+}
+
 /// Index an arbitrary directory tree into `CodeChunk`s.
 ///
 /// Public entry point used by the worker pool when reindexing a freshly-
@@ -47,12 +56,35 @@ fn index_project(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChunk>> {
 /// upserts get stable identifiers regardless of where the worktree
 /// happened to live on disk.
 pub fn index_workspace(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChunk>> {
+    index_workspace_filtered(base_dir, enable_lsp, None)
+}
+
+/// Like [`index_workspace`] but restricts the parse to chunks whose
+/// repo-relative path starts with `path_prefix`. Used by the S9
+/// auto-split branch in the worker: when a worktree exceeds
+/// `REINDEX_SPLIT_FILES`, the parent job enqueues one sub-job per
+/// top-level directory and each sub-job invokes this filtered variant
+/// so it pays only for its slice of the tree.
+///
+/// Passing `None` is identical to `index_workspace` — the filter is a
+/// no-op then.
+pub fn index_workspace_filtered(
+    base_dir: &Path,
+    enable_lsp: bool,
+    path_prefix: Option<&str>,
+) -> Result<Vec<CodeChunk>> {
     let mut chunks = index_project(base_dir, enable_lsp)?;
-    for chunk in &mut chunks {
+    let mut out: Vec<CodeChunk> = Vec::with_capacity(chunks.len());
+    for mut chunk in chunks.drain(..) {
         let Ok(rel) = std::path::Path::new(&chunk.file).strip_prefix(base_dir) else {
             continue;
         };
         let new_file = rel.to_string_lossy().into_owned();
+        if let Some(prefix) = path_prefix {
+            if !new_file.starts_with(prefix) {
+                continue;
+            }
+        }
         // Replace prefix references in `id` and `symbol_path` so every
         // identity field stays consistent with the rebased `file`.
         // Symbols whose IDs/paths happen not to embed the path are left
@@ -60,8 +92,9 @@ pub fn index_workspace(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChun
         let old_file = std::mem::replace(&mut chunk.file, new_file.clone());
         chunk.id = chunk.id.replacen(&old_file, &new_file, 1);
         chunk.symbol_path = chunk.symbol_path.replacen(&old_file, &new_file, 1);
+        out.push(chunk);
     }
-    Ok(chunks)
+    Ok(out)
 }
 
 /// Indexes only files affected by a diff/changeset into `CodeChunk`s.

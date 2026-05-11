@@ -1,6 +1,6 @@
 # Rust Analyzer
 
-> **Status:** ACTIVE (S4A — tree-sitter only; `syn`-based sidecar lands in S4C)
+> **Status:** ACTIVE (S4A — tree-sitter only; `syn`-based sidecar is future work)
 > **Crate:** [`code-indexer/`](../../code-indexer) ·
 > **Layer:** L2 — Capabilities
 
@@ -59,7 +59,7 @@ Rust edges and vice versa. The merged outcome flows into the existing
 ## What S4A intentionally leaves out
 
 - **Sidecar.** `syn`-based DataFlow / ControlFlow / AsyncBoundary
-  extraction lands in S4C alongside `REQUIRE_SIDECAR_RUST` enforcement.
+  extraction is future work alongside `REQUIRE_SIDECAR_RUST` enforcement.
   The current `AsyncBoundary` marker is a cheap proxy that retrieval
   can already filter on.
 - **Cargo.toml package graph.** `PackageDep` edges are emitted by S3-D
