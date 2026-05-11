@@ -40,6 +40,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `review-pipeline` | Worker pipeline binding webhooks → graph reindex → review bundle. | [review-pipeline](services/review-pipeline.md) |
 | `ingestion-pipeline` | Master-flow `Reindex` → Postgres graph **and** Qdrant via content-sha dedup. | [ingestion-pipeline](services/ingestion-pipeline.md) |
 | `chunking` | Hierarchical chunk emission (file / parent / symbol / sub) + `parent_symbol_id` linking. | [chunking](services/chunking.md) |
+| `rust-analyzer` | Tree-sitter Rust provider + `RustAnalyzer` graph edges (S4A). | [rust-analyzer](services/rust-analyzer.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 

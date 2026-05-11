@@ -14,9 +14,11 @@
 
 pub mod dart;
 pub mod intent;
+pub mod rust;
 
 pub use dart::DartAnalyzer;
 pub use intent::{AnalysisOutcome, EdgeIntent, NodeIntent};
+pub use rust::RustAnalyzer;
 
 use domain::ProviderKind;
 

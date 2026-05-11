@@ -394,7 +394,13 @@ pub fn extract_chunks(
     // 5) Decorate with hierarchical metadata: tag every existing chunk
     //    with `chunk_kind` + `parent_symbol_id`, slice long bodies into
     //    Sub chunks, and prepend a synthetic File chunk.
-    super::hierarchy::decorate_hierarchy(&mut out, code, file, &imports);
+    crate::ast::hierarchy::decorate_hierarchy(
+        &mut out,
+        code,
+        file,
+        &imports,
+        LanguageKind::Dart,
+    );
 
     Ok(out)
 }

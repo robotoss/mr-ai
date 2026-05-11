@@ -1,32 +1,31 @@
-//! Hierarchical chunking decoration for Dart (S3).
+//! Hierarchical chunking decoration (language-agnostic).
 //!
-//! The `extract` module emits flat symbol-level chunks. This module
+//! Per-language extractors emit flat symbol-level chunks. This module
 //! turns that flat list into the 4-level hierarchy the rest of the
 //! pipeline expects:
 //!
 //! - **File** chunk — one per file. Carries imports + a skeleton of the
 //!   top-level symbols. Embedding it gives retrieval a cheap "what does
 //!   this file do" handle without pulling every chunk in the file.
-//! - **Parent** chunk — every type-like declaration (class/mixin/extension/enum).
-//!   Reuses the symbol chunk's text (which already includes the body) and
-//!   only re-tags `chunk_kind`. The relationship to its members is encoded
-//!   on the *children* via `parent_symbol_id`.
-//! - **Symbol** chunk — every non-type declaration (method, function,
-//!   constructor, variable). Default classification for legacy chunks.
-//! - **Sub** chunk — long symbol bodies are sliced into overlapping
-//!   sub-chunks so the embedding model never sees more than
-//!   `SUB_CHUNK_MIN_BYTES` of code per row. Linked back via
-//!   `parent_symbol_id`.
+//! - **Parent** chunk — every type-like declaration (class/mixin/extension/
+//!   enum for Dart; impl/trait/struct/enum for Rust; class/interface/
+//!   namespace for TypeScript). Reuses the symbol chunk's text and only
+//!   re-tags `chunk_kind`. The relationship to its members is encoded on
+//!   the *children* via `parent_symbol_id`.
+//! - **Symbol** chunk — every non-type declaration (method/function/
+//!   constructor/field/variable).
+//! - **Sub** chunk — long bodies are sliced into overlapping sub-chunks
+//!   so the embedding model never sees more than `SUB_CHUNK_MIN_BYTES`
+//!   of code per row. Linked back via `parent_symbol_id`.
 //!
 //! `parent_symbol_id` is the **parent chunk's `symbol_path`** (e.g.
-//! `lib/main.dart::App`), not a Qdrant point ID. Retrieval can use it to
-//! walk a hit "upward" to its containing class without hitting Postgres.
+//! `lib/main.dart::App` or `src/main.rs::App`), not a Qdrant point ID.
+//! Retrieval pivots upward via a payload field lookup.
 
 use std::env;
 
+use crate::ast::dart::util::{make_id, sha_hex};
 use crate::types::{ChunkFeatures, ChunkKind, CodeChunk, LanguageKind, Span, SymbolKind};
-
-use super::util::{make_id, sha_hex};
 
 /// Default minimum body length (in bytes) before a symbol gets sliced
 /// into sub-chunks. Tuned for embedding models with ~1k-2k token budgets.
@@ -63,16 +62,19 @@ fn config() -> HierarchyConfig {
 }
 
 /// Decorate the flat chunk list with hierarchical classification and
-/// extend it with `File` + `Sub` chunks.
+/// extend it with `File` + `Sub` chunks. `language` is the source
+/// language of the parsed file — used to stamp emitted File / Sub
+/// chunks so downstream payloads stay consistent.
 pub fn decorate_hierarchy(
     chunks: &mut Vec<CodeChunk>,
     code: &str,
     file: &str,
     imports: &[String],
+    language: LanguageKind,
 ) {
     classify_existing(chunks, file);
-    append_sub_chunks(chunks, code);
-    insert_file_chunk(chunks, code, file, imports);
+    append_sub_chunks(chunks, code, language);
+    insert_file_chunk(chunks, code, file, imports, language);
 }
 
 /// Set `chunk_kind` and `parent_symbol_id` on every chunk the extractor
@@ -106,7 +108,7 @@ fn parent_symbol_path(file: &str, owner_path: &[String]) -> String {
 /// For every existing `Symbol` chunk whose body is large enough, append
 /// one or more `Sub` chunks. Operates on a snapshot of the flat list so
 /// the iteration doesn't see chunks it just appended.
-fn append_sub_chunks(chunks: &mut Vec<CodeChunk>, code: &str) {
+fn append_sub_chunks(chunks: &mut Vec<CodeChunk>, code: &str, language: LanguageKind) {
     let cfg = config();
     if cfg.sub_min_bytes == 0 {
         return;
@@ -153,7 +155,7 @@ fn append_sub_chunks(chunks: &mut Vec<CodeChunk>, code: &str) {
             };
             extras.push(CodeChunk {
                 id: make_id(&c.file, &symbol_path, &sub_span),
-                language: LanguageKind::Dart,
+                language,
                 file: c.file.clone(),
                 symbol: c.symbol.clone(),
                 symbol_path,
@@ -197,7 +199,13 @@ fn append_sub_chunks(chunks: &mut Vec<CodeChunk>, code: &str) {
 /// Prepend a `File`-level chunk synthesising imports + a top-level
 /// symbol skeleton. Embedding this gives retrieval a "what is this file
 /// about" handle without scanning every chunk in the file.
-fn insert_file_chunk(chunks: &mut Vec<CodeChunk>, code: &str, file: &str, imports: &[String]) {
+fn insert_file_chunk(
+    chunks: &mut Vec<CodeChunk>,
+    code: &str,
+    file: &str,
+    imports: &[String],
+    language: LanguageKind,
+) {
     if chunks.iter().any(|c| matches!(c.chunk_kind, Some(ChunkKind::File))) {
         return;
     }
@@ -243,7 +251,7 @@ fn insert_file_chunk(chunks: &mut Vec<CodeChunk>, code: &str, file: &str, import
     let symbol_path = file.to_owned();
     let file_chunk = CodeChunk {
         id: make_id(file, &symbol_path, &span),
-        language: LanguageKind::Dart,
+        language,
         file: file.to_owned(),
         symbol: "<file>".to_owned(),
         symbol_path,
@@ -313,8 +321,7 @@ fn align_down(s: &str, mut idx: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::super::extract::extract_chunks;
-    use super::super::lang::language as dart_language;
+    use crate::ast::dart::test_support::{dart_language, extract_chunks_for_tests as extract_chunks};
     use crate::types::ChunkKind;
     use tree_sitter::Parser;
 

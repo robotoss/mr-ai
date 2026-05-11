@@ -375,6 +375,23 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
+/// Merge several per-language analyzer outcomes into one bundle. Coverage
+/// counters add; nodes/edges concatenate. Duplicate file nodes for the
+/// same `(file, language)` are collapsed downstream by `graph_persist`.
+fn merge_outcomes(
+    outcomes: Vec<code_indexer::analyzer::AnalysisOutcome>,
+) -> code_indexer::analyzer::AnalysisOutcome {
+    let mut merged = code_indexer::analyzer::AnalysisOutcome::default();
+    for o in outcomes {
+        merged.nodes.extend(o.nodes);
+        for e in o.edges {
+            merged.coverage.record(&e.edge_type);
+            merged.edges.push(e);
+        }
+    }
+    merged
+}
+
 fn publisher_provider_kind(provider: ProviderKind) -> Option<PublisherProviderKind> {
     match provider {
         ProviderKind::Gitlab => Some(PublisherProviderKind::GitLab),
@@ -522,7 +539,14 @@ impl JobHandler for ReindexHandler {
         let analysis = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let chunks = code_indexer::index_workspace(&workspace_clone, false)
                 .map_err(|e| e.to_string())?;
-            let mut outcome = DartAnalyzer::new().analyze_chunks(&chunks);
+
+            // Language fan-out: each analyzer scans only the chunks
+            // whose `LanguageKind` it claims, then we merge their
+            // outcomes into a single `AnalysisOutcome` for graph_persist.
+            let dart_outcome = DartAnalyzer::new().analyze_chunks(&chunks);
+            let rust_outcome = code_indexer::analyzer::RustAnalyzer::new()
+                .analyze_chunks(&chunks);
+            let mut outcome = merge_outcomes(vec![dart_outcome, rust_outcome]);
 
             // Optional Dart Analyzer sidecar augmentation (S8). Failures
             // degrade the run to tree-sitter-only data instead of aborting.

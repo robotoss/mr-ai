@@ -31,3 +31,6 @@ tree-sitter-javascript = "0.23"
 
 # Workspace internal deps
 domain = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
