@@ -179,6 +179,31 @@ pub async fn load_by_slug(pool: &PgPool, slug: &str) -> Result<Option<ProjectGro
     }))
 }
 
+/// Return every `(from_repo_id, to_repo_id)` declared under
+/// `project_id`. Used by the overlay walker so it can build the
+/// dependency map up-front and stay sync — calling async helpers from
+/// inside the BFS would force `Handle::block_on` inside an async
+/// context, which panics on tokio's multi-threaded runtime.
+pub async fn list_dependencies_for_project(
+    pool: &PgPool,
+    project_id: ProjectId,
+) -> Result<Vec<(RepoId, RepoId)>> {
+    let project_uuid: uuid::Uuid = project_id.into();
+    let rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+        "SELECT pd.from_repo_id, pd.to_repo_id \
+           FROM project_dependencies pd \
+           JOIN project_repos r ON r.id = pd.from_repo_id \
+          WHERE r.project_id = $1",
+    )
+    .bind(project_uuid)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(f, t)| (RepoId::from_uuid(f), RepoId::from_uuid(t)))
+        .collect())
+}
+
 /// Return every repo declared under `project_id`. Used by S5's
 /// `/admin/reindex_all` to fan out one Reindex job per repo without
 /// pulling the full `ProjectGroup` (no dependency edges needed here).
