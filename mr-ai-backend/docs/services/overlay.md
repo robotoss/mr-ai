@@ -125,15 +125,23 @@ MR on `app`, max_hops = 1:
 ```rust
 pub struct OverlayBuildReport {
     pub visited_repos: Vec<(RepoId, usize)>,
+    pub failed_repos: Vec<(RepoId, String)>,
     pub repos_truncated: bool,
     pub chunks_truncated: bool,
 }
 ```
 
 `visited_repos` keeps `(repo_id, hop)` for every repo actually
-indexed (skipped repos — for example one whose worktree creation
-failed — are absent). `repos_truncated` reflects the BFS plan;
+folded into the overlay. `repos_truncated` reflects the BFS plan;
 `chunks_truncated` reflects ingest-time truncation.
+
+`failed_repos` (review fix #8) records `(repo_id, reason)` for repos
+the walker *tried* to visit but skipped — worktree creation, indexer
+crash, or `spawn_blocking` join failure. Previously these were
+silently logged; now retrieval clients see the count via
+`overlay_meta.failed_repos` in the `/retrieve` response, so a partial
+overlay caused by degraded deps is distinguishable from a partial
+overlay caused by `MR_FANOUT_*` caps.
 
 ## Where this hooks in
 

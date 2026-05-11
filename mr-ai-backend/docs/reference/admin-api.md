@@ -10,6 +10,24 @@ upsert — runs identically regardless of how the work was triggered.
 Both endpoints require the Postgres pool to be available; they return
 `503 PERSISTENCE_DISABLED` when it is not.
 
+## Authentication
+
+All operator routes (`/admin/*`, `/retrieve`, `/trigger_git_mr`) are
+gated by an `X-Admin-Token` header that is compared in constant time
+against [`AppConfig::trigger_secret`](../../api/src/core/app_state.rs)
+(env: `TRIGGER_SECRET`). Missing / wrong / empty token returns
+`401 UNAUTHORIZED` with a structured envelope:
+
+```bash
+curl -sS -X POST http://localhost:8080/admin/reindex_all \
+    -H 'content-type: application/json' \
+    -H "X-Admin-Token: $TRIGGER_SECRET" \
+    -d '{}'
+```
+
+Webhooks (`/webhooks/*`) keep their own HMAC verification path. Health
+probes and `/usage` stay open for k8s and dashboards.
+
 ## `POST /admin/reindex_repo`
 
 Enqueue a Reindex job for a single repo.
@@ -33,6 +51,7 @@ checked as a safety net against config drift.
 | --- | --- | --- |
 | `202 Accepted` | `{ "job_id": "...", "kind": "Reindex", "remote_url": "..." }` | Job persisted in the `jobs` table; the worker pool will claim it. |
 | `400 BAD_REQUEST` | `{ "error": "BAD_REQUEST", "message": "remote_url required" }` | Empty / missing field. |
+| `401 UNAUTHORIZED` | `{ "error": "UNAUTHORIZED", "message": "X-Admin-Token header required" }` | Missing / wrong header. |
 | `404 UNKNOWN_REPO` | `{ "error": "UNKNOWN_REPO", "message": "..." }` | Remote URL not declared in `projects.toml`. |
 | `409 PROJECT_MISMATCH` | `{ "error": "PROJECT_MISMATCH", "message": "..." }` | The repo is registered under a different project than the cached default. Indicates `projects.toml` diverged from `AppConfig::default_project_id`; restart the API. |
 | `500 PERSISTENCE_ERROR` / `ENQUEUE_FAILED` | error envelope | Postgres lookup or insert failed. |
@@ -43,6 +62,7 @@ checked as a safety net against config drift.
 ```bash
 curl -sS -X POST http://localhost:8080/admin/reindex_repo \
     -H 'content-type: application/json' \
+    -H "X-Admin-Token: $TRIGGER_SECRET" \
     -d '{"remote_url": "git@gitlab.com:org/app.git"}' | jq
 ```
 
@@ -61,14 +81,17 @@ Body is an empty object (`{}`) or absent. The handler reads
 | Status | Body | When |
 | --- | --- | --- |
 | `202 Accepted` | `{ "kind": "Reindex", "project_slug": "...", "enqueued": [ { "job_id": "...", "remote_url": "..." }, ... ] }` | One entry per enqueued job. |
+| `401 UNAUTHORIZED` | `{ "error": "UNAUTHORIZED", "message": "X-Admin-Token header required" }` | Missing / wrong header. |
 | `404 NO_REPOS` | error envelope | The default project has no repos in `project_repos`. |
-| `500 PERSISTENCE_ERROR` / `ENQUEUE_FAILED` | error envelope | Postgres lookup or insert failed. The handler stops at the first enqueue failure; previously enqueued jobs remain valid. |
+| `500 PERSISTENCE_ERROR` / `ENQUEUE_FAILED` | error envelope | Postgres lookup or insert failed. All sub-jobs run inside a single transaction (S-review fix #7), so a mid-loop failure rolls back every sibling insert — the parent retries cleanly without orphan jobs. |
 | `503 PERSISTENCE_DISABLED` | error envelope | Postgres pool unavailable. |
 
 ### Example
 
 ```bash
-curl -sS -X POST http://localhost:8080/admin/reindex_all -d '{}' | jq
+curl -sS -X POST http://localhost:8080/admin/reindex_all \
+    -H "X-Admin-Token: $TRIGGER_SECRET" \
+    -d '{}' | jq
 ```
 
 ## Single-project invariant

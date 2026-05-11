@@ -136,6 +136,22 @@ sub-job per directory with `payload.path_prefix = "<dir>/"`, and
 returns `Ok(())` immediately — graph persist and Qdrant upsert are
 deferred to the sub-jobs.
 
+**Transactional fan-out (review fix #7).** All sub-job inserts run
+inside a single `pool.begin()` … `jobs::enqueue_in_tx` … `tx.commit()`
+window. A mid-loop failure rolls every sibling insert back, so the
+parent's retry replays cleanly without leaving orphan sub-jobs in the
+queue and without doubling work on each retry pass.
+
+**Root-bucket sentinel (review fix #13).** Files living directly at
+the workspace root (`Cargo.toml`, top-level `*.rs`, etc.) used to fall
+out of the fan-out because `top_level_dirs` only emitted real
+directories. They now go into a sentinel bucket
+`code_indexer::ROOT_BUCKET_PREFIX = "_root/"`, and
+`index_workspace_filtered` recognises that prefix as "files whose
+rebased path has no `/` separator". A Cargo-shaped repo with `src/`
+plus a handful of root `*.rs` files now fans out into two sub-jobs
+(`src/` + `_root/`) and indexes every file.
+
 Each sub-job invokes `index_workspace_filtered(base_dir, false, Some(prefix))`
 so only chunks under its slice land in the analyzer / overlay paths.
 The deterministic chunk-id scheme (S1) means sub-jobs never collide:
