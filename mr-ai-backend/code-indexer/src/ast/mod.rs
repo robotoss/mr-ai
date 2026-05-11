@@ -1,5 +1,6 @@
 pub mod dart;
 pub mod generic_text;
+pub(crate) mod hierarchy;
 pub mod interface;
 pub mod javascript;
 pub mod router;

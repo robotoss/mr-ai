@@ -105,15 +105,31 @@ Loaded by [`RagConfig::from_env`](../../rag-base/src/structs/rag_base_config.rs)
 | `CLAMP_EMBED_MAX_LINES` | `80` | Embedding text budget (lines). |
 | `CHUNK_MIN_CHARS` | `16` | Minimum chunk size to retain. |
 
-## Hierarchical chunking (S3)
+## Hierarchical chunking (S3 + S4A)
 
-Read once per file extraction by `code_indexer::ast::dart::hierarchy`.
-See [Chunking](../services/chunking.md) for the contract.
+Read once per file extraction by
+`code_indexer::ast::hierarchy::decorate_hierarchy`. Same decorator
+serves Dart (S3) and Rust (S4A); TypeScript joins in S4B. See
+[Chunking](../services/chunking.md) for the contract.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `SUB_CHUNK_MIN_BYTES` | `1500` | Minimum body size before a `parent`/`symbol` chunk is sliced into `sub` chunks. Clamped to `>= 64`. |
 | `SUB_CHUNK_OVERLAP_BYTES` | `150` | Overlap between adjacent `sub` slices so callers / types near a slice boundary stay co-embedded. Clamped to `<= SUB_CHUNK_MIN_BYTES / 2`. |
+
+## Mandatory sidecars (S4C — staged in S4A)
+
+`REQUIRE_SIDECAR_*` toggles tell the worker to refuse to run `Reindex`
+if the corresponding language sidecar binary isn't on `$PATH`. S4A
+introduces the env knobs as a no-op stub so deployment scripts can
+start setting them. The actual enforcement and the Rust / TypeScript
+sidecar binaries land in S4C.
+
+| Var | Default | Effect |
+| --- | --- | --- |
+| `REQUIRE_SIDECAR_DART` | `0` | Already wired against the Dart Analyzer sidecar shipped in S10. |
+| `REQUIRE_SIDECAR_RUST` | `0` | No-op stub; will gate the `syn`-based Rust sidecar in S4C. |
+| `REQUIRE_SIDECAR_TS` | `0` | No-op stub; will gate the `ts-morph`-based TypeScript sidecar in S4C. |
 
 ## API server
 

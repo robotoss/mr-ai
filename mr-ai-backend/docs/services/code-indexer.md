@@ -80,18 +80,25 @@ code-indexer/src/
     └── fs_scan.rs      # recursive file walker with extension filters
 ```
 
-## Emission strategy (S3)
+## Emission strategy (S3 + S4A)
 
 | Language | Status | Chunk levels |
 | --- | --- | --- |
-| Dart | shipped | file / parent / symbol / sub |
-| Rust | S4 | placeholder — currently text-fallback |
-| TypeScript | S4 | placeholder — currently text-fallback |
+| Dart | shipped (S3) | file / parent / symbol / sub |
+| Rust | shipped (S4A) | file / parent / symbol / sub |
+| TypeScript | S4B | placeholder — currently text-fallback |
 
 See [Chunking](chunking.md) for the contract and `parent_symbol_id`
-linking model. The decorator (`ast::dart::hierarchy::decorate_hierarchy`)
-runs after the flat extractor and is responsible for the hierarchical
-classification, sub-slicing, and the synthetic file chunk.
+linking model. The decorator
+(`ast::hierarchy::decorate_hierarchy`) is language-agnostic and runs
+after the per-language extractor — Dart, Rust (S4A), and the upcoming
+TypeScript (S4B) all feed it.
+
+| Analyzer | Edge kinds | Implementation |
+| --- | --- | --- |
+| Dart | imports, defines, calls, inherits, type_uses, async_boundary | [`analyzer::dart`](../../code-indexer/src/analyzer/dart.rs) |
+| Rust | imports, defines, calls, inherits, type_uses, async_boundary | [`analyzer::rust`](../../code-indexer/src/analyzer/rust.rs) — see [Rust Analyzer](rust-analyzer.md) |
+| TypeScript | _S4B_ | _coming next_ |
 
 ## Errors
 
