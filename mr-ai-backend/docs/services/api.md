@@ -28,7 +28,8 @@ adapter over the lower layers.
 | --- | --- | --- | --- |
 | `POST` | `/admin/reindex_repo` | [`reindex_repo_route`](../../api/src/routes/admin/reindex_repo_route.rs) | S5 — enqueue a single `Reindex` job by `remote_url`. See [Admin API](../reference/admin-api.md). |
 | `POST` | `/admin/reindex_all` | [`reindex_all_route`](../../api/src/routes/admin/reindex_all_route.rs) | S5 — fan out one `Reindex` job per repo declared under the default project. |
-| `POST` | `/search_vector_base` | [`search_vector_base_route`](../../api/src/routes/rag_base/search_vector_base_route.rs) | Semantic search via `rag_base::search_code`. Deprecated — `/retrieve` replaces it in S8. |
+| `POST` | `/retrieve` | [`retrieve_route`](../../api/src/routes/retrieve/retrieve_route.rs) | S8 — vector search + graph expand + optional MR overlay. See [Retrieve API](../reference/retrieve-api.md). |
+| `POST` | `/search_vector_base` | [`search_vector_base_route`](../../api/src/routes/rag_base/search_vector_base_route.rs) | Semantic search via `rag_base::search_code`. Deprecated by `/retrieve` (S8); kept for back-compat. |
 | `POST` | `/trigger_git_mr` | [`trigger_mr_route`](../../api/src/routes/check_mr/trigger_mr_route.rs) | End-to-end MR review pipeline. |
 | `POST` | `/webhooks/{gitlab,github,bitbucket}` | [`webhooks/*`](../../api/src/routes/webhooks) | Inbound push / MR webhooks. |
 | `GET` | `/health/{live,ready,detailed}` | [`health/*`](../../api/src/routes/health) | Liveness / readiness probes. |

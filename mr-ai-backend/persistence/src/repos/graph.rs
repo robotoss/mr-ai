@@ -268,6 +268,112 @@ pub async fn load_node(pool: &PgPool, node: NodeId) -> Result<Option<GraphNode>>
     }))
 }
 
+/// Resolve a batch of `fqn` strings (matching `CodeChunk::symbol_path`)
+/// to `NodeId`s within `repo_id`. Missing fqns are simply absent from
+/// the result map. Used by `/retrieve` (S8) to walk the graph from
+/// Qdrant hits.
+pub async fn find_nodes_by_fqns(
+    pool: &PgPool,
+    repo_id: RepoId,
+    fqns: &[String],
+) -> Result<std::collections::HashMap<String, NodeId>> {
+    if fqns.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let repo_uuid: uuid::Uuid = repo_id.into();
+    let rows: Vec<(String, uuid::Uuid)> = sqlx::query_as(
+        "SELECT fqn, id FROM graph_nodes WHERE repo_id = $1 AND fqn = ANY($2)",
+    )
+    .bind(repo_uuid)
+    .bind(fqns)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(fqn, id)| (fqn, NodeId::from_uuid(id)))
+        .collect())
+}
+
+/// Bulk hydrate `GraphNode`s by id, preserving the input order.
+pub async fn load_nodes(pool: &PgPool, node_ids: &[NodeId]) -> Result<Vec<GraphNode>> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let uuids: Vec<uuid::Uuid> = node_ids.iter().copied().map(Into::into).collect();
+    let rows: Vec<(
+        uuid::Uuid,
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<i32>,
+        Option<i32>,
+    )> = sqlx::query_as(
+        "SELECT id, repo_id, fqn, kind, file, symbol, language, content_sha256, \
+                span_start, span_end \
+           FROM graph_nodes WHERE id = ANY($1)",
+    )
+    .bind(&uuids)
+    .fetch_all(pool)
+    .await?;
+
+    let by_id: std::collections::HashMap<uuid::Uuid, _> = rows
+        .into_iter()
+        .map(|(id, repo, fqn, kind, file, symbol, language, content_sha256, span_start, span_end)| {
+            (id, (id, repo, fqn, kind, file, symbol, language, content_sha256, span_start, span_end))
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(node_ids.len());
+    for id in node_ids {
+        let id_uuid: uuid::Uuid = (*id).into();
+        let Some((id, repo_id, fqn, kind, file, symbol, language, content_sha256, span_start, span_end)) =
+            by_id.get(&id_uuid).cloned()
+        else {
+            continue;
+        };
+        let kind = match kind.as_str() {
+            "file" => domain::NodeKind::File,
+            "package" => domain::NodeKind::Package,
+            "module" => domain::NodeKind::Module,
+            "class" => domain::NodeKind::Class,
+            "interface" => domain::NodeKind::Interface,
+            "mixin" => domain::NodeKind::Mixin,
+            "extension" => domain::NodeKind::Extension,
+            "enum" => domain::NodeKind::Enum,
+            "function" => domain::NodeKind::Function,
+            "method" => domain::NodeKind::Method,
+            "constructor" => domain::NodeKind::Constructor,
+            "field" => domain::NodeKind::Field,
+            "variable" => domain::NodeKind::Variable,
+            "typedef" => domain::NodeKind::Typedef,
+            other => domain::NodeKind::Custom(other.to_owned()),
+        };
+        let span = match (span_start, span_end) {
+            (Some(s), Some(e)) => Some(domain::NodeSpan {
+                start: s as u32,
+                end: e as u32,
+            }),
+            _ => None,
+        };
+        out.push(GraphNode {
+            id: Some(NodeId::from_uuid(id)),
+            repo_id: RepoId::from_uuid(repo_id),
+            fqn,
+            kind,
+            file,
+            symbol,
+            language,
+            content_sha256,
+            span,
+        });
+    }
+    Ok(out)
+}
+
 /// Marker so dead-code analysis stops complaining about the optional
 /// metadata helper while it has no in-tree consumer (the retrieval pipeline
 /// in S4 starts using it).

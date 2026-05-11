@@ -71,6 +71,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Database Schema](reference/database-schema.md) | Postgres tables, migration workflow, ER diagram. |
 | [Qdrant Schema](reference/qdrant-schema.md) | Vector collection layout, payload fields, indexes, mutation API. |
 | [Admin API](reference/admin-api.md) | `POST /admin/reindex_repo` + `/admin/reindex_all` contract (S5). |
+| [Retrieve API](reference/retrieve-api.md) | `POST /retrieve` request / response contract — master + MR overlay (S8). |
 | [Job Queue](reference/job-queue.md) | Postgres-backed background queue, retry policy, kinds. |
 
 ## Conventions
