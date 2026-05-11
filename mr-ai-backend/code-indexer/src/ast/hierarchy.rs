@@ -41,10 +41,7 @@ struct HierarchyConfig {
     sub_overlap_bytes: usize,
 }
 
-fn config() -> HierarchyConfig {
-    // Read each invocation: env is cheap to read once per file and the
-    // call path here is per-file (not per-chunk), so caching buys us
-    // nothing while making tests brittle.
+fn read_config_from_env() -> HierarchyConfig {
     let sub_min_bytes = env::var("SUB_CHUNK_MIN_BYTES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -59,6 +56,23 @@ fn config() -> HierarchyConfig {
         sub_min_bytes,
         sub_overlap_bytes,
     }
+}
+
+/// Production path: cache the env-driven config once per process. A
+/// 50k-file repo would otherwise pay 100k `env::var` calls (read-lock
+/// the global env table) for what is effectively a constant. Tests
+/// re-read on every call so they can mutate `SUB_CHUNK_*` between
+/// cases without OnceLock making subsequent tests stale.
+#[cfg(not(test))]
+fn config() -> HierarchyConfig {
+    use std::sync::OnceLock;
+    static CFG: OnceLock<HierarchyConfig> = OnceLock::new();
+    *CFG.get_or_init(read_config_from_env)
+}
+
+#[cfg(test)]
+fn config() -> HierarchyConfig {
+    read_config_from_env()
 }
 
 /// Decorate the flat chunk list with hierarchical classification and

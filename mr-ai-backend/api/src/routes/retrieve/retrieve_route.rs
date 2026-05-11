@@ -176,17 +176,32 @@ pub async fn retrieve_route(
         .collect();
 
     // 7) Optional graph expansion. Only meaningful when we know the
-    //    repo — fqn lookups are keyed by `(repo_id, fqn)`.
+    //    repo — fqn lookups are keyed by `(repo_id, fqn)`. Expanded
+    //    nodes inherit a decayed slice of their seed's score so they
+    //    sort sensibly against direct vector hits instead of always
+    //    landing at the tail with `score = 0.0`.
     let mut expanded_node_count = 0usize;
     if req.expand && max_hops > 0 {
         if let Some(repo_id) = repo_id_opt {
+            // Capture the best seed score before mutation — used as
+            // the input to the decay so a strong vector hit pulls its
+            // neighbours up to a respectable rank.
+            let seed_score: f32 = hits
+                .iter()
+                .map(|h| h.score)
+                .fold(0.0_f32, f32::max);
             let seed_fqns: Vec<String> =
                 hits.iter().map(|h| h.symbol_path.clone()).collect();
             match expand_via_graph(pool, repo_id, &seed_fqns, max_hops).await {
                 Ok((nodes, count)) => {
                     expanded_node_count = count;
+                    // 50% decay per hop. Treat all expanded nodes as
+                    // hop=1 for now (we don't get per-node depth back
+                    // from `expand_k_hops`); refining to per-node depth
+                    // is a follow-up when the graph helper grows that
+                    // signal.
+                    let decayed = seed_score * 0.5;
                     for node in nodes {
-                        // Avoid double-counting nodes already in the hit list.
                         if hits.iter().any(|h| h.symbol_path == node.fqn) {
                             continue;
                         }
@@ -197,7 +212,7 @@ pub async fn retrieve_route(
                             file: node.file,
                             symbol_path: node.fqn,
                             chunk_kind: None,
-                            score: 0.0,
+                            score: decayed,
                             via: Via::Graph,
                             hops: 1,
                             snippet: None,
@@ -404,7 +419,8 @@ async fn build_overlay_hits(
                 );
                 continue;
             }
-            let score = cosine(query_vec, &vec, query_norm);
+            let b_norm = norm(&vec);
+            let score = cosine_pre(query_vec, &vec, query_norm, b_norm);
             if score < min_score {
                 continue;
             }
@@ -435,14 +451,21 @@ fn norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
-fn cosine(a: &[f32], b: &[f32], a_norm: f32) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let b_norm: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+/// Cosine similarity where the caller supplies both pre-computed norms.
+/// Avoids re-walking `b` for every comparison in the overlay hot loop.
+fn cosine_pre(a: &[f32], b: &[f32], a_norm: f32, b_norm: f32) -> f32 {
     if a_norm == 0.0 || b_norm == 0.0 {
-        0.0
-    } else {
-        dot / (a_norm * b_norm)
+        return 0.0;
     }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    dot / (a_norm * b_norm)
+}
+
+/// Convenience for tests / one-shot callers — recomputes `b_norm`
+/// fresh. Hot paths should use [`cosine_pre`] with a cached norm.
+#[cfg(test)]
+fn cosine(a: &[f32], b: &[f32], a_norm: f32) -> f32 {
+    cosine_pre(a, b, a_norm, norm(b))
 }
 
 fn bad_request(msg: impl Into<String>) -> Response {
@@ -487,4 +510,14 @@ mod tests {
         assert_eq!(s, 0.0);
     }
 
+    #[test]
+    fn cosine_pre_matches_cosine_when_norm_correct() {
+        let a = vec![1.0_f32, 2.0, 3.0];
+        let b = vec![4.0_f32, 5.0, 6.0];
+        let a_norm = norm(&a);
+        let b_norm = norm(&b);
+        let pre = cosine_pre(&a, &b, a_norm, b_norm);
+        let baseline = cosine(&a, &b, a_norm);
+        assert!((pre - baseline).abs() < 1e-6);
+    }
 }
