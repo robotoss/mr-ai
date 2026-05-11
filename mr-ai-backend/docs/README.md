@@ -43,6 +43,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `rust-analyzer` | Tree-sitter Rust provider + `RustAnalyzer` graph edges (S4A). | [rust-analyzer](services/rust-analyzer.md) |
 | `typescript-analyzer` | Tree-sitter TypeScript / TSX provider + `TypescriptAnalyzer` graph edges (S4B). | [typescript-analyzer](services/typescript-analyzer.md) |
 | `overlay` | In-memory `OverlayGraph` builder + transitive walker for MR retrieval (S7). | [overlay](services/overlay.md) |
+| `persistence` | Postgres — pool, migrations, transactions, queue mechanics, per-service responsibility. | [persistence](services/persistence.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 
@@ -68,7 +69,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Pricing](reference/pricing.md) | `pricing.toml` schema and cost-estimation math. |
 | [Usage Log](reference/usage-log.md) | Per-call JSONL history, `/usage` endpoint, jq cookbook. |
 | [Errors](reference/errors.md) | Error hierarchy, where each variant comes from, how it's mapped at boundaries. |
-| [Database Schema](reference/database-schema.md) | Postgres tables, migration workflow, ER diagram. |
+| [Database Schema](reference/database-schema.md) | Postgres tables, indexes, FKs, ER diagram. Pair with [services/persistence](services/persistence.md) for the operational story. |
 | [Qdrant Schema](reference/qdrant-schema.md) | Vector collection layout, payload fields, indexes, mutation API. |
 | [Admin API](reference/admin-api.md) | `POST /admin/reindex_repo` + `/admin/reindex_all` contract (S5). |
 | [Retrieve API](reference/retrieve-api.md) | `POST /retrieve` request / response contract — master + MR overlay (S8). |
