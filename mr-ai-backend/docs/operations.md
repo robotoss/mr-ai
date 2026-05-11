@@ -22,7 +22,8 @@ to re-read the file.
 | Var | Required? | Sketch |
 | --- | --- | --- |
 | `API_ADDRESS` | yes | Listening address. |
-| `GIT_API_BASE`, `GIT_TOKEN`, `TRIGGER_SECRET` | yes | Provider credentials. Host-scoped overrides documented in [Secrets](guides/secrets.md#host-scoped-overrides-s6). |
+| `GIT_API_BASE`, `GIT_TOKEN` | yes | Provider credentials. Host-scoped overrides documented in [Secrets](guides/secrets.md#host-scoped-overrides-s6). |
+| `TRIGGER_SECRET` | yes | Doubles as the **`X-Admin-Token`** every operator route (`/admin/*`, `/retrieve`, `/search_vector_base`, `/trigger_git_mr`) checks. Rotate by restarting the API; the comparison is constant-time. |
 | `PROJECTS_CONFIG` | yes | Path to `projects.toml`. |
 | `DATABASE_URL` (+ `DATABASE_OPTIONAL=false` in prod) | yes | Postgres pool. |
 | `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIM` | yes | Vector store. |
@@ -65,9 +66,13 @@ Full table: [Configuration](guides/configuration.md).
 - [ ] Qdrant collection exists or boot creates it via `reset_collection`.
 - [ ] At least one `LLM_<tier>_PROVIDER` is reachable (smoke via `/health/detailed`).
 - [ ] Worker pool reports a non-zero pool size in logs.
-- [ ] `POST /retrieve` against a known repo returns at least one hit
-  (validates Qdrant payloads + embedding dim).
+- [ ] `POST /retrieve` against a known repo (with `X-Admin-Token`)
+  returns at least one hit and `hits[].chunk_kind` is populated —
+  validates Qdrant payload mapper, embedding dim, and the operator
+  auth middleware in one shot.
 - [ ] `gh-style webhook ping` (HMAC-verified) lands a job in `jobs`.
+- [ ] `curl -X POST /admin/reindex_repo` **without** `X-Admin-Token`
+  returns `401 UNAUTHORIZED` (sanity check the middleware is wired).
 
 ## 6. Where to look when things break
 
@@ -78,7 +83,9 @@ Full table: [Configuration](guides/configuration.md).
 | Reindex retries forever | Inspect `jobs.last_error`; the SKIP-LOCKED queue moves the job to `dead` after `max_attempts`. |
 | Retrieval returns no hits | Confirm `EMBEDDING_DIM` matches the gateway's model; inspect Qdrant payload count for the repo. |
 | Wrong git host token used | Host-scoped overrides — see [Secrets](guides/secrets.md#host-scoped-overrides-s6). |
-| MR overlay truncated | `MR_FANOUT_*` caps fired. Bump them or accept the partial overlay (see `overlay_meta` in `/retrieve` response). |
+| MR overlay truncated | `MR_FANOUT_*` caps fired. Bump them or accept the partial overlay (see `overlay_meta.repos_truncated` / `chunks_truncated` in `/retrieve` response). |
+| MR overlay incomplete (silent skip) | `overlay_meta.failed_repos > 0` — worktree creation or indexer failed for one of the transitive deps. Inspect worker logs at `target=overlay::build`. |
+| All `/admin/*` calls 401 | Missing `X-Admin-Token` header — header name is case-insensitive, value must match `TRIGGER_SECRET` byte-for-byte. |
 
 ## Related docs
 
