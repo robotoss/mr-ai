@@ -135,19 +135,21 @@ sequenceDiagram
 
 ## Hierarchical chunking
 
-`CodeChunk` gains two metadata fields (`parent_symbol_id`, `chunk_kind`).
+`CodeChunk` carries two metadata fields (`parent_symbol_id`, `chunk_kind`).
 Both ship with `#[serde(default)]` so legacy JSONL files still load.
+The Dart extractor emits all four levels as of S3 — see
+[Chunking](chunking.md) for the contract.
 
 | `chunk_kind` | Body | Use |
 | --- | --- | --- |
 | `file` | Imports + skeleton summary. | High-recall first-pass match. |
-| `parent` | Class/extension signature + docstring + slot listing. | Anchor for "what does this class do". |
-| `symbol` | Method/field/function. | Fine-grained match. |
+| `parent` | Class/mixin/extension/enum + its members. | Anchor for "what does this class do". |
+| `symbol` | Method/field/function/constructor. | Fine-grained match. |
 | `sub` | Sub-slice of a long body, with `parent_symbol_id` pointing at its symbol parent. | Long-function support without losing parent context. |
 
-Emission of `parent` / `file` / `sub` chunks lands in S4-B alongside the
-delta writeback. The retrieval API already understands the metadata via
-[`domain::retrieval::ChunkKind`](../../domain/src/retrieval.rs).
+The retrieval API consumes the metadata via
+[`domain::retrieval::ChunkKind`](../../domain/src/retrieval.rs);
+Rust + TypeScript emitters land in S4.
 
 ## Related docs
 

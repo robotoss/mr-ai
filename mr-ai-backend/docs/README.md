@@ -39,6 +39,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `graph-rag` (retrieval) | Seeds + k-hop expansion + rerank pipeline; transient overlay. | [graph-rag (part 2)](services/graph-rag-retrieval.md) |
 | `review-pipeline` | Worker pipeline binding webhooks → graph reindex → review bundle. | [review-pipeline](services/review-pipeline.md) |
 | `ingestion-pipeline` | Master-flow `Reindex` → Postgres graph **and** Qdrant via content-sha dedup. | [ingestion-pipeline](services/ingestion-pipeline.md) |
+| `chunking` | Hierarchical chunk emission (file / parent / symbol / sub) + `parent_symbol_id` linking. | [chunking](services/chunking.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 

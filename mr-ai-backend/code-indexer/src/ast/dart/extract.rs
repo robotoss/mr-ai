@@ -391,6 +391,11 @@ pub fn extract_chunks(
         emit_barrel_file_chunk(&mut out, code, file, &imports);
     }
 
+    // 5) Decorate with hierarchical metadata: tag every existing chunk
+    //    with `chunk_kind` + `parent_symbol_id`, slice long bodies into
+    //    Sub chunks, and prepend a synthetic File chunk.
+    super::hierarchy::decorate_hierarchy(&mut out, code, file, &imports);
+
     Ok(out)
 }
 
