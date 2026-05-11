@@ -361,6 +361,7 @@ async fn build_overlay_hits(
             overlay_chunks: 0,
             repos_truncated: report.repos_truncated,
             chunks_truncated: report.chunks_truncated,
+            failed_repos: report.failed_repos.len(),
         });
     }
     let query_norm = norm(query_vec);
@@ -426,6 +427,7 @@ async fn build_overlay_hits(
         overlay_chunks: overlay.chunk_count(),
         repos_truncated: report.repos_truncated,
         chunks_truncated: report.chunks_truncated,
+        failed_repos: report.failed_repos.len(),
     })
 }
 

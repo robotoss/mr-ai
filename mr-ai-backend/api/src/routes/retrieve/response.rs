@@ -45,6 +45,10 @@ pub struct OverlayMeta {
     pub overlay_chunks: usize,
     pub repos_truncated: bool,
     pub chunks_truncated: bool,
+    /// Repos that were planned but failed mid-flight (worktree, index,
+    /// spawn_blocking). The count lets retrieval clients distinguish a
+    /// "cap-trimmed" overlay from a "deps degraded" overlay.
+    pub failed_repos: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]

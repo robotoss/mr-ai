@@ -62,9 +62,14 @@ pub async fn upsert_repo_chunks(
         existing_index.insert(meta.id.clone(), meta);
     }
 
-    // 2) Build the desired set from the indexer output.
-    let mut desired: std::collections::HashMap<String, (String, VectorPayload)> =
-        std::collections::HashMap::with_capacity(chunks.len());
+    // 2) Single pass: convert chunks → triples, classify into
+    //    keep / upsert on the fly. No intermediate `desired` HashMap
+    //    of full payloads — previously we held two copies of every
+    //    payload in memory at once for a ~50k-chunk repo.
+    let mut to_upsert: Vec<(String, String, VectorPayload)> = Vec::with_capacity(chunks.len());
+    let mut kept: usize = 0;
+    let mut desired_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(chunks.len());
     for chunk in chunks {
         let Some((id, embed_text, payload)) = chunk_to_triple(
             chunk,
@@ -74,38 +79,32 @@ pub async fn upsert_repo_chunks(
         ) else {
             continue;
         };
-        if let Some(prev) = desired.insert(id.clone(), (embed_text, payload)) {
-            // Two chunks resolving to the same deterministic id within
-            // one indexer run is a real bug — log loudly and keep the
-            // last write so the run still completes.
+        if !desired_ids.insert(id.clone()) {
+            // Two chunks colliding on the deterministic id within one
+            // indexer run is a real bug; log loudly so the operator
+            // can investigate. Later write wins — we already pushed
+            // the earlier triple to `to_upsert`, but Qdrant's upsert
+            // is keyed on the hash so it overwrites cleanly.
             warn!(
                 target: "rag_base::ingest",
                 id = %id,
-                ?prev,
-                "upsert_repo_chunks: duplicate chunk id within current batch; later one wins"
+                "upsert_repo_chunks: duplicate chunk id within current batch; later one overwrites"
             );
         }
-    }
-
-    // 3) Split into keep / upsert.
-    let mut to_upsert: Vec<(String, String, VectorPayload)> =
-        Vec::with_capacity(desired.len());
-    let mut kept: usize = 0;
-    for (id, (embed_text, payload)) in desired.iter() {
-        match existing_index.get(id) {
+        match existing_index.get(&id) {
             Some(meta) if meta.content_sha256 == payload.content_sha256 => {
                 kept += 1;
             }
             _ => {
-                to_upsert.push((id.clone(), embed_text.clone(), payload.clone()));
+                to_upsert.push((id, embed_text, payload));
             }
         }
     }
 
-    // 4) Anything present before but absent now is an orphan.
+    // 3) Anything present before but absent now is an orphan.
     let to_delete: Vec<String> = existing_index
         .keys()
-        .filter(|id| !desired.contains_key(*id))
+        .filter(|id| !desired_ids.contains(*id))
         .cloned()
         .collect();
 
@@ -113,32 +112,43 @@ pub async fn upsert_repo_chunks(
         target: "rag_base::ingest",
         repo_id,
         existing = existing_index.len(),
-        desired = desired.len(),
+        desired = desired_ids.len(),
         keep = kept,
         upsert = to_upsert.len(),
         delete = to_delete.len(),
         "upsert_repo_chunks: diff ready"
     );
 
-    // 5) Embed + upsert in batches.
+    // 4) Embed + upsert in batches. We `drain` from the front of
+    //    `to_upsert` instead of `chunks(...)` + clone so each triple
+    //    lives in exactly one `Vec` at a time — embed sees a borrowed
+    //    text slice, then the (id, vector, payload) tuples move into
+    //    `upsert_batch` without a second copy.
     let batch_size = cfg.qdrant.batch_size.max(1);
     let mut upserted = 0usize;
     let mut embedded = 0usize;
-    for batch in to_upsert.chunks(batch_size) {
-        let texts: Vec<String> = batch.iter().map(|(_, t, _)| t.clone()).collect();
+    while !to_upsert.is_empty() {
+        let take = to_upsert.len().min(batch_size);
+        let texts: Vec<String> = to_upsert[..take].iter().map(|(_, t, _)| t.clone()).collect();
         let vectors = embed_texts(gateway, cfg, &texts).await?;
         embedded += vectors.len();
-
-        let points: Vec<(String, Vec<f32>, VectorPayload)> = batch
-            .iter()
+        if vectors.len() != take {
+            return Err(RagBaseError::Embedding(format!(
+                "embed_texts returned {} vectors, expected {}",
+                vectors.len(),
+                take
+            )));
+        }
+        let points: Vec<(String, Vec<f32>, VectorPayload)> = to_upsert
+            .drain(..take)
             .zip(vectors.into_iter())
-            .map(|((id, _, payload), vec)| (id.clone(), vec, payload.clone()))
+            .map(|((id, _, payload), vec)| (id, vec, payload))
             .collect();
         let written = upsert_batch(client, cfg, points).await?;
         upserted += written;
     }
 
-    // 6) Delete orphans last so a partial failure leaves the index a
+    // 5) Delete orphans last so a partial failure leaves the index a
     //    superset rather than missing rows.
     if !to_delete.is_empty() {
         debug!(
