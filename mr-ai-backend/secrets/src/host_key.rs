@@ -82,6 +82,35 @@ pub fn host_env_key(base: &str, host_slug: &str) -> String {
     format!("{base}_{host_slug}")
 }
 
+/// Strict allow-list for hosts used as a path component (file-mounted
+/// secrets layout `<SECRETS_DIR>/_hosts/<host>/<key>`). Rejects any
+/// input that could traverse the filesystem or otherwise escape the
+/// `_hosts` directory.
+///
+/// Returns `Some(host)` when the input passes — the byte slice is
+/// guaranteed to be safe to use in `Path::join`. Returns `None`
+/// otherwise, and callers must skip the file lookup with an audit log.
+pub fn validate_host(host: &str) -> Option<&str> {
+    if host.is_empty() || host.len() > 255 {
+        return None;
+    }
+    // Defence in depth: literal `..`, leading dot/dash, slashes, and
+    // any character outside the DNS-label alphabet are all rejected.
+    if host == "." || host == ".." || host.contains("..") {
+        return None;
+    }
+    if host.starts_with('-') || host.starts_with('.') {
+        return None;
+    }
+    let ok = host.bytes().all(|b| {
+        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-'
+    });
+    if !ok {
+        return None;
+    }
+    Some(host)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +171,45 @@ mod tests {
     #[test]
     fn host_env_key_composes() {
         assert_eq!(host_env_key("GIT_TOKEN", "GITLAB_COM"), "GIT_TOKEN_GITLAB_COM");
+    }
+
+    #[test]
+    fn validate_host_accepts_real_hosts() {
+        assert!(validate_host("gitlab.com").is_some());
+        assert!(validate_host("github.example.com").is_some());
+        assert!(validate_host("git.self-hosted.io").is_some());
+        assert!(validate_host("a1b2c3.example").is_some());
+    }
+
+    #[test]
+    fn validate_host_rejects_path_traversal() {
+        // Literal `..` is the obvious attack on
+        // `<root>/_hosts/<host>/<key>` — `Path::join("..")` doesn't
+        // normalise, so without this guard the lookup escapes the
+        // `_hosts` jail.
+        assert!(validate_host("..").is_none());
+        assert!(validate_host(".").is_none());
+        assert!(validate_host("foo..bar").is_none());
+        assert!(validate_host("../etc").is_none());
+    }
+
+    #[test]
+    fn validate_host_rejects_slashes_and_uppercase() {
+        assert!(validate_host("foo/bar").is_none());
+        assert!(validate_host("foo\\bar").is_none());
+        assert!(validate_host("GitLab.com").is_none()); // caller must lowercase first
+    }
+
+    #[test]
+    fn validate_host_rejects_edge_lengths() {
+        assert!(validate_host("").is_none());
+        let too_long = "a".repeat(256);
+        assert!(validate_host(&too_long).is_none());
+    }
+
+    #[test]
+    fn validate_host_rejects_leading_dot_or_dash() {
+        assert!(validate_host(".example.com").is_none());
+        assert!(validate_host("-example.com").is_none());
     }
 }

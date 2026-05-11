@@ -167,27 +167,26 @@ pub async fn build_for_mr(
         )));
     }
 
-    // 2) Plan the walk in pure BFS. The lookups close over pool + project_id.
-    //    We block-on the async helpers via tokio::runtime::Handle::block_on
-    //    so the walker stays sync (tests don't need a runtime).
-    let plan = {
-        let handle = tokio::runtime::Handle::current();
-        let pool_ref = pool;
-        plan_walk(
-            primary_repo_id,
-            caps,
-            |repo| {
-                handle
-                    .block_on(projects_repo::find_dependents_of(pool_ref, repo))
-                    .unwrap_or_default()
-            },
-            |repo| {
-                handle
-                    .block_on(projects_repo::find_dependent_repos(pool_ref, repo))
-                    .unwrap_or_default()
-            },
-        )
-    };
+    // 2) Pull every dependency edge for the project in one query, then
+    //    plan the walk synchronously over an in-memory map. Calling
+    //    `Handle::block_on` from inside an async fn panics on tokio's
+    //    multi-threaded runtime; the snapshot-then-walk pattern keeps
+    //    `plan_walk` sync and the IO single-shot.
+    let edges = projects_repo::list_dependencies_for_project(pool, project_id)
+        .await
+        .map_err(|e| GitContextEngineError::Internal(format!("persistence: {e}")))?;
+    let mut outbound: HashMap<RepoId, Vec<RepoId>> = HashMap::new();
+    let mut inbound: HashMap<RepoId, Vec<RepoId>> = HashMap::new();
+    for (from, to) in edges {
+        outbound.entry(from).or_default().push(to);
+        inbound.entry(to).or_default().push(from);
+    }
+    let plan = plan_walk(
+        primary_repo_id,
+        caps,
+        |repo| inbound.get(&repo).cloned().unwrap_or_default(),
+        |repo| outbound.get(&repo).cloned().unwrap_or_default(),
+    );
 
     info!(
         target = "overlay::build",

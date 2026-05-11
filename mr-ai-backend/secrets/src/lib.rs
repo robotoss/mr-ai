@@ -17,7 +17,9 @@ use tracing::{debug, warn};
 pub mod host_key;
 pub mod webhook;
 
-pub use host_key::{host_env_key, host_from_remote_url, slug_from_host, slug_from_remote_url};
+pub use host_key::{
+    host_env_key, host_from_remote_url, slug_from_host, slug_from_remote_url, validate_host,
+};
 
 /// Strongly-typed key for a known secret. Stringly-typed escape hatch lives in
 /// `SecretKey::Custom` for migration ergonomics — prefer adding variants over
@@ -190,11 +192,14 @@ impl FileSecretProvider {
         self.root.join(scope).join(key.as_str())
     }
 
-    fn host_path_for(&self, host: &str, key: &SecretKey) -> PathBuf {
-        self.root
-            .join("_hosts")
-            .join(host.to_ascii_lowercase())
-            .join(key.as_str())
+    /// Build the on-disk path for a host-scoped secret. Returns `None`
+    /// when the host fails strict validation — the file lookup is
+    /// skipped and callers fall through to env / global, with an audit
+    /// log emitted by [`get_for_host`].
+    fn host_path_for(&self, host: &str, key: &SecretKey) -> Option<PathBuf> {
+        let lower = host.to_ascii_lowercase();
+        let safe = host_key::validate_host(&lower)?;
+        Some(self.root.join("_hosts").join(safe).join(key.as_str()))
     }
 }
 
@@ -233,8 +238,24 @@ impl SecretProvider for FileSecretProvider {
             }
         }
 
-        // 2. Mounted file: `<root>/_hosts/<host>/<key>`.
-        let path = self.host_path_for(host, key);
+        // 2. Mounted file: `<root>/_hosts/<host>/<key>`. Path is built
+        //    via `host_path_for` which strictly validates `host` — a
+        //    malformed input here returns `None` so we never read
+        //    outside `_hosts/`. An audit log is emitted so an operator
+        //    can spot a misconfigured Git remote that produced a
+        //    suspicious host string.
+        let Some(path) = self.host_path_for(host, key) else {
+            warn!(
+                target = "secrets",
+                host = %host,
+                key = %key.as_str(),
+                "rejecting host-scoped file lookup: host failed validation"
+            );
+            return Err(SecretError::NotFound {
+                key: key.as_str().to_owned(),
+                scope: format!("file:_hosts/{host}/<rejected>"),
+            });
+        };
         debug!(
             target = "secrets",
             host = %host,
@@ -310,8 +331,9 @@ pub mod sync {
     use std::path::PathBuf;
 
     use super::SecretKey;
-    use super::host_key::{host_env_key, slug_from_host};
+    use super::host_key::{self, host_env_key, slug_from_host};
     use domain::ProjectId;
+    use tracing::warn;
 
     /// Lookup precedence (project + host aware):
     ///   1. `<KEY>_<HOST_SLUG>` env (when `host` supplied)
@@ -358,14 +380,25 @@ pub mod sync {
             let root: PathBuf = env::var("SECRETS_DIR")
                 .unwrap_or_else(|_| "/var/secrets".into())
                 .into();
-            // 4. Host-scoped file.
+            // 4. Host-scoped file. Validate `host` before using it as
+            //    a path component — `Path::join("..")` doesn't
+            //    normalise, so a malformed host string would otherwise
+            //    escape the `_hosts/` jail.
             if let Some(h) = host {
-                let path = root
-                    .join("_hosts")
-                    .join(h.to_ascii_lowercase())
-                    .join(key.as_str());
-                if let Some(value) = read_trim(&path) {
-                    return Some(value);
+                let lower = h.to_ascii_lowercase();
+                match host_key::validate_host(&lower) {
+                    Some(safe) => {
+                        let path = root.join("_hosts").join(safe).join(key.as_str());
+                        if let Some(value) = read_trim(&path) {
+                            return Some(value);
+                        }
+                    }
+                    None => warn!(
+                        target = "secrets",
+                        host = %h,
+                        key = %key.as_str(),
+                        "skipping host-scoped file lookup: host failed validation"
+                    ),
                 }
             }
             // 5. Project-scoped file.
@@ -516,5 +549,28 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SecretError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn host_scoped_rejects_path_traversal() {
+        // Even if an attacker plants a file at `<root>/sneaky`, the
+        // validator must refuse the join so we never read outside
+        // `<root>/_hosts/`.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("sneaky"), "leaked").unwrap();
+        let p = FileSecretProvider::new(tmp.path().to_path_buf());
+
+        for malicious in ["..", "../..", "../sneaky", "foo/../bar", "/etc"] {
+            let err = p
+                .get_for_host(malicious, &SecretKey::GitToken)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, SecretError::NotFound { .. }),
+                "expected NotFound for host {:?}, got {:?}",
+                malicious,
+                err
+            );
+        }
     }
 }
