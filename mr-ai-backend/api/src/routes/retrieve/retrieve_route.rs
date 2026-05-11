@@ -93,17 +93,10 @@ pub async fn retrieve_route(
     }
     let min_score = req.min_score.unwrap_or(RetrieveRequest::DEFAULT_MIN_SCORE);
 
-    // 4) Embed the query. Single input, single vector back.
-    let cfg = match RagConfig::from_env(Some(&state.config.project_slug)) {
-        Ok(c) => c,
-        Err(err) => {
-            return error_envelope(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "RAG_CONFIG_ERROR",
-                err.to_string(),
-            );
-        }
-    };
+    // 4) Embed the query. Single input, single vector back. The RAG
+    //    config is captured once at boot on AppState — no per-request
+    //    env reads on the hot path.
+    let cfg = state.rag_cfg.as_ref();
     let embed_resp = match state
         .gateway
         .embed_batch(
@@ -141,7 +134,7 @@ pub async fn retrieve_route(
     }
 
     // 5) Connect to Qdrant and assemble the filter.
-    let qdrant = match vector_db::connect(&cfg).await {
+    let qdrant = match vector_db::connect(cfg).await {
         Ok(c) => c,
         Err(err) => {
             return error_envelope(
@@ -160,7 +153,7 @@ pub async fn retrieve_route(
     // 6) Vector search.
     let search_hits = match vector_db::search_top_k_with_filter(
         &qdrant,
-        &cfg,
+        cfg,
         query_vec.clone(),
         filter,
         top_k,
@@ -233,7 +226,7 @@ pub async fn retrieve_route(
                 repo_id,
                 head_sha,
                 mr_iid,
-                &cfg,
+                cfg,
                 &query_vec,
                 min_score,
                 &project_id_str,
@@ -277,17 +270,24 @@ pub async fn retrieve_route(
 fn map_search_hit(
     hit: &rag_base::structs::rag_store::SearchHit,
     project_id: &str,
-    repo_id: Option<&str>,
+    repo_id_fallback: Option<&str>,
     via: Via,
     hops: u8,
 ) -> RetrievedHit {
+    // Prefer the repo_id stamped on the payload (S1) — the request-side
+    // `repo_id` filter is only a hint, and when the caller leaves it
+    // unset the per-hit value lets clients tell two repos apart.
+    let repo_id = hit
+        .repo_id
+        .clone()
+        .or_else(|| repo_id_fallback.map(str::to_owned));
     RetrievedHit {
         chunk_id: hit.id.clone(),
         project_id: project_id.to_owned(),
-        repo_id: repo_id.map(str::to_owned),
+        repo_id,
         file: hit.file.clone(),
         symbol_path: hit.symbol_path.clone(),
-        chunk_kind: None,
+        chunk_kind: hit.chunk_kind.clone(),
         score: hit.score,
         via,
         hops,
@@ -349,7 +349,11 @@ async fn build_overlay_hits(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Embed every overlay chunk in batches and compute cosine vs the query.
+    // Embed overlay chunks in `cfg.qdrant.batch_size` slices and
+    // compute cosine vs the query. Embedding gateway providers cap
+    // input lists (OpenAI 2048, Bedrock Titan 25, etc.); sending the
+    // full overlay (up to `MR_FANOUT_MAX_CHUNKS` = 5000 by default) as
+    // a single call would either fail or silently truncate.
     let chunk_list: Vec<&code_indexer::CodeChunk> = overlay.new_chunks.values().collect();
     if chunk_list.is_empty() {
         return Ok(OverlayMeta {
@@ -359,44 +363,63 @@ async fn build_overlay_hits(
             chunks_truncated: report.chunks_truncated,
         });
     }
-    let texts: Vec<String> = chunk_list
-        .iter()
-        .map(|c| c.snippet.clone().unwrap_or_else(|| c.symbol_path.clone()))
-        .collect();
-    let embedded = state
-        .gateway
-        .embed_batch(EmbeddingTier::Default, EmbeddingRequest::new(texts))
-        .await
-        .map_err(|e| format!("overlay embed: {e}"))?;
-    if embedded.vectors.len() != chunk_list.len() {
-        return Err(format!(
-            "overlay embed count mismatch: got {}, expected {}",
-            embedded.vectors.len(),
-            chunk_list.len()
-        ));
-    }
     let query_norm = norm(query_vec);
     let primary_repo_str = Uuid::from(primary_repo_id).simple().to_string();
-    for (chunk, vec) in chunk_list.iter().zip(embedded.vectors.into_iter()) {
-        if vec.len() != cfg.embedding.dim {
-            continue;
+    let batch_size = cfg.qdrant.batch_size.max(1);
+    for batch in chunk_list.chunks(batch_size) {
+        let texts: Vec<String> = batch
+            .iter()
+            .map(|c| {
+                c.snippet.clone().unwrap_or_else(|| {
+                    warn!(
+                        target = "retrieve",
+                        chunk = %c.symbol_path,
+                        "overlay chunk has no snippet; embedding symbol_path as last resort"
+                    );
+                    c.symbol_path.clone()
+                })
+            })
+            .collect();
+        let embedded = state
+            .gateway
+            .embed_batch(EmbeddingTier::Default, EmbeddingRequest::new(texts))
+            .await
+            .map_err(|e| format!("overlay embed batch: {e}"))?;
+        if embedded.vectors.len() != batch.len() {
+            return Err(format!(
+                "overlay embed count mismatch in batch: got {}, expected {}",
+                embedded.vectors.len(),
+                batch.len()
+            ));
         }
-        let score = cosine(query_vec, &vec, query_norm);
-        if score < min_score {
-            continue;
+        for (chunk, vec) in batch.iter().zip(embedded.vectors.into_iter()) {
+            if vec.len() != cfg.embedding.dim {
+                warn!(
+                    target = "retrieve",
+                    chunk = %chunk.symbol_path,
+                    got = vec.len(),
+                    expected = cfg.embedding.dim,
+                    "overlay embed dim mismatch; skipping chunk"
+                );
+                continue;
+            }
+            let score = cosine(query_vec, &vec, query_norm);
+            if score < min_score {
+                continue;
+            }
+            hits.push(RetrievedHit {
+                chunk_id: chunk.id.clone(),
+                project_id: project_id_str.to_owned(),
+                repo_id: Some(primary_repo_str.clone()),
+                file: chunk.file.clone(),
+                symbol_path: chunk.symbol_path.clone(),
+                chunk_kind: chunk.chunk_kind.map(|k| k.as_str().to_owned()),
+                score,
+                via: Via::Overlay,
+                hops: 0,
+                snippet: chunk.snippet.clone(),
+            });
         }
-        hits.push(RetrievedHit {
-            chunk_id: chunk.id.clone(),
-            project_id: project_id_str.to_owned(),
-            repo_id: Some(primary_repo_str.clone()),
-            file: chunk.file.clone(),
-            symbol_path: chunk.symbol_path.clone(),
-            chunk_kind: chunk.chunk_kind.map(|k| k.as_str().to_owned()),
-            score,
-            via: Via::Overlay,
-            hops: 0,
-            snippet: chunk.snippet.clone(),
-        });
     }
     Ok(OverlayMeta {
         visited_repos: report.visited_repos.len(),

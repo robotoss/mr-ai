@@ -127,6 +127,18 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         services::llm_health::LlmHealthMonitor::start(gateway.clone(), llm_health_interval).await;
     println!("{}", "✅ LLM health monitor warmed up".green());
 
+    // RAG / Qdrant config — captured once at boot so `/retrieve`
+    // doesn't re-read ~14 env vars on every request.
+    let rag_cfg = Arc::new(
+        rag_base::structs::rag_base_config::RagConfig::from_env(Some(&config.project_slug))
+            .map_err(|e| AppError::Config(
+                crate::core::app_state::ConfigError::InvalidValue {
+                    name: "RAG_CONFIG",
+                    reason: e.to_string(),
+                },
+            ))?,
+    );
+
     // Build shared state
     let shared_state = Arc::new(AppState::new(
         config.clone(),
@@ -134,6 +146,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         secrets_provider,
         db_pool.clone(),
         llm_health_monitor,
+        rag_cfg,
     ));
     println!("{}", "✅ Shared state initialized".green());
 
@@ -161,13 +174,23 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         None
     };
 
-    // Routes
-    let app = Router::new()
+    // Operator router — anything that reads the indexed codebase or
+    // triggers heavy worker jobs is gated by `X-Admin-Token` matched
+    // (constant-time) against `TRIGGER_SECRET`. Webhooks have their
+    // own HMAC verification, health probes stay open for k8s.
+    let admin_router = Router::new()
         .route("/admin/reindex_repo", post(reindex_repo_route))
         .route("/admin/reindex_all", post(reindex_all_route))
         .route("/retrieve", post(retrieve_route))
         .route("/search_vector_base", post(search_vector_base_route))
         .route("/trigger_git_mr", axum::routing::post(trigger_mr_route))
+        .route_layer(middleware::from_fn_with_state(
+            shared_state.clone(),
+            crate::middleware_layer::admin_auth::admin_auth,
+        ));
+
+    let app = Router::new()
+        .merge(admin_router)
         .route("/webhooks/gitlab", post(gitlab_webhook_route))
         .route("/webhooks/github", post(github_webhook_route))
         .route("/webhooks/bitbucket", post(bitbucket_webhook_route))

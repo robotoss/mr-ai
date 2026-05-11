@@ -2,6 +2,7 @@ use std::{env, fmt, sync::Arc};
 
 use ai_llm_service::LlmGateway;
 use domain::ProjectId;
+use rag_base::structs::rag_base_config::RagConfig;
 use secrets::SecretProvider;
 use services::llm_health::LlmHealthMonitor;
 use sqlx::PgPool;
@@ -128,6 +129,10 @@ pub struct AppState {
     /// `/health/detailed` and `/health/ready` so probes do not pay for an
     /// LLM round-trip on every tick.
     pub llm_health: LlmHealthMonitor,
+    /// Immutable RAG / Qdrant configuration captured at boot. The
+    /// `/retrieve` hot path reads it on every request, and re-reading
+    /// ~14 env vars per call burns CPU + read-locks. Cache once here.
+    pub rag_cfg: Arc<RagConfig>,
 }
 
 impl AppState {
@@ -138,6 +143,7 @@ impl AppState {
         secrets: Arc<dyn SecretProvider>,
         db: Option<PgPool>,
         llm_health: LlmHealthMonitor,
+        rag_cfg: Arc<RagConfig>,
     ) -> Self {
         Self {
             config,
@@ -145,6 +151,7 @@ impl AppState {
             secrets,
             db,
             llm_health,
+            rag_cfg,
         }
     }
 }

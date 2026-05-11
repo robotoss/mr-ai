@@ -568,6 +568,20 @@ fn extract_payload_str(
         .and_then(|v| v.clone().into_json().as_str().map(str::to_owned))
 }
 
+/// Pull an optional string field out of a Qdrant payload map. Returns
+/// `None` when the field is absent, null, or non-string — the latter
+/// would indicate a payload-schema bug but the mapper survives it.
+fn payload_opt_str(
+    payload: &std::collections::HashMap<String, qdrant_client::qdrant::Value>,
+    key: &str,
+) -> Option<String> {
+    let v = payload.get(key)?;
+    if v.is_null() {
+        return None;
+    }
+    v.clone().into_json().as_str().map(str::to_owned)
+}
+
 /// Map a `ScoredPoint` into `SearchHit` (best-effort payload extraction).
 fn map_scored_point_to_hit(sp: qdrant_client::qdrant::ScoredPoint) -> SearchHit {
     // Prefer original id from payload; else use Qdrant numeric/uuid id.
@@ -643,6 +657,10 @@ fn map_scored_point_to_hit(sp: qdrant_client::qdrant::ScoredPoint) -> SearchHit 
         }
     }
 
+    let chunk_kind = payload_opt_str(&sp.payload, "chunk_kind");
+    let parent_symbol_id = payload_opt_str(&sp.payload, "parent_symbol_id");
+    let repo_id = payload_opt_str(&sp.payload, "repo_id");
+
     SearchHit {
         score: sp.score,
         id,
@@ -653,6 +671,9 @@ fn map_scored_point_to_hit(sp: qdrant_client::qdrant::ScoredPoint) -> SearchHit 
         symbol,
         signature,
         snippet,
+        chunk_kind,
+        parent_symbol_id,
+        repo_id,
     }
 }
 
@@ -730,6 +751,10 @@ fn map_retrieved_point_to_hit(rp: RetrievedPoint) -> SearchHit {
         }
     }
 
+    let chunk_kind = payload_opt_str(&rp.payload, "chunk_kind");
+    let parent_symbol_id = payload_opt_str(&rp.payload, "parent_symbol_id");
+    let repo_id = payload_opt_str(&rp.payload, "repo_id");
+
     SearchHit {
         score: 0.0,
         id,
@@ -740,6 +765,9 @@ fn map_retrieved_point_to_hit(rp: RetrievedPoint) -> SearchHit {
         symbol,
         signature,
         snippet,
+        chunk_kind,
+        parent_symbol_id,
+        repo_id,
     }
 }
 

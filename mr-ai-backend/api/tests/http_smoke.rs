@@ -85,12 +85,26 @@ fn build_state(
         git_token: "stub-token".into(),
         trigger_secret: "stub".into(),
     });
+    let rag_cfg = Arc::new(rag_base::structs::rag_base_config::RagConfig {
+        project_name: "smoke".into(),
+        code_jsonl: std::path::PathBuf::from("/tmp/unused.jsonl"),
+        qdrant: rag_base::structs::rag_base_config::QdrantConfig {
+            url: "http://localhost:6334".into(),
+            collection: "smoke".into(),
+            distance: rag_base::structs::rag_base_config::DistanceMetric::Cosine,
+            batch_size: 64,
+        },
+        embedding: rag_base::structs::rag_base_config::EmbeddingConfig { dim: 8 },
+        search: rag_base::structs::rag_base_config::SearchConfig::default(),
+        clamp: rag_base::structs::rag_base_config::ChunkClampConfig::default(),
+    });
     Arc::new(api::core::app_state::AppState::new(
         config,
         dummy_gateway(),
         Arc::new(FileSecretProvider::new(secrets_root.to_path_buf())),
         Some(pool),
         LlmHealthMonitor::empty(),
+        rag_cfg,
     ))
 }
 
