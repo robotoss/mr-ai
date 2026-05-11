@@ -69,6 +69,16 @@ pub struct SearchHit {
     pub symbol: String,
     pub signature: Option<String>,
     pub snippet: Option<String>,
+
+    // Hierarchy + tenancy (S1+). Populated from the Qdrant payload so
+    // callers like `/retrieve` can pass `chunk_kind` straight through
+    // to the response and filter without re-querying.
+    #[serde(default)]
+    pub chunk_kind: Option<String>,
+    #[serde(default)]
+    pub parent_symbol_id: Option<String>,
+    #[serde(default)]
+    pub repo_id: Option<String>,
 }
 
 /// Summary statistics for a full reindex operation.
