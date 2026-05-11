@@ -64,11 +64,14 @@ println!("wrote {}", path.display());
 ```
 code-indexer/src/
 ├── lib.rs              # index_project_to_jsonl, index_diff_model
-├── types.rs            # CodeChunk, LanguageKind
+├── types.rs            # CodeChunk, ChunkKind, LanguageKind
 ├── diff_types.rs       # DiffAstModel
 ├── errors.rs           # Error, Result
 ├── ast/                # Tree-sitter routers per language
-│   └── router.rs
+│   ├── router.rs
+│   └── dart/
+│       ├── extract.rs      # flat symbol-level emission
+│       └── hierarchy.rs    # S3 — file / parent / symbol / sub decoration
 ├── lsp/                # LSP enrichment hooks (Dart implemented, others stubbed)
 │   ├── interface.rs
 │   ├── dart.rs
@@ -76,6 +79,19 @@ code-indexer/src/
 └── util/
     └── fs_scan.rs      # recursive file walker with extension filters
 ```
+
+## Emission strategy (S3)
+
+| Language | Status | Chunk levels |
+| --- | --- | --- |
+| Dart | shipped | file / parent / symbol / sub |
+| Rust | S4 | placeholder — currently text-fallback |
+| TypeScript | S4 | placeholder — currently text-fallback |
+
+See [Chunking](chunking.md) for the contract and `parent_symbol_id`
+linking model. The decorator (`ast::dart::hierarchy::decorate_hierarchy`)
+runs after the flat extractor and is responsible for the hierarchical
+classification, sub-slicing, and the synthetic file chunk.
 
 ## Errors
 

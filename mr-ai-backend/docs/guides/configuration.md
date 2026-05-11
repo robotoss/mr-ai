@@ -105,6 +105,16 @@ Loaded by [`RagConfig::from_env`](../../rag-base/src/structs/rag_base_config.rs)
 | `CLAMP_EMBED_MAX_LINES` | `80` | Embedding text budget (lines). |
 | `CHUNK_MIN_CHARS` | `16` | Minimum chunk size to retain. |
 
+## Hierarchical chunking (S3)
+
+Read once per file extraction by `code_indexer::ast::dart::hierarchy`.
+See [Chunking](../services/chunking.md) for the contract.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `SUB_CHUNK_MIN_BYTES` | `1500` | Minimum body size before a `parent`/`symbol` chunk is sliced into `sub` chunks. Clamped to `>= 64`. |
+| `SUB_CHUNK_OVERLAP_BYTES` | `150` | Overlap between adjacent `sub` slices so callers / types near a slice boundary stay co-embedded. Clamped to `<= SUB_CHUNK_MIN_BYTES / 2`. |
+
 ## API server
 
 Loaded by [`AppConfig::from_env`](../../api/src/core/app_state.rs).
