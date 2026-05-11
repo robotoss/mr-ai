@@ -75,22 +75,27 @@ fn clone_one_blocking(url: &str, base_dir: &Path) -> Result<()> {
     }
 
     // --- credentials callback ---
-    // SecretProvider (sync helper) resolves env → mounted file in one place.
-    let key_path_env = secrets::sync::resolve(None, &secrets::SecretKey::SshKeyPath);
+    // SecretProvider (sync helper) resolves host-scoped → unscoped → file
+    // in one place. The host comes from the remote URL libgit2 hands us.
     let key_path_disk = Path::new("ssh_keys/bot_key");
     let have_disk_key = key_path_disk.exists();
 
     let mut callbacks = RemoteCallbacks::new();
     callbacks.credentials(move |url_str, username_from_url, allowed| {
         let user = username_from_url.unwrap_or("git");
+        let host = secrets::host_from_remote_url(url_str);
+        let host_ref = host.as_deref();
 
         // HTTPS with token (optional)
         if url_str.starts_with("http") {
-            if let Some(token) =
-                secrets::sync::resolve(None, &secrets::SecretKey::GitHttpToken)
-            {
-                let http_user = secrets::sync::resolve(
+            if let Some(token) = secrets::sync::resolve_with_host(
+                None,
+                host_ref,
+                &secrets::SecretKey::GitHttpToken,
+            ) {
+                let http_user = secrets::sync::resolve_with_host(
                     None,
+                    host_ref,
                     &secrets::SecretKey::GitHttpUser,
                 )
                 .unwrap_or_else(|| "oauth2".into());
@@ -100,11 +105,16 @@ fn clone_one_blocking(url: &str, base_dir: &Path) -> Result<()> {
 
         // Prefer explicit SSH key path from secrets
         if allowed.contains(CredentialType::SSH_KEY) {
-            if let Some(ref key) = key_path_env {
-                let key_path = Path::new(key);
+            if let Some(key) = secrets::sync::resolve_with_host(
+                None,
+                host_ref,
+                &secrets::SecretKey::SshKeyPath,
+            ) {
+                let key_path = Path::new(&key);
                 if key_path.exists() {
-                    let pass = secrets::sync::resolve(
+                    let pass = secrets::sync::resolve_with_host(
                         None,
+                        host_ref,
                         &secrets::SecretKey::SshKeyPassphrase,
                     );
                     return Cred::ssh_key(user, None, key_path, pass.as_deref());
@@ -112,8 +122,9 @@ fn clone_one_blocking(url: &str, base_dir: &Path) -> Result<()> {
             }
             // fallback: ./ssh_keys/bot_key
             if have_disk_key {
-                let pass = secrets::sync::resolve(
+                let pass = secrets::sync::resolve_with_host(
                     None,
+                    host_ref,
                     &secrets::SecretKey::SshKeyPassphrase,
                 );
                 return Cred::ssh_key(user, None, key_path_disk, pass.as_deref());

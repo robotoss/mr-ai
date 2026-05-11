@@ -67,9 +67,12 @@ Both directories are auto-created on `GitService::new`.
 
 ## Credentials
 
-`GitService` uses the same SSH/HTTPS resolution flow as the legacy
-`clone_list` path: `secrets::sync::resolve` walks the env → mounted-file
-chain via `SecretProvider`. See [Secrets](../guides/secrets.md).
+`GitService`'s libgit2 credentials callback walks the
+host-aware resolution chain via `secrets::sync::resolve_with_host`
+(S6) — host derived from the remote URL libgit2 is targeting. Falls
+back to the unscoped key when no host-specific value is configured.
+See [Secrets](../guides/secrets.md#host-scoped-overrides-s6) for the
+file layout and env-var naming.
 
 ## Backwards compatibility
 

@@ -226,20 +226,36 @@ fn make_credentials_cb()
 {
     move |url_str, username_from_url, allowed| {
         let user = username_from_url.unwrap_or("git");
+        // S6: prefer host-scoped credentials so a worker fleet talking
+        // to gitlab.com + github.example.com can keep distinct tokens
+        // / SSH keys. Falls back to the unscoped key when no host-specific
+        // value is configured.
+        let host = secrets::host_from_remote_url(url_str);
+        let host_ref = host.as_deref();
         if url_str.starts_with("http") {
-            if let Some(token) = secrets::sync::resolve(None, &secrets::SecretKey::GitHttpToken) {
-                let http_user =
-                    secrets::sync::resolve(None, &secrets::SecretKey::GitHttpUser)
-                        .unwrap_or_else(|| "oauth2".into());
+            if let Some(token) =
+                secrets::sync::resolve_with_host(None, host_ref, &secrets::SecretKey::GitHttpToken)
+            {
+                let http_user = secrets::sync::resolve_with_host(
+                    None,
+                    host_ref,
+                    &secrets::SecretKey::GitHttpUser,
+                )
+                .unwrap_or_else(|| "oauth2".into());
                 return git2::Cred::userpass_plaintext(&http_user, &token);
             }
         }
         if allowed.contains(git2::CredentialType::SSH_KEY) {
-            if let Some(key) = secrets::sync::resolve(None, &secrets::SecretKey::SshKeyPath) {
+            if let Some(key) =
+                secrets::sync::resolve_with_host(None, host_ref, &secrets::SecretKey::SshKeyPath)
+            {
                 let key_path = Path::new(&key);
                 if key_path.exists() {
-                    let pass =
-                        secrets::sync::resolve(None, &secrets::SecretKey::SshKeyPassphrase);
+                    let pass = secrets::sync::resolve_with_host(
+                        None,
+                        host_ref,
+                        &secrets::SecretKey::SshKeyPassphrase,
+                    );
                     return git2::Cred::ssh_key(user, None, key_path, pass.as_deref());
                 }
             }
