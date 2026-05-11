@@ -9,7 +9,11 @@ license = "FSL-1.1"
 ai-llm-service = { path = "../ai-llm-service" }
 code-indexer = { path = "../code-indexer" }
 rag-base = { path = "../rag-base" }
+project-code-store = { path = "../project_code_store" }
 domain = { workspace = true }
+persistence = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
 
 reqwest = { workspace = true }
 serde = { workspace = true }

@@ -11,6 +11,10 @@
 //! Retrieval (S4) merges the overlay with stable Qdrant/graph results just
 //! before the LLM rerank step. The overlay is dropped after the review.
 
+pub mod build;
+
+pub use build::{build_for_mr, plan_walk, OverlayBuildReport, OverlayCaps, WalkPlan};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use code_indexer::CodeChunk;
