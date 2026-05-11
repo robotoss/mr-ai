@@ -133,15 +133,25 @@ sidecar binaries land in S4C.
 
 ## API server
 
-Loaded by [`AppConfig::from_env`](../../api/src/core/app_state.rs).
+Loaded by [`AppConfig::from_env_partial`](../../api/src/core/app_state.rs).
+The project identity (`project_slug` + `default_project_id`) is **not**
+read from the environment — it is captured at boot from `projects.toml`
+under the [single-project invariant](#single-project-invariant-s5).
 
 | Var | Required | Purpose |
 | --- | --- | --- |
 | `API_ADDRESS` | yes | Bind address (e.g. `0.0.0.0:8080`). |
-| `PROJECT_NAME` | yes | Logical project key. |
 | `GIT_API_BASE` | yes | Git provider base URL (must be `http(s)`). |
 | `GIT_TOKEN` | yes | Git provider token. |
 | `TRIGGER_SECRET` | yes | Shared secret guarding `/trigger_git_mr`. |
+
+### Single-project invariant (S5)
+
+`projects.toml` must declare exactly one `[[project]]` entry. The API
+fails to boot with `ConfigError::ExpectedExactlyOneProject` otherwise.
+The cached slug + UUID power both `/admin/reindex_repo` and
+`/admin/reindex_all`. Multiple-project deployments are not supported in
+this release.
 
 ## Git cloning
 
@@ -181,10 +191,12 @@ and migration workflow.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
-| `PROJECTS_CONFIG` | `projects.toml` | Path to the declarative project-group config. Missing file is logged and skipped. |
+| `PROJECTS_CONFIG` | `projects.toml` | Path to the declarative project-group config. **Required as of S5** — the API fails to boot if the file is missing. |
 
-When `DATABASE_URL` is set, the file is parsed at boot and replicated into
-the `projects` / `project_repos` / `project_dependencies` tables. Re-running
+The file is parsed at boot. It must declare exactly one `[[project]]` (see
+the [single-project invariant](#single-project-invariant-s5)). When
+`DATABASE_URL` is set, the same parse is also replicated into the
+`projects` / `project_repos` / `project_dependencies` tables. Re-running
 the binary with an updated file is idempotent: project IDs are looked up by
 slug and repo IDs by `(project_id, remote_url)`.
 

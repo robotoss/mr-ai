@@ -11,8 +11,9 @@
 //!
 //! Bare clones are reused across jobs. Worktrees are linked from the bare
 //! repo via `git worktree add` and removed via `git worktree remove` in the
-//! `WorktreeHandle::cleanup` path. The legacy `clone_list` API is preserved
-//! verbatim for backwards compatibility with the existing `/sync_git` route.
+//! `WorktreeHandle::cleanup` path. The legacy `clone_list` helper is kept
+//! for ad-hoc tooling and tests; the `/sync_git` HTTP route was removed
+//! in S5 in favour of `/admin/reindex_*`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

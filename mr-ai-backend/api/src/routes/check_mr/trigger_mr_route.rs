@@ -30,7 +30,7 @@ use crate::{
 #[instrument(
     name = "trigger__mr_route",
     skip(state, headers, body),
-    fields(project = %state.config.project_name)
+    fields(project = %state.config.project_slug)
 )]
 pub async fn trigger_mr_route(
     State(state): State<Arc<AppState>>,
@@ -90,9 +90,9 @@ pub async fn trigger_mr_route(
 
     // --- Run review pipeline ----------------------------------------------------
 
-    // let result = get_ai_request_data(&state.config.project_name, cfg, id).await;
+    // let result = get_ai_request_data(&state.config.project_slug, cfg, id).await;
     let result = build_two_phase_review(
-        &state.config.project_name,
+        &state.config.project_slug,
         cfg,
         id,
         state.gateway.clone(),

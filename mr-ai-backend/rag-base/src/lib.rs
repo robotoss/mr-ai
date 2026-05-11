@@ -1,6 +1,13 @@
 //! Public API:
-//! - `load_fresh_index`: drop+create collection, ingest JSONL, create payload indexes.
-//! - `search_code`: semantic search with lexical re-ranking and stitched code blocks.
+//! - `upsert_repo_chunks`: incremental per-repo vector ingest with
+//!   content-sha dedup (used by the worker `Reindex` job, S2).
+//! - `search_code`: semantic search with lexical re-ranking and
+//!   stitched code blocks (still served by the legacy
+//!   `/search_vector_base` route; replaced by `/retrieve` in S8).
+//!
+//! The legacy `load_fresh_index` JSONL bootstrap was removed in S5
+//! alongside the `/vector_base_index` route; everything writes to
+//! Qdrant via the worker pipeline now.
 
 pub mod embedding;
 pub mod ingest;
@@ -16,119 +23,20 @@ pub use ingest::upsert_repo_chunks;
 pub use jsonl_reader::{ChunkScope, chunk_to_triple};
 pub use structs::rag_store::UpsertReport;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
-use std::time::Instant;
+use std::sync::Arc;
 
 use ai_llm_service::LlmGateway;
-use tracing::info;
 
-use embedding::embed_texts;
 use errors::rag_base_error::RagBaseError;
-use jsonl_reader::read_jsonl_map_to_ingest_batched;
-use structs::rag_base_config::RagConfig;
-use structs::rag_store::IndexStats;
-use vector_db::{connect, reset_collection, upsert_batch};
 
 pub use crate::structs::search_result::CodeSearchResult;
 
-/// Rebuild Qdrant index for the given project:
-/// - drop collection;
-/// - create collection with fresh vector configuration;
-/// - create payload indexes;
-/// - read JSONL and push all chunks to Qdrant.
-pub async fn load_fresh_index(
-    gateway: Arc<LlmGateway>,
-    project_name: &str,
-) -> Result<IndexStats, RagBaseError> {
-    info!(
-        target: "rag_base::index",
-        project = project_name,
-        "load_fresh_index: start"
-    );
-
-    let cfg: RagConfig = RagConfig::from_env(Some(project_name))?;
-
-    // Connect to Qdrant and guarantee a fresh collection.
-    let client = connect(&cfg).await?;
-    reset_collection(&client, &cfg).await?;
-
-    let started = Instant::now();
-
-    // Count indexed points during ingestion (no second pass).
-    let indexed_counter = Arc::new(AtomicUsize::new(0));
-    let skipped: usize = 0; // batch reader already skips invalid lines.
-
-    // Stream the JSONL file in batches → embed → upsert.
-    read_jsonl_map_to_ingest_batched(
-        cfg.code_jsonl.as_path(),
-        cfg.qdrant.batch_size,
-        cfg.clamp.preview_max_chars,
-        cfg.clamp.embed_max_chars,
-        {
-            let cfg = cfg.clone();
-            let client = client.clone();
-            let indexed_counter = Arc::clone(&indexed_counter);
-
-            let gateway = gateway.clone();
-            move |batch| {
-                let cfg = cfg.clone();
-                let client = client.clone();
-                let indexed_counter = Arc::clone(&indexed_counter);
-                let gateway = gateway.clone();
-
-                async move {
-                    if batch.is_empty() {
-                        return Ok(());
-                    }
-
-                    let texts: Vec<String> = batch.iter().map(|(_, t, _)| t.clone()).collect();
-                    let vectors = embed_texts(&gateway, &cfg, &texts).await?;
-
-                    let points = batch
-                        .into_iter()
-                        .zip(vectors.into_iter())
-                        .map(|((id, _text, payload), vec)| (id, vec, payload))
-                        .collect::<Vec<_>>();
-
-                    let written = upsert_batch(&client, &cfg, points).await?;
-                    indexed_counter.fetch_add(written, Ordering::Relaxed);
-                    Ok(())
-                }
-            }
-        },
-    )
-    .await?;
-
-    let duration_ms = started.elapsed().as_millis();
-    let stats = IndexStats {
-        indexed: indexed_counter.load(Ordering::Relaxed),
-        skipped,
-        duration_ms,
-    };
-
-    info!(
-        target: "rag_base::index",
-        project = project_name,
-        indexed = stats.indexed,
-        skipped = stats.skipped,
-        duration_ms = stats.duration_ms,
-        "load_fresh_index: finished"
-    );
-
-    Ok(stats)
-}
-
 /// Perform semantic search and return stitched code blocks.
 ///
-/// This is the **only public search entry point**:
-/// - performs vector search with lexical re-ranking and fallback scroll;
-/// - hydrates hits from JSONL to restore exact spans;
-/// - merges overlapping spans and returns stitched code blocks with full code.
-///
-/// The result is JSON-serializable and can be returned directly from an HTTP API.
+/// Still wired to `/search_vector_base` for backwards compatibility;
+/// S8 introduces `/retrieve` with project-scoped filters and graph
+/// expansion, after which this entry point and its consumers will be
+/// retired.
 pub async fn search_code(
     gateway: Arc<LlmGateway>,
     project_name: &str,

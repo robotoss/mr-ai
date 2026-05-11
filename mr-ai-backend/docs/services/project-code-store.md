@@ -58,5 +58,5 @@ project_code_store/src/
 
 ## Related docs
 
-- [services/api](api.md) — `/sync_git` route uses this crate.
+- [services/api](api.md) — exposes the S5 admin endpoints (`/admin/reindex_*`) that drive `GitService` through the worker pool.
 - [services/code-indexer](code-indexer.md) — consumes the cloned tree.

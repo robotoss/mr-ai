@@ -122,7 +122,7 @@ review with LLM rerank diagnostics.
 | --- | --- | --- |
 | `GIT_API_BASE` | (required) | Provider base URL passed into both `git-context-engine` and `ai-review-engine` config. |
 | `GIT_TOKEN` | (required) | Provider auth token. Resolved via `SecretProvider`. |
-| `PROJECT_NAME` | (required) | Legacy prompt-assembly project label until per-project routing lands. |
+| `PROJECTS_CONFIG` | `projects.toml` | Single `[[project]]` declaration sourced at boot; its slug is forwarded into the prompt assembly path. |
 | `RAG_LLM_RERANK_ENABLED` | `false` | When `true`, run the LLM rerank diagnostic step after the bundle is built. |
 | `RAG_RERANK_TIMEOUT_SECS` | `20` | Hard timeout for the rerank LLM call. |
 | `REVIEW_PUBLISH_COMMENTS` | `false` | When `true`, run `review_merge_request` and post inline comments. |

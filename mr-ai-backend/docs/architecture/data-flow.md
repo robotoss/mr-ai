@@ -38,45 +38,6 @@ sequenceDiagram
 See [Ingestion Pipeline](../services/ingestion-pipeline.md) for the full
 contract and failure modes.
 
-## Flow 1b — Legacy `/vector_base_index` (deprecated, removed in S5)
-
-Triggered by `GET /vector_base_index`. Builds (or rebuilds) the Qdrant
-collection for the configured `PROJECT_NAME`.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Operator
-    participant API as api (axum)
-    participant CI as code-indexer
-    participant FS as code_data/<project>/
-    participant RAG as rag-base
-    participant GW as ai-llm-service<br/>LlmGateway
-    participant Q as Qdrant
-
-    Operator->>API: GET /vector_base_index
-    API->>CI: index_project_to_jsonl(project)
-    CI->>FS: walk + AST parse
-    CI->>FS: write code_chunks.jsonl
-    API->>RAG: load_fresh_index(gateway, project)
-    RAG->>Q: drop & recreate collection
-    loop per JSONL batch
-        RAG->>GW: embed_batch(EmbeddingTier::Default, texts)
-        GW-->>RAG: vectors + token usage + cost
-        RAG->>Q: upsert points
-    end
-    RAG-->>API: IndexStats { indexed, skipped, duration_ms }
-    API-->>Operator: 200 OK
-```
-
-**Key call sites:**
-
-- HTTP entry: [`api/src/routes/rag_base/vector_base_index_route.rs`](../../api/src/routes/rag_base/vector_base_index_route.rs)
-- Indexing: [`code-indexer/src/lib.rs`](../../code-indexer/src/lib.rs) →
-  [`rag-base/src/lib.rs:36`](../../rag-base/src/lib.rs#L36)
-- Embedding: [`rag-base/src/embedding.rs`](../../rag-base/src/embedding.rs)
-  → [`ai-llm-service/src/gateway.rs`](../../ai-llm-service/src/gateway.rs)
-
 ## Flow 2 — Review an MR
 
 Triggered by `POST /trigger_git_mr` with `{project_id, mr_iid, secret}`.

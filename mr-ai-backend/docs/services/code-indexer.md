@@ -19,9 +19,9 @@ Dart files with LSP signatures.
 
 | Item | File | Purpose |
 | --- | --- | --- |
-| `index_project_to_jsonl(project_name, enable_lsp)` | [`src/lib.rs`](../../code-indexer/src/lib.rs) | Walks `code_data/<project>/`, writes `code_chunks.jsonl`. |
+| `index_workspace(base_dir, enable_lsp)` | [`src/lib.rs`](../../code-indexer/src/lib.rs) | Walks an arbitrary worktree and returns `Vec<CodeChunk>`. The worker calls it per `Reindex` job. |
 | `index_diff_model(model, enable_lsp)` | [`src/lib.rs`](../../code-indexer/src/lib.rs) | Index only files referenced by a diff model (used by `git-context-engine`). |
-| `CodeChunk`, `LanguageKind` | [`src/types.rs`](../../code-indexer/src/types.rs) | Output schema. |
+| `CodeChunk`, `ChunkKind`, `LanguageKind` | [`src/types.rs`](../../code-indexer/src/types.rs) | Output schema. |
 | `DiffAstModel` | [`src/diff_types.rs`](../../code-indexer/src/diff_types.rs) | Input shape for diff-scoped indexing. |
 | `Error`, `Result` | [`src/errors.rs`](../../code-indexer/src/errors.rs) | Crate error type. |
 
@@ -29,35 +29,20 @@ Dart files with LSP signatures.
 
 ```mermaid
 flowchart LR
-    Repo[(code_data/<project>/...)] --> Scan[fs_scan]
-    Scan --> Parse[Tree-sitter parsers<br/>Rust / TS / JS / Dart / ...]
+    Worktree[(git worktree)] --> Scan[fs_scan]
+    Scan --> Parse[Tree-sitter parsers<br/>Rust / TS / Dart / ...]
     Parse --> Chunks[CodeChunk vec]
-    Chunks --> LSP{enable_lsp?}
-    LSP -->|yes, Dart| Enrich[DartLsp.enrich]
-    LSP -->|no| Out
-    Enrich --> Out[code_chunks.jsonl]
+    Chunks --> H[hierarchy decorator]
+    H --> Out[Vec<CodeChunk>]
 ```
 
 The crate is a leaf — it has no upstream dependencies on other workspace
-crates and is consumed by `rag-base` (via JSONL on disk) and
-`git-context-engine` (via `DiffAstModel`).
+crates. It is consumed in-process by the worker `Reindex` handler
+(via `index_workspace`) and by `git-context-engine` (via `DiffAstModel`).
 
 ## Configuration
 
-No env-vars of its own. Output path is derived from `project_name`:
-
-```
-code_data/out/<project_name>/code_chunks.jsonl
-```
-
-## Usage example
-
-```rust
-use code_indexer::index_project_to_jsonl;
-
-let path = index_project_to_jsonl("team-repo", false)?;
-println!("wrote {}", path.display());
-```
+No env-vars of its own. Sub-chunk knobs live in [Chunking](chunking.md).
 
 ## Internal structure
 
@@ -108,10 +93,12 @@ to upstream consumers (e.g., `git-context-engine`) as
 
 ## Testing
 
-The crate has a doctest in [`src/lib.rs`](../../code-indexer/src/lib.rs)
-that references a now-renamed binary; treat it as a known-broken pre-existing
-issue (tracked separately, not blocking gateway work). Production use is
-exercised through the `/vector_base_index` route.
+Unit tests live alongside each provider (`ast::dart::hierarchy::tests`,
+`ast::rust::tests`, `ast::typescript::tests`) and analyzer
+(`analyzer::rust::tests`, `analyzer::typescript::tests`). Production
+use is exercised by the worker `Reindex` job, which the admin endpoints
+(`/admin/reindex_repo`, `/admin/reindex_all`) and inbound push webhooks
+both drive through `index_workspace`.
 
 ## Related docs
 

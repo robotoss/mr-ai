@@ -52,7 +52,7 @@ the `Arc<LlmGateway>` passed in.
 
 Used env vars (consumed by callers, not this crate directly):
 - `GIT_API_BASE`, `GIT_TOKEN` — Git provider credentials.
-- `PROJECT_NAME` — used as RAG collection key.
+- `PROJECTS_CONFIG` — `projects.toml` provides the single-project slug used for RAG calls; see [Configuration](../guides/configuration.md#single-project-invariant-s5).
 
 ## Usage example
 
