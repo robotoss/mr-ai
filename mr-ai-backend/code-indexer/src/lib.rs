@@ -59,6 +59,12 @@ pub fn index_workspace(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChun
     index_workspace_filtered(base_dir, enable_lsp, None)
 }
 
+/// Sentinel `path_prefix` value the worker emits when fanning out
+/// sub-jobs for files that live directly at the workspace root (no
+/// top-level dir). When the filter sees this prefix it matches only
+/// chunks whose rebased file path has no `/` separator.
+pub const ROOT_BUCKET_PREFIX: &str = "_root/";
+
 /// Like [`index_workspace`] but restricts the parse to chunks whose
 /// repo-relative path starts with `path_prefix`. Used by the S9
 /// auto-split branch in the worker: when a worktree exceeds
@@ -66,8 +72,10 @@ pub fn index_workspace(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChun
 /// top-level directory and each sub-job invokes this filtered variant
 /// so it pays only for its slice of the tree.
 ///
-/// Passing `None` is identical to `index_workspace` — the filter is a
-/// no-op then.
+/// Special prefix `"_root/"` matches chunks whose file path has no
+/// directory separator (i.e. files living directly at the workspace
+/// root). Passing `None` is identical to `index_workspace` — the
+/// filter is a no-op then.
 pub fn index_workspace_filtered(
     base_dir: &Path,
     enable_lsp: bool,
@@ -81,7 +89,12 @@ pub fn index_workspace_filtered(
         };
         let new_file = rel.to_string_lossy().into_owned();
         if let Some(prefix) = path_prefix {
-            if !new_file.starts_with(prefix) {
+            let matches = if prefix == ROOT_BUCKET_PREFIX {
+                !new_file.contains('/')
+            } else {
+                new_file.starts_with(prefix)
+            };
+            if !matches {
                 continue;
             }
         }

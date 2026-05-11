@@ -31,26 +31,35 @@ pub fn host_from_remote_url(url: &str) -> Option<String> {
         return None;
     }
 
-    // SSH shorthand: `user@host:path`. Anything between `@` and the first
-    // `:` is the host.
-    if let Some(at_pos) = trimmed.find('@') {
-        let rest = &trimmed[at_pos + 1..];
-        // Distinguish from `ssh://user@host/path` (no `:` between host and path).
-        if !rest.starts_with('/') {
-            let host_end = rest.find(':').or_else(|| rest.find('/'));
-            let host = match host_end {
-                Some(end) => &rest[..end],
-                None => rest,
-            };
-            if !host.is_empty() {
-                return Some(host.to_ascii_lowercase());
-            }
-        }
+    // Dispatch by scheme so the SSH-shorthand branch doesn't also
+    // accidentally consume HTTPS URLs with userinfo
+    // (`https://user:pass@host`). Schemes go through the URL parser;
+    // anything else is treated as `user@host:path` SSH shorthand.
+    let lower_head: String = trimmed
+        .chars()
+        .take_while(|c| *c != ':')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let is_scheme = matches!(
+        lower_head.as_str(),
+        "http" | "https" | "ssh" | "git" | "file"
+    ) && trimmed.contains("://");
+    if is_scheme {
+        return Url::parse(trimmed)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()));
     }
 
-    // Anything else: lean on the `url` parser.
-    if let Ok(parsed) = Url::parse(trimmed) {
-        if let Some(host) = parsed.host_str() {
+    // SSH shorthand: `user@host:path`. Anything between `@` and the
+    // first `:` (or `/`) is the host.
+    if let Some(at_pos) = trimmed.find('@') {
+        let rest = &trimmed[at_pos + 1..];
+        let host_end = rest.find(':').or_else(|| rest.find('/'));
+        let host = match host_end {
+            Some(end) => &rest[..end],
+            None => rest,
+        };
+        if !host.is_empty() {
             return Some(host.to_ascii_lowercase());
         }
     }
@@ -151,6 +160,16 @@ mod tests {
     fn host_returns_none_for_garbage() {
         assert!(host_from_remote_url("").is_none());
         assert!(host_from_remote_url("not a url").is_none());
+    }
+
+    #[test]
+    fn host_https_with_userinfo_goes_through_url_parser() {
+        // Without scheme-based dispatch the SSH-shorthand branch would
+        // misinterpret HTTPS userinfo URLs. Pin the correct path.
+        assert_eq!(
+            host_from_remote_url("https://user:pass@github.com/org/repo.git").as_deref(),
+            Some("github.com")
+        );
     }
 
     #[test]

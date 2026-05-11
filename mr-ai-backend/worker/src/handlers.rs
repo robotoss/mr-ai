@@ -384,28 +384,39 @@ fn env_flag(name: &str) -> bool {
 }
 
 /// Distinct top-level directories that appear among the indexed
-/// files. Used by the S9 auto-split branch — when a workspace exceeds
-/// `REINDEX_SPLIT_FILES`, we fan out one sub-job per top-level dir.
+/// files, plus the [`code_indexer::ROOT_BUCKET_PREFIX`] sentinel when
+/// any file lives directly at the workspace root. The S9 auto-split
+/// branch consumes this list so a Cargo-shaped workspace with `src/`
+/// + a handful of root `*.rs` files still gets every file indexed.
 fn top_level_dirs(workspace: &std::path::Path, files: &[std::path::PathBuf]) -> Vec<String> {
     use std::collections::BTreeSet;
     let mut out: BTreeSet<String> = BTreeSet::new();
+    let mut has_root_files = false;
     for f in files {
         let Ok(rel) = f.strip_prefix(workspace) else {
             continue;
         };
-        // Take the first segment (top-level directory). Files at the
-        // root are placed in the synthetic bucket `_root_` so they
-        // still get parsed — sub-jobs with `path_prefix = "_root_/"`
-        // simply match nothing and drop them, which is acceptable.
         let mut comps = rel.components();
-        if let Some(first) = comps.next() {
-            // Only directories; skip files at the root.
-            if comps.next().is_some() {
-                out.insert(first.as_os_str().to_string_lossy().into_owned());
-            }
+        let Some(first) = comps.next() else { continue };
+        if comps.next().is_some() {
+            // Real top-level directory.
+            out.insert(first.as_os_str().to_string_lossy().into_owned());
+        } else {
+            // Single component → file at the workspace root.
+            has_root_files = true;
         }
     }
-    out.into_iter().collect()
+    let mut result: Vec<String> = out.into_iter().collect();
+    if has_root_files {
+        // The trailing `/` is added by the caller when building the
+        // `path_prefix`; we emit a directory name only.
+        result.push(
+            code_indexer::ROOT_BUCKET_PREFIX
+                .trim_end_matches('/')
+                .to_owned(),
+        );
+    }
+    result
 }
 
 /// Merge several per-language analyzer outcomes into one bundle. Coverage
