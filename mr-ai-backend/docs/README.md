@@ -69,6 +69,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Errors](reference/errors.md) | Error hierarchy, where each variant comes from, how it's mapped at boundaries. |
 | [Database Schema](reference/database-schema.md) | Postgres tables, migration workflow, ER diagram. |
 | [Qdrant Schema](reference/qdrant-schema.md) | Vector collection layout, payload fields, indexes, mutation API. |
+| [Admin API](reference/admin-api.md) | `POST /admin/reindex_repo` + `/admin/reindex_all` contract (S5). |
 | [Job Queue](reference/job-queue.md) | Postgres-backed background queue, retry policy, kinds. |
 
 ## Conventions

@@ -75,8 +75,9 @@ chain via `SecretProvider`. See [Secrets](../guides/secrets.md).
 
 The legacy `clone_list(urls, max_concurrency, project_name)` API in
 [`project_code_store/src/lib.rs`](../../project_code_store/src/lib.rs)
-is preserved verbatim. The `/sync_git` HTTP endpoint still works as
-before. New code paths should prefer `GitService`.
+is preserved verbatim. The `/sync_git` HTTP route was removed in S5;
+the helper is retained for ad-hoc tooling and tests. New code paths
+should prefer `GitService`.
 
 ## Concurrency
 
@@ -112,4 +113,4 @@ before. New code paths should prefer `GitService`.
 - [Job queue](../reference/job-queue.md)
 - [Secrets](../guides/secrets.md)
 - [project-code-store service page](project-code-store.md) — covers the
-  legacy `clone_list` path that still backs `/sync_git`.
+  legacy `clone_list` helper retained for ad-hoc tooling.

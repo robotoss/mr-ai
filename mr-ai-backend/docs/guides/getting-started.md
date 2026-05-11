@@ -22,7 +22,8 @@ Edit `.env`. The minimum fields needed for a smoke run on Ollama only:
 
 ```env
 API_ADDRESS=0.0.0.0:8080
-PROJECT_NAME=demo
+# Path is optional; default is `projects.toml` in the working directory.
+PROJECTS_CONFIG=projects.toml
 
 LLM_FAST_PROVIDER=ollama
 LLM_FAST_MODEL=llama3
@@ -39,6 +40,19 @@ LLM_PRICING_PATH=pricing.toml
 GIT_API_BASE=https://gitlab.example.com/api/v4
 GIT_TOKEN=fake-for-smoke-only
 TRIGGER_SECRET=secret123
+```
+
+`projects.toml` must declare exactly one `[[project]]`:
+
+```toml
+[[project]]
+slug = "demo"
+name = "Demo"
+
+[[project.repo]]
+provider = "gitlab"
+remote_url = "git@github.com:org/repo.git"
+is_primary = true
 ```
 
 Full list of variables: [Configuration](configuration.md).
@@ -81,13 +95,19 @@ A daily-rotated JSON log file appears at `logs/mr-ai.YYYY-MM-DD`.
 ### Indexing
 
 ```bash
-curl -X POST http://localhost:8080/sync_git \
-  -H 'content-type: application/json' \
-  -d '{"urls":["git@github.com:org/repo.git"]}'
+# Enqueue a Reindex job for every repo declared in projects.toml.
+curl -X POST http://localhost:8080/admin/reindex_all -d '{}'
 
-curl http://localhost:8080/project_indexer
-curl http://localhost:8080/vector_base_index
+# Or target a single repo.
+curl -X POST http://localhost:8080/admin/reindex_repo \
+  -H 'content-type: application/json' \
+  -d '{"remote_url":"git@github.com:org/repo.git"}'
 ```
+
+The worker pool will pick the jobs up, build a worktree, run the
+per-language analyzers, persist the code graph in Postgres, and upsert
+embeddings into Qdrant (S2 content-sha dedup). Watch the API logs for
+the `Reindex: vector upsert finished` line.
 
 ### Search
 

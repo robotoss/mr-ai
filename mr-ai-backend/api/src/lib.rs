@@ -19,16 +19,14 @@ use crate::{
     error_handler::{AppError, AppResult},
     middleware_layer::json_extractor::json_error_mapper,
     routes::{
+        admin::{
+            reindex_all_route::reindex_all_route, reindex_repo_route::reindex_repo_route,
+        },
         check_mr::trigger_mr_route::trigger_mr_route,
         health::{
             detailed::detailed_route, live::live_route, ready::ready_route,
         },
-        project_indexer::project_indexer_route::project_indexer_route,
-        rag_base::{
-            search_vector_base_route::search_vector_base_route,
-            vector_base_index_route::vector_base_index_route,
-        },
-        sync_git::sync_git_route::sync_git_route,
+        rag_base::search_vector_base_route::search_vector_base_route,
         usage::usage_route::usage_route,
         webhooks::{
             bitbucket::bitbucket_webhook_route, github::github_webhook_route,
@@ -44,11 +42,35 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     let host_url = env::var("API_ADDRESS").map_err(|_| AppError::MissingEnv("API_ADDRESS"))?;
     println!("{}", format!("✅ Loaded API_ADDRESS: {host_url}").green());
 
-    // Strict config read (no defaults)
-    let config = Arc::new(AppConfig::from_env()?);
+    // Strict env-side config (no defaults).
+    let env_cfg = AppConfig::from_env_partial()?;
+
+    // Single-project invariant (S5): `projects.toml` must declare
+    // exactly one [[project]]. Its slug + UUID are cached on `AppConfig`
+    // so handlers can scope Qdrant / Postgres without re-reading the
+    // file on every call.
+    let projects_cfg_path =
+        env::var("PROJECTS_CONFIG").unwrap_or_else(|_| "projects.toml".into());
+    let project_groups = persistence::projects_config::parse_file(&projects_cfg_path)
+        .map_err(|e| AppError::ProjectsConfig(e.to_string()))?;
+    if project_groups.len() != 1 {
+        return Err(AppError::Config(
+            crate::core::app_state::ConfigError::ExpectedExactlyOneProject {
+                found: project_groups.len(),
+            },
+        ));
+    }
+    let only_group = &project_groups[0];
+    let project_slug = only_group.slug.clone();
+    let default_project_id = only_group.id;
+    let config = Arc::new(AppConfig::with_project(env_cfg, project_slug, default_project_id));
     println!(
         "{}",
-        "✅ AppConfig successfully loaded from environment".green()
+        format!(
+            "✅ AppConfig loaded (project_slug = \"{}\")",
+            config.project_slug
+        )
+        .green()
     );
 
     // Secret provider — env by default, optionally file-mounted.
@@ -123,7 +145,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
                 pool: pool.clone(),
                 gateway: gateway.clone(),
                 git_api_base: config.git_api_base.clone(),
-                project_name_legacy: config.project_name.clone(),
+                project_name_legacy: config.project_slug.clone(),
             },
         )
         .map_err(|e| AppError::Http {
@@ -140,9 +162,8 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
 
     // Routes
     let app = Router::new()
-        .route("/sync_git", post(sync_git_route))
-        .route("/project_indexer", get(project_indexer_route))
-        .route("/vector_base_index", get(vector_base_index_route))
+        .route("/admin/reindex_repo", post(reindex_repo_route))
+        .route("/admin/reindex_all", post(reindex_all_route))
         .route("/search_vector_base", post(search_vector_base_route))
         .route("/trigger_git_mr", axum::routing::post(trigger_mr_route))
         .route("/webhooks/gitlab", post(gitlab_webhook_route))

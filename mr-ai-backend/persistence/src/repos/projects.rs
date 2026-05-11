@@ -179,6 +179,38 @@ pub async fn load_by_slug(pool: &PgPool, slug: &str) -> Result<Option<ProjectGro
     }))
 }
 
+/// Return every repo declared under `project_id`. Used by S5's
+/// `/admin/reindex_all` to fan out one Reindex job per repo without
+/// pulling the full `ProjectGroup` (no dependency edges needed here).
+pub async fn list_repos_for_project(
+    pool: &PgPool,
+    project_id: ProjectId,
+) -> Result<Vec<ProjectRepo>> {
+    let project_uuid: uuid::Uuid = project_id.into();
+    let rows: Vec<(uuid::Uuid, String, String, String, bool)> = sqlx::query_as(
+        "SELECT id, provider, remote_url, default_branch, is_primary \
+         FROM project_repos WHERE project_id = $1 ORDER BY is_primary DESC, remote_url",
+    )
+    .bind(project_uuid)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, provider, remote_url, default_branch, is_primary) in rows {
+        let provider = provider
+            .parse()
+            .map_err(|e| sqlx::Error::Protocol(format!("invalid provider in row: {e}")))?;
+        out.push(ProjectRepo {
+            id: RepoId::from_uuid(id),
+            project_id,
+            provider,
+            remote_url,
+            default_branch,
+            is_primary,
+        });
+    }
+    Ok(out)
+}
+
 /// Idempotent upsert of an entire `ProjectGroup` (project + repos + deps).
 ///
 /// Behaviour:

@@ -40,11 +40,10 @@ deduplication without re-embedding unchanged chunks.
 
 ```mermaid
 flowchart LR
-    JSONL[(code_chunks.jsonl)] --> Reader[jsonl_reader]
-    Reader --> Loader[load_fresh_index]
-    Loader -->|texts| GW[LlmGateway.embed_batch]
-    GW -->|vectors| Loader
-    Loader --> Q[(Qdrant)]
+    Chunks[Vec<CodeChunk><br/>from worker] --> Map[chunk_to_triple]
+    Map -->|texts| GW[LlmGateway.embed_batch]
+    Map -->|payloads| Q[(Qdrant)]
+    GW -->|vectors| Q
 
     Query[query string] --> Search[search_hits]
     Search -->|query embed| GW
@@ -56,8 +55,9 @@ flowchart LR
 ```
 
 `rag-base` is the **only** consumer of the embedding tier in production
-flows. Both `git-context-engine` (search) and `api` (`/vector_base_index`,
-`/search_vector_base`) reach Qdrant exclusively through this crate.
+flows. The worker `Reindex` handler writes vectors through
+`upsert_repo_chunks`; the legacy `/search_vector_base` route still
+reaches Qdrant through `search_code` here (replaced by `/retrieve` in S8).
 
 ## Configuration
 
@@ -76,7 +76,7 @@ Loaded from env via `RagConfig::from_env(Some(project_name))`:
 | `CLAMP_PREVIEW_MAX_CHARS` / `_LINES` | Snippet preview budget. | `320` / `50` |
 | `CLAMP_EMBED_MAX_CHARS` / `_LINES` | Embedding text budget. | `1200` / `80` |
 | `CHUNK_MIN_CHARS` | Skip chunks shorter than this. | `16` |
-| `INDEX_JSONL_PATH` | Override input JSONL path. | `code_data/out/<project>/code_chunks.jsonl` |
+| `INDEX_JSONL_PATH` | Legacy JSONL hydration path used by `search_code`'s stitcher; populated by the deprecated `/search_vector_base` flow and unused by the worker `Reindex` pipeline. | `code_data/out/<project>/code_chunks.jsonl` |
 
 The embedding **model** and **endpoint** are intentionally **not** read by
 this crate any more — they live on the gateway. `EMBEDDING_DIM` is kept here
@@ -87,16 +87,20 @@ as a sanity check on the vectors returned.
 ```rust
 use std::sync::Arc;
 use ai_llm_service::LlmGateway;
-use rag_base::{load_fresh_index, search_code};
+use rag_base::{search_code, upsert_repo_chunks};
 
-async fn rebuild_and_query(
+async fn reindex_and_query(
+    client: &qdrant_client::Qdrant,
+    cfg: &rag_base::structs::rag_base_config::RagConfig,
     gateway: Arc<LlmGateway>,
-    project_name: &str,
+    repo_id: &str,
+    project_id: Option<&str>,
+    chunks: &[code_indexer::CodeChunk],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let stats = load_fresh_index(gateway.clone(), project_name).await?;
-    println!("indexed {} chunks in {} ms", stats.indexed, stats.duration_ms);
+    let report = upsert_repo_chunks(client, cfg, &gateway, repo_id, project_id, chunks).await?;
+    println!("upserted {} / kept {} / deleted {}", report.upserted, report.kept, report.deleted);
 
-    let hits = search_code(gateway, project_name, "user repository pattern", Some(10)).await?;
+    let hits = search_code(gateway, "demo", "user repository pattern", Some(10)).await?;
     for h in hits {
         println!("{} :: score={:.3}", h.file, h.score);
     }
@@ -108,13 +112,14 @@ async fn rebuild_and_query(
 
 ```
 rag-base/src/
-├── lib.rs              # load_fresh_index, search_code
-├── embedding.rs        # build_embedding_text, clamp_snippet_ex, embed_texts (delegates to gateway)
-├── jsonl_reader.rs     # streaming JSONL reader → batches
+├── lib.rs              # search_code (legacy) + re-exports for ingest helpers
+├── ingest.rs           # upsert_repo_chunks (S2 content-sha dedup)
+├── embedding.rs        # build_embedding_text, clamp_snippet_ex, embed_texts
+├── jsonl_reader.rs     # chunk_to_triple + ChunkScope (in-memory, no JSONL)
 ├── search.rs           # search_hits + lexical_rerank + scroll fallback
 ├── stitcher.rs         # merges overlapping hits into code blocks
 ├── vector_db.rs        # Qdrant client glue
-├── errors/             # RagBaseError (now wraps GatewayError)
+├── errors/             # RagBaseError (wraps GatewayError)
 └── structs/            # config, rag_store, search_result types
 ```
 
@@ -142,13 +147,17 @@ rag-base/src/
 
 ## Testing
 
-No unit tests today; exercised end-to-end via the `/vector_base_index` and
-`/search_vector_base` routes against a local Qdrant + Ollama stack.
+Unit tests cover `VectorPayload` round-trips (legacy + new fields).
+`tests/integration.rs` exercises Qdrant via testcontainers: the
+S1 delete/scroll helpers and the S2 content-sha dedup pipeline
+(`upsert_repo_chunks_dedup_pipeline`). Marked `#[ignore]`; run with
+`cargo test --workspace --tests -- --ignored`.
 
 ## Related docs
 
-- [Data Flow — Index a project](../architecture/data-flow.md#flow-1--index-a-project)
+- [Data Flow — Master push reindex](../architecture/data-flow.md#flow-1--master-push-reindex-s2)
 - [Qdrant Schema](../reference/qdrant-schema.md)
+- [services/ingestion-pipeline](ingestion-pipeline.md)
 - [services/ai-llm-service](ai-llm-service.md)
 - [services/code-indexer](code-indexer.md)
 - [Configuration](../guides/configuration.md)

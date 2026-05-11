@@ -26,11 +26,12 @@ adapter over the lower layers.
 
 | Method | Path | Handler | What it does |
 | --- | --- | --- | --- |
-| `POST` | `/sync_git` | [`sync_git_route`](../../api/src/routes/sync_git/sync_git_route.rs) | Clones / updates configured repos via `project-code-store`. |
-| `GET` | `/project_indexer` | [`project_indexer_route`](../../api/src/routes/project_indexer/project_indexer_route.rs) | Runs `code-indexer` over the local checkout. |
-| `GET` | `/vector_base_index` | [`vector_base_index_route`](../../api/src/routes/rag_base/vector_base_index_route.rs) | Triggers `rag_base::load_fresh_index` against Qdrant. |
-| `POST` | `/search_vector_base` | [`search_vector_base_route`](../../api/src/routes/rag_base/search_vector_base_route.rs) | Semantic search via `rag_base::search_code`. |
+| `POST` | `/admin/reindex_repo` | [`reindex_repo_route`](../../api/src/routes/admin/reindex_repo_route.rs) | S5 — enqueue a single `Reindex` job by `remote_url`. See [Admin API](../reference/admin-api.md). |
+| `POST` | `/admin/reindex_all` | [`reindex_all_route`](../../api/src/routes/admin/reindex_all_route.rs) | S5 — fan out one `Reindex` job per repo declared under the default project. |
+| `POST` | `/search_vector_base` | [`search_vector_base_route`](../../api/src/routes/rag_base/search_vector_base_route.rs) | Semantic search via `rag_base::search_code`. Deprecated — `/retrieve` replaces it in S8. |
 | `POST` | `/trigger_git_mr` | [`trigger_mr_route`](../../api/src/routes/check_mr/trigger_mr_route.rs) | End-to-end MR review pipeline. |
+| `POST` | `/webhooks/{gitlab,github,bitbucket}` | [`webhooks/*`](../../api/src/routes/webhooks) | Inbound push / MR webhooks. |
+| `GET` | `/health/{live,ready,detailed}` | [`health/*`](../../api/src/routes/health) | Liveness / readiness probes. |
 | `GET` | `/usage` | [`usage_route`](../../api/src/routes/usage/usage_route.rs) | Live snapshot: total calls, tokens, USD cost, per-(tier,provider,model) breakdown. |
 | (any) | `/*` | `handler_404` | Fallback. |
 
@@ -43,12 +44,11 @@ flowchart LR
     State --> GW[Arc<LlmGateway>]
     State --> Cfg[Arc<AppConfig>]
     Router --> Routes
+    Routes -->|/admin/reindex_*| Q[(jobs queue)]
     Routes -->|/trigger_git_mr| GCE[git-context-engine]
     Routes -->|/trigger_git_mr| ARE[ai-review-engine]
-    Routes -->|/vector_base_index| RAG[rag-base]
-    Routes -->|/search_vector_base| RAG
-    Routes -->|/project_indexer| CI[code-indexer]
-    Routes -->|/sync_git| PCS[project-code-store]
+    Routes -->|/search_vector_base| RAG[rag-base]
+    Routes -->|/webhooks/*| Q
 ```
 
 ## Configuration
@@ -56,9 +56,9 @@ flowchart LR
 | Var | Purpose |
 | --- | --- |
 | `API_ADDRESS` | Bind address, e.g. `0.0.0.0:8080`. |
-| `PROJECT_NAME` | Logical project key, used by all downstream layers. |
 | `GIT_API_BASE`, `GIT_TOKEN` | Git provider credentials. |
 | `TRIGGER_SECRET` | Shared secret guarding `/trigger_git_mr`. |
+| `PROJECTS_CONFIG` | Path to `projects.toml`; **must declare exactly one `[[project]]`** (S5 single-project invariant). |
 
 Plus all `LLM_*`, `RAG_*`, `QDRANT_*` vars consumed by the layers below.
 See [Configuration](../guides/configuration.md).

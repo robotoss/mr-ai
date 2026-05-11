@@ -150,7 +150,6 @@ impl RagConfig {
     /// Build configuration from environment variables and an optional project name.
     ///
     /// Environment variables used:
-    /// - `PROJECT_NAME`
     /// - `QDRANT_URL` (default: "http://localhost:6334")
     /// - `QDRANT_COLLECTION` (default: "mr_ai_code")
     /// - `QDRANT_DISTANCE` (values: "Cosine" | "Dot" | "Euclid"; default: "Cosine")
@@ -166,15 +165,17 @@ impl RagConfig {
     /// - `CLAMP_PREVIEW_MAX_LINES` (default: 50)
     /// - `CLAMP_EMBED_MAX_LINES` (default: 80)
     /// - `CHUNK_MIN_CHARS` (default: 16)
-    /// - `INDEX_JSONL_PATH` (default: `code_data/out/<PROJECT_NAME>/code_chunks.jsonl`)
+    /// - `INDEX_JSONL_PATH` (default: `code_data/out/<project>/code_chunks.jsonl`)
     ///
     /// The embedding **model** and **endpoint** are owned by the LLM Gateway
-    /// (`ai-llm-service`) — they are not read here.
+    /// (`ai-llm-service`) — they are not read here. `project_name` is the
+    /// single-project slug captured at boot from `projects.toml`
+    /// (S5 invariant); callers that do not need a JSONL path may pass
+    /// `None` and accept the placeholder "default".
     pub fn from_env(project_name: Option<&str>) -> Result<Self, RagBaseError> {
         let name = project_name
             .map(|s| s.to_string())
-            .or_else(|| std::env::var("PROJECT_NAME").ok())
-            .unwrap_or_else(|| "project_x".to_string());
+            .unwrap_or_else(|| "default".to_string());
 
         let code_jsonl = std::env::var("INDEX_JSONL_PATH")
             .map(PathBuf::from)

@@ -1,110 +1,25 @@
-//! Async JSONL reader → `(id, embed_text, VectorPayload)` tuples.
-//! Streams `code_chunks.jsonl`, builds compact payload + high-signal embed text.
+//! Chunk → `(id, embed_text, VectorPayload)` mapping shared by the
+//! worker ingest pipeline (S2).
+//!
+//! The module is named `jsonl_reader` for historical reasons — the
+//! original JSONL streaming reader lived here. After S5 the JSONL
+//! bootstrap (`/vector_base_index`) is gone, and only the per-chunk
+//! mapper survives. It powers the in-memory pipeline used by
+//! `rag_base::upsert_repo_chunks`.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
 use code_indexer::CodeChunk;
 use regex::Regex;
 use serde::Serialize;
-use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tracing::{debug, info};
 
 use crate::embedding::{build_embedding_text, clamp_snippet_ex};
-use crate::errors::rag_base_error::RagBaseError;
 use crate::structs::rag_store::VectorPayload;
 
-/// Stream a JSONL file in batches and invoke `on_batch` for each non-empty batch.
-pub async fn read_jsonl_map_to_ingest_batched<P, F, Fut>(
-    path: P,
-    batch_size: usize,
-    preview_max_snippet_chars: usize,
-    embed_max_snippet_chars: usize,
-    mut on_batch: F,
-) -> Result<(), RagBaseError>
-where
-    P: AsRef<Path>,
-    F: FnMut(Vec<(String, String, VectorPayload)>) -> Fut,
-    Fut: std::future::Future<Output = Result<(), RagBaseError>>,
-{
-    let path_ref = path.as_ref();
-    info!(
-        target: "rag_base::jsonl_reader",
-        path = %path_ref.display(),
-        batch_size,
-        "read_jsonl_map_to_ingest_batched: start"
-    );
-
-    let file = File::open(path_ref).await?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
-
-    let mut buf = Vec::with_capacity(batch_size.max(1));
-    let mut total_lines: usize = 0;
-    let mut mapped_lines: usize = 0;
-
-    while let Some(line) = lines.next_line().await? {
-        total_lines += 1;
-        if let Some(triple) =
-            map_line_to_triple(&line, preview_max_snippet_chars, embed_max_snippet_chars)
-        {
-            mapped_lines += 1;
-            buf.push(triple);
-        }
-        if buf.len() >= batch_size {
-            debug!(
-                target: "rag_base::jsonl_reader",
-                buffered = buf.len(),
-                "read_jsonl_map_to_ingest_batched: flushing batch"
-            );
-            on_batch(std::mem::take(&mut buf)).await?;
-        }
-    }
-
-    if !buf.is_empty() {
-        debug!(
-            target: "rag_base::jsonl_reader",
-            buffered = buf.len(),
-            "read_jsonl_map_to_ingest_batched: flushing final batch"
-        );
-        on_batch(buf).await?;
-    }
-
-    info!(
-        target: "rag_base::jsonl_reader",
-        total_lines,
-        mapped_lines,
-        "read_jsonl_map_to_ingest_batched: finished"
-    );
-
-    Ok(())
-}
-
-/// Map one JSONL line (parsed as `CodeChunk`) into `(id, embed_text, VectorPayload)`.
-fn map_line_to_triple(
-    line: &str,
-    preview_max_snippet_chars: usize,
-    embed_max_snippet_chars: usize,
-) -> Option<(String, String, VectorPayload)> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let chunk: CodeChunk = serde_json::from_str(trimmed).ok()?;
-    chunk_to_triple(
-        &chunk,
-        ChunkScope::default(),
-        preview_max_snippet_chars,
-        embed_max_snippet_chars,
-    )
-}
-
-/// Multi-tenant scope assigned to every emitted chunk. Legacy JSONL
-/// ingest leaves both fields `None`; the worker pipeline (S2+) sets
-/// `repo_id` (and `project_id`) so the payload carries enough metadata
-/// for per-repo filters and incremental dedup.
+/// Multi-tenant scope assigned to every emitted chunk. The worker
+/// pipeline sets `repo_id` (and `project_id`) so the payload carries
+/// enough metadata for per-repo filters and incremental dedup. Tests
+/// and in-process helpers may leave both fields `None`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ChunkScope<'a> {
     pub project_id: Option<&'a str>,
