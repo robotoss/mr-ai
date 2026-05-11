@@ -86,7 +86,7 @@ code-indexer/src/
 | --- | --- | --- |
 | Dart | shipped (S3) | file / parent / symbol / sub |
 | Rust | shipped (S4A) | file / parent / symbol / sub |
-| TypeScript | S4B | placeholder — currently text-fallback |
+| TypeScript | shipped (S4B, also `.tsx`) | file / parent / symbol / sub |
 
 See [Chunking](chunking.md) for the contract and `parent_symbol_id`
 linking model. The decorator
@@ -98,7 +98,7 @@ TypeScript (S4B) all feed it.
 | --- | --- | --- |
 | Dart | imports, defines, calls, inherits, type_uses, async_boundary | [`analyzer::dart`](../../code-indexer/src/analyzer/dart.rs) |
 | Rust | imports, defines, calls, inherits, type_uses, async_boundary | [`analyzer::rust`](../../code-indexer/src/analyzer/rust.rs) — see [Rust Analyzer](rust-analyzer.md) |
-| TypeScript | _S4B_ | _coming next_ |
+| TypeScript | imports, defines, calls, inherits, type_uses, async_boundary | [`analyzer::typescript`](../../code-indexer/src/analyzer/typescript.rs) — see [TypeScript Analyzer](typescript-analyzer.md) |
 
 ## Errors
 

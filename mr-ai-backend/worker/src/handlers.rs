@@ -546,7 +546,9 @@ impl JobHandler for ReindexHandler {
             let dart_outcome = DartAnalyzer::new().analyze_chunks(&chunks);
             let rust_outcome = code_indexer::analyzer::RustAnalyzer::new()
                 .analyze_chunks(&chunks);
-            let mut outcome = merge_outcomes(vec![dart_outcome, rust_outcome]);
+            let ts_outcome = code_indexer::analyzer::TypescriptAnalyzer::new()
+                .analyze_chunks(&chunks);
+            let mut outcome = merge_outcomes(vec![dart_outcome, rust_outcome, ts_outcome]);
 
             // Optional Dart Analyzer sidecar augmentation (S8). Failures
             // degrade the run to tree-sitter-only data instead of aborting.

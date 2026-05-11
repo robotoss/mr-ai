@@ -15,10 +15,12 @@
 pub mod dart;
 pub mod intent;
 pub mod rust;
+pub mod typescript;
 
 pub use dart::DartAnalyzer;
 pub use intent::{AnalysisOutcome, EdgeIntent, NodeIntent};
 pub use rust::RustAnalyzer;
+pub use typescript::TypescriptAnalyzer;
 
 use domain::ProviderKind;
 

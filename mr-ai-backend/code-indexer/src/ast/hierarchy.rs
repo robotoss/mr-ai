@@ -90,9 +90,18 @@ fn classify_existing(chunks: &mut [CodeChunk], file: &str) {
 
 fn classify(kind: &SymbolKind) -> ChunkKind {
     match kind {
-        SymbolKind::Class | SymbolKind::Mixin | SymbolKind::Extension | SymbolKind::Enum => {
-            ChunkKind::Parent
-        }
+        // Type-like containers across all supported languages:
+        //   Class — Dart class, Rust struct/union, TypeScript class
+        //   Mixin/Extension — Dart, plus Rust impl blocks
+        //   Enum — all three
+        //   Interface — Rust trait, TypeScript interface
+        //   Module — Rust mod, TypeScript namespace
+        SymbolKind::Class
+        | SymbolKind::Mixin
+        | SymbolKind::Extension
+        | SymbolKind::Enum
+        | SymbolKind::Interface
+        | SymbolKind::Module => ChunkKind::Parent,
         _ => ChunkKind::Symbol,
     }
 }
