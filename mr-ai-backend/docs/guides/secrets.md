@@ -36,6 +36,12 @@ ${SECRETS_DIR}/
 ├── _global/
 │   ├── git_token
 │   └── trigger_secret
+├── _hosts/                       # S6 — per-Git-host overrides
+│   ├── gitlab.com/
+│   │   ├── git_token
+│   │   └── ssh_key_path
+│   └── gitlab.example.com/
+│       └── git_token
 └── <project_uuid>/
     ├── git_token
     └── ssh_key_passphrase
@@ -44,6 +50,23 @@ ${SECRETS_DIR}/
 Activate with `SECRET_PROVIDER=file`. `SECRETS_DIR` defaults to
 `/var/secrets`. One file per secret; trailing newlines are trimmed. Set
 file mode `0600` (the provider does not enforce it).
+
+#### Host-scoped overrides (S6)
+
+When the worker fleet talks to several Git hosts (e.g. `gitlab.com` plus
+a self-hosted `gitlab.example.com`), drop a per-host token under
+`_hosts/<host>/<key>`. The `SecretProvider::get_for_host` API resolves
+host-first and falls through to the unscoped path. The host is derived
+from the remote URL at the libgit2 callback so deployment scripts only
+need to mirror what `git clone` is targeting.
+
+Host slug mapping (used for env-var overrides — see [Configuration](configuration.md)):
+
+| Host | Slug |
+| --- | --- |
+| `gitlab.com` | `GITLAB_COM` |
+| `github.example.com` | `GITHUB_EXAMPLE_COM` |
+| `git.self-hosted.io` | `GIT_SELF_HOSTED_IO` |
 
 In Docker:
 
@@ -57,15 +80,22 @@ services:
       SECRETS_DIR: /var/secrets
 ```
 
-## Resolution order (sync helper)
+## Resolution order
 
-1. Project-scoped env: `<KEY>_<PROJECT_UUID_HEX>`
-2. Plain env: `<KEY>`
-3. (only if `SECRET_PROVIDER=file`) `<SECRETS_DIR>/<project_uuid>/<key>`
-4. (only if `SECRET_PROVIDER=file`) `<SECRETS_DIR>/_global/<key>`
+`secrets::sync::resolve_with_host(project, host, key)` and the matching
+`SecretProvider::get_for_host` consult these in order:
 
-The async `SecretProvider` trait has only one path per backend — callers
-control project scoping explicitly.
+1. Host-scoped env: `<KEY>_<HOST_SLUG>` (S6, when `host` supplied)
+2. Project-scoped env: `<KEY>_<PROJECT_UUID_HEX>` (when `project` supplied)
+3. Plain env: `<KEY>`
+4. (file backend only, when `host` supplied) `<SECRETS_DIR>/_hosts/<host>/<key>`
+5. (file backend only) `<SECRETS_DIR>/<project_uuid>/<key>`
+6. (file backend only) `<SECRETS_DIR>/_global/<key>`
+
+`resolve(project, key)` is the back-compat wrapper that passes `None` for
+the host. All Git-credential paths in the worker switched to the host
+variant in S6; webhook HMAC still uses the unscoped lookup pending a
+follow-up that parses the payload to learn which host posted it.
 
 ## Audit / metadata
 
@@ -98,6 +128,14 @@ mkdir -p /tmp/mr-ai-secrets/_global
 echo -n "glpat-..." > /tmp/mr-ai-secrets/_global/git_token
 chmod 600 /tmp/mr-ai-secrets/_global/git_token
 SECRET_PROVIDER=file SECRETS_DIR=/tmp/mr-ai-secrets cargo run
+
+# Host-scoped (S6) — gitlab.com gets its own token,
+# github.example.com falls back to the global one:
+mkdir -p /tmp/mr-ai-secrets/_hosts/gitlab.com
+echo -n "glpat-gitlabcom" > /tmp/mr-ai-secrets/_hosts/gitlab.com/git_token
+
+# Or via env without touching the disk layout:
+GIT_TOKEN_GITLAB_COM=glpat-gitlabcom cargo run
 ```
 
 ## Testing

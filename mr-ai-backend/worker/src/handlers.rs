@@ -217,16 +217,24 @@ impl JobHandler for IngestMrHandler {
             "IngestMr: review row opened"
         );
 
-        // Build the two-phase review via git-context-engine. Token comes
-        // from SecretProvider (env-only sync resolver in S6). The legacy
-        // project name is plumbed in for the existing prompt assembly
-        // path; per-project routing lands when projects.toml gains the
-        // git provider URL/token mapping.
-        let token = secrets::sync::resolve(None, &secrets::SecretKey::GitToken)
-            .ok_or_else(|| WorkerError::BadPayload {
-                kind: KIND_INGEST_MR.into(),
-                msg: "GIT_TOKEN unset; configure secrets backend".into(),
-            })?;
+        // Build the two-phase review via git-context-engine. Token is
+        // resolved host-first (S6) so deployments serving e.g.
+        // gitlab.com + a self-hosted gitlab can keep distinct tokens;
+        // falls back to the unscoped `GIT_TOKEN` when no host-specific
+        // value is configured.
+        let host = secrets::host_from_remote_url(&parsed.remote_url);
+        let token = secrets::sync::resolve_with_host(
+            None,
+            host.as_deref(),
+            &secrets::SecretKey::GitToken,
+        )
+        .ok_or_else(|| WorkerError::BadPayload {
+            kind: KIND_INGEST_MR.into(),
+            msg: format!(
+                "GIT_TOKEN unset for host {:?}; configure GIT_TOKEN_<HOST_SLUG> or the global GIT_TOKEN",
+                host.as_deref().unwrap_or("<unknown>")
+            ),
+        })?;
         let cfg = ProviderConfig {
             kind: map_provider(provider),
             base_api: self.git_api_base.clone(),

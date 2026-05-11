@@ -165,6 +165,22 @@ through the [`SecretProvider`](secrets.md) — `env` backend by default.
 | `GIT_HTTP_TOKEN` | HTTPS auth token. |
 | `GIT_HTTP_USER` | HTTPS username (default `oauth2`). |
 
+### Per-host overrides (S6)
+
+When the worker fleet talks to several Git hosts, append the host slug
+(uppercase with `.` and `-` replaced by `_`) to any of the keys above
+and the host-specific value will win for that remote.
+
+| Host | Slug | Example |
+| --- | --- | --- |
+| `gitlab.com` | `GITLAB_COM` | `GIT_TOKEN_GITLAB_COM=glpat-...` |
+| `github.example.com` | `GITHUB_EXAMPLE_COM` | `SSH_KEY_PATH_GITHUB_EXAMPLE_COM=/var/secrets/keys/ghe` |
+| `git.self-hosted.io` | `GIT_SELF_HOSTED_IO` | `GIT_HTTP_TOKEN_GIT_SELF_HOSTED_IO=...` |
+
+The unscoped `GIT_TOKEN` / `SSH_KEY_PATH` / `GIT_HTTP_TOKEN` / `GIT_HTTP_USER`
+remain as the fallback when no host-specific value is configured. See
+[Secrets](secrets.md#host-scoped-overrides-s6) for the file-mount layout.
+
 ## Postgres / persistence
 
 Loaded by [`persistence`](../../persistence/src/lib.rs). Persistence is

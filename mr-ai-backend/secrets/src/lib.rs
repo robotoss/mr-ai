@@ -14,7 +14,10 @@ use thiserror::Error;
 use tokio::fs;
 use tracing::{debug, warn};
 
+pub mod host_key;
 pub mod webhook;
+
+pub use host_key::{host_env_key, host_from_remote_url, slug_from_host, slug_from_remote_url};
 
 /// Strongly-typed key for a known secret. Stringly-typed escape hatch lives in
 /// `SecretKey::Custom` for migration ergonomics — prefer adding variants over
@@ -99,6 +102,39 @@ pub trait SecretProvider: Send + Sync + std::fmt::Debug {
         }
     }
 
+    /// Resolve a secret scoped to a specific Git host (S6). `host` is
+    /// the bare host (e.g. `gitlab.com`); the provider normalises it
+    /// via [`slug_from_host`] before composing the lookup key.
+    ///
+    /// Default implementation falls back to a `Custom(<KEY>_<SLUG>)`
+    /// env lookup so deployments that only set env vars work out of the
+    /// box. File-backed providers override this to also check
+    /// `<root>/_hosts/<host>/<key>` on disk.
+    async fn get_for_host(&self, host: &str, key: &SecretKey) -> Result<String> {
+        let slug = slug_from_host(host);
+        let env_key = host_env_key(key.env_var(), &slug);
+        match env::var(&env_key) {
+            Ok(v) if !v.is_empty() => Ok(v),
+            _ => Err(SecretError::NotFound {
+                key: key.as_str().to_owned(),
+                scope: format!("host:{host}"),
+            }),
+        }
+    }
+
+    /// Host-scoped variant of [`get_optional`].
+    async fn get_optional_for_host(
+        &self,
+        host: &str,
+        key: &SecretKey,
+    ) -> Result<Option<String>> {
+        match self.get_for_host(host, key).await {
+            Ok(v) => Ok(Some(v)),
+            Err(SecretError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Human-readable backend name (for logs / health endpoints).
     fn backend_name(&self) -> &'static str;
 }
@@ -153,6 +189,13 @@ impl FileSecretProvider {
             .unwrap_or_else(|| "_global".to_owned());
         self.root.join(scope).join(key.as_str())
     }
+
+    fn host_path_for(&self, host: &str, key: &SecretKey) -> PathBuf {
+        self.root
+            .join("_hosts")
+            .join(host.to_ascii_lowercase())
+            .join(key.as_str())
+    }
 }
 
 #[async_trait]
@@ -160,6 +203,44 @@ impl SecretProvider for FileSecretProvider {
     async fn get(&self, project: Option<ProjectId>, key: &SecretKey) -> Result<String> {
         let path = self.path_for(project, key);
         debug!(target = "secrets", path = %path.display(), "reading file-backed secret");
+        if !path.exists() {
+            return Err(SecretError::NotFound {
+                key: key.as_str().to_owned(),
+                scope: format!("file:{}", path.display()),
+            });
+        }
+        let bytes = fs::read(&path).await.map_err(|source| SecretError::Io {
+            key: key.as_str().to_owned(),
+            path: path.clone(),
+            source,
+        })?;
+        let value = String::from_utf8(bytes).map_err(|err| SecretError::Io {
+            key: key.as_str().to_owned(),
+            path: path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+        })?;
+        Ok(value.trim_end_matches(['\n', '\r']).to_owned())
+    }
+
+    async fn get_for_host(&self, host: &str, key: &SecretKey) -> Result<String> {
+        // 1. Env override (`<KEY>_<SLUG>`) wins so operators can toggle
+        //    overrides without touching the disk layout.
+        let slug = slug_from_host(host);
+        let env_key = host_env_key(key.env_var(), &slug);
+        if let Ok(v) = env::var(&env_key) {
+            if !v.is_empty() {
+                return Ok(v);
+            }
+        }
+
+        // 2. Mounted file: `<root>/_hosts/<host>/<key>`.
+        let path = self.host_path_for(host, key);
+        debug!(
+            target = "secrets",
+            host = %host,
+            path = %path.display(),
+            "reading host-scoped secret"
+        );
         if !path.exists() {
             return Err(SecretError::NotFound {
                 key: key.as_str().to_owned(),
@@ -229,19 +310,36 @@ pub mod sync {
     use std::path::PathBuf;
 
     use super::SecretKey;
+    use super::host_key::{host_env_key, slug_from_host};
     use domain::ProjectId;
 
-    /// Lookup precedence: `<KEY>_<UPPER_SLUG>` env, `<KEY>` env,
-    /// `<SECRETS_DIR>/<project_uuid>/<key>` file, `<SECRETS_DIR>/_global/<key>`
-    /// file. Returns `None` when nothing is configured.
-    pub fn resolve(project: Option<ProjectId>, key: &SecretKey) -> Option<String> {
-        // 1. Project-scoped env override `<KEY>_<PROJECT_UUID_HEX>`.
+    /// Lookup precedence (project + host aware):
+    ///   1. `<KEY>_<HOST_SLUG>` env (when `host` supplied)
+    ///   2. `<KEY>_<PROJECT_UUID_HEX>` env (when `project` supplied)
+    ///   3. `<KEY>` env
+    ///   4. `<SECRETS_DIR>/_hosts/<host>/<key>` file (file backend only,
+    ///      when `host` supplied)
+    ///   5. `<SECRETS_DIR>/<project_uuid>/<key>` file (file backend only)
+    ///   6. `<SECRETS_DIR>/_global/<key>` file (file backend only)
+    /// Returns `None` when nothing is configured.
+    pub fn resolve_with_host(
+        project: Option<ProjectId>,
+        host: Option<&str>,
+        key: &SecretKey,
+    ) -> Option<String> {
+        // 1. Host-scoped env override.
+        if let Some(h) = host {
+            let slug = slug_from_host(h);
+            let scoped = host_env_key(key.env_var(), &slug);
+            if let Ok(v) = env::var(&scoped) {
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+        // 2. Project-scoped env override `<KEY>_<PROJECT_UUID_HEX>`.
         if let Some(p) = project {
-            let suffix = p
-                .as_uuid()
-                .simple()
-                .to_string()
-                .to_ascii_uppercase();
+            let suffix = p.as_uuid().simple().to_string().to_ascii_uppercase();
             let scoped = format!("{}_{suffix}", key.env_var());
             if let Ok(v) = env::var(&scoped) {
                 if !v.is_empty() {
@@ -249,43 +347,54 @@ pub mod sync {
                 }
             }
         }
-        // 2. Plain env.
+        // 3. Plain env.
         if let Ok(v) = env::var(key.env_var()) {
             if !v.is_empty() {
                 return Some(v);
             }
         }
-        // 3. File backend (only when explicitly selected).
+        // 4-6. File backend (only when explicitly selected).
         if env::var("SECRET_PROVIDER").ok().as_deref() == Some("file") {
             let root: PathBuf = env::var("SECRETS_DIR")
                 .unwrap_or_else(|_| "/var/secrets".into())
                 .into();
-            // Project-scoped file.
-            if let Some(p) = project {
+            // 4. Host-scoped file.
+            if let Some(h) = host {
                 let path = root
-                    .join(p.as_uuid().to_string())
+                    .join("_hosts")
+                    .join(h.to_ascii_lowercase())
                     .join(key.as_str());
-                if let Ok(bytes) = fs::read(&path) {
-                    if let Ok(s) = String::from_utf8(bytes) {
-                        let trimmed = s.trim_end_matches(['\n', '\r']).to_owned();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed);
-                        }
-                    }
+                if let Some(value) = read_trim(&path) {
+                    return Some(value);
                 }
             }
-            // Global fallback file.
-            let path = root.join("_global").join(key.as_str());
-            if let Ok(bytes) = fs::read(&path) {
-                if let Ok(s) = String::from_utf8(bytes) {
-                    let trimmed = s.trim_end_matches(['\n', '\r']).to_owned();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed);
-                    }
+            // 5. Project-scoped file.
+            if let Some(p) = project {
+                let path = root.join(p.as_uuid().to_string()).join(key.as_str());
+                if let Some(value) = read_trim(&path) {
+                    return Some(value);
                 }
+            }
+            // 6. Global fallback file.
+            let path = root.join("_global").join(key.as_str());
+            if let Some(value) = read_trim(&path) {
+                return Some(value);
             }
         }
         None
+    }
+
+    /// Back-compat wrapper retained for callers that have no `host`
+    /// context. Equivalent to `resolve_with_host(project, None, key)`.
+    pub fn resolve(project: Option<ProjectId>, key: &SecretKey) -> Option<String> {
+        resolve_with_host(project, None, key)
+    }
+
+    fn read_trim(path: &std::path::Path) -> Option<String> {
+        let bytes = fs::read(path).ok()?;
+        let s = String::from_utf8(bytes).ok()?;
+        let trimmed = s.trim_end_matches(['\n', '\r']).to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
     }
 }
 
@@ -349,6 +458,63 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let p = FileSecretProvider::new(tmp.path().to_path_buf());
         let err = p.get(None, &SecretKey::GitToken).await.unwrap_err();
+        assert!(matches!(err, SecretError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn file_provider_reads_host_scope() {
+        // S6: `<root>/_hosts/<host>/git_token` overrides the global path.
+        let tmp = TempDir::new().unwrap();
+        let host_dir = tmp.path().join("_hosts").join("gitlab.com");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("git_token"), "host-token\n").unwrap();
+        // Also plant a different global value so we can prove the host
+        // file wins.
+        let global = tmp.path().join("_global");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(global.join("git_token"), "global-token\n").unwrap();
+
+        let p = FileSecretProvider::new(tmp.path().to_path_buf());
+        let v = p
+            .get_for_host("gitlab.com", &SecretKey::GitToken)
+            .await
+            .unwrap();
+        assert_eq!(v, "host-token");
+
+        // Falling back via the caller-side chain still works.
+        let v_global = p.get(None, &SecretKey::GitToken).await.unwrap();
+        assert_eq!(v_global, "global-token");
+    }
+
+    #[tokio::test]
+    async fn host_scoped_env_wins_over_file() {
+        // S6: env override `GIT_TOKEN_GITLAB_COM` short-circuits the file
+        // lookup so operators can swap a host's token without touching
+        // disk.
+        let tmp = TempDir::new().unwrap();
+        let host_dir = tmp.path().join("_hosts").join("gitlab.com");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("git_token"), "from-file").unwrap();
+
+        let env_key = "GIT_TOKEN_GITLAB_COM";
+        unsafe { env::set_var(env_key, "from-env") };
+        let p = FileSecretProvider::new(tmp.path().to_path_buf());
+        let v = p
+            .get_for_host("gitlab.com", &SecretKey::GitToken)
+            .await
+            .unwrap();
+        assert_eq!(v, "from-env");
+        unsafe { env::remove_var(env_key) };
+    }
+
+    #[tokio::test]
+    async fn host_scoped_falls_back_to_not_found_when_unconfigured() {
+        let tmp = TempDir::new().unwrap();
+        let p = FileSecretProvider::new(tmp.path().to_path_buf());
+        let err = p
+            .get_for_host("github.example.com", &SecretKey::GitToken)
+            .await
+            .unwrap_err();
         assert!(matches!(err, SecretError::NotFound { .. }));
     }
 }
