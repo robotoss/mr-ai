@@ -1,33 +1,15 @@
 # Database Schema
 
-`mr-ai-backend` uses Postgres 16 as the system-of-record for project
-metadata, MR review state, the job queue, webhook event log, and the code
-graph (S3+). Vector data lives separately in Qdrant; nothing in this schema
-duplicates it.
-
-## External stores
+Postgres 16 tables, indexes, and foreign keys. **Reference only** — for
+*how* the crate operates (pool, transactions, queue mechanics,
+responsibilities, logs) see [services/persistence](../services/persistence.md).
 
 | Store | Role | Reference |
 | --- | --- | --- |
 | Postgres (this page) | OLTP truth: projects, repos, queue, graph nodes/edges. | — |
-| **Qdrant** | Vector index of code chunks; payload carries `project_id` / `repo_id` / `chunk_kind` / `parent_symbol_id` / `content_sha256` so tenancy, hierarchy, and dedup are all enforced in-payload, not by collection segregation. | [Qdrant Schema](qdrant-schema.md) |
+| Qdrant | Vector index of code chunks. Tenancy/hierarchy enforced in-payload, not by collection segregation. | [qdrant-schema](qdrant-schema.md) |
 
-
-Migrations live in [`persistence/migrations/`](../../persistence/migrations)
-and are managed via `sqlx-cli`.
-
-## Sprint scope
-
-| Range | Sprint | Tables |
-| --- | --- | --- |
-| `0001..0006` | **S1** | projects, project_repos, project_dependencies, webhook_events, jobs, mr_reviews, secrets_metadata, index_state |
-| `0007`       | **S2** | `index_state.last_indexed_path_prefix` resume checkpoint (S9 wires the producer). |
-| `0010..0011` | **S3** | graph_nodes, graph_edges |
-| `0012` | S3-D | (sidecar-derived data_flow / control_flow markers, when they land) |
-| `0013..0014` | S4 | overlay metrics, delta tracking |
-| `0015+`      | S5 | retention TTLs, cleanup |
-
-This page documents S1 + S3.
+Migrations live in [`persistence/migrations/`](../../persistence/migrations).
 
 ## Tables (S1)
 
@@ -199,28 +181,13 @@ Indexes: `graph_edges_from_idx`, `graph_edges_to_idx`, `graph_edges_type_idx`.
 ## Migration workflow
 
 ```bash
-# Apply pending migrations:
-just db-migrate
-
-# Rewind one migration (LOCAL DEV ONLY — never in production):
-just db-revert
-
-# Refresh the offline bundle so CI can build with SQLX_OFFLINE=true:
-just db-prepare
-
-# Drop, recreate, migrate from scratch:
-just db-reset
+just db-migrate    # apply pending migrations
+just db-revert     # rewind one (local dev only)
+just db-prepare    # refresh sqlx offline bundle (CI)
+just db-reset      # drop + recreate + migrate from scratch
 ```
 
-### Conventions
-
-- One logical change per migration. **Never edit a merged migration** — write
-  a new one.
-- Every `*.up.sql` ships a matching `*.down.sql`. Down migrations are local
-  dev only; production never runs them.
-- File naming: `<YYYYMMDD>_<NNNN>_<short_name>.<up|down>.sql`. The numeric
-  prefix gates ordering.
-- Use `IF NOT EXISTS` / `IF EXISTS` so reapplied migrations are a no-op.
+Conventions and rules are in [services/persistence → Migrations](../services/persistence.md#migrations).
 
 ## ER diagram
 
@@ -242,6 +209,6 @@ erDiagram
 
 ## Related docs
 
-- [Configuration](../guides/configuration.md)
-- [Installation](../guides/installation.md)
-- [Secrets](../guides/secrets.md)
+- [services/persistence](../services/persistence.md) — how the crate operates.
+- [reference/job-queue](job-queue.md) — kinds, payloads, retry policy.
+- [guides/configuration](../guides/configuration.md), [guides/installation](../guides/installation.md), [guides/secrets](../guides/secrets.md).
