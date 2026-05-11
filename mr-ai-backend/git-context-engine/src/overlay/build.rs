@@ -199,6 +199,7 @@ pub async fn build_for_mr(
     let mut overlay = OverlayGraph::new();
     let mut chunk_truncated = false;
     let mut visited_repos = Vec::with_capacity(plan.visits.len());
+    let mut failed_repos: Vec<(RepoId, String)> = Vec::new();
     let mut worktrees: Vec<WorktreeHandle> = Vec::with_capacity(plan.visits.len());
 
     'outer: for (repo_id, hop) in plan.visits.iter().copied() {
@@ -231,6 +232,7 @@ pub async fn build_for_mr(
                     error = %err,
                     "build_for_mr: worktree creation failed; skipping"
                 );
+                failed_repos.push((repo_id, format!("worktree: {err}")));
                 continue;
             }
         };
@@ -243,6 +245,7 @@ pub async fn build_for_mr(
                     ?repo_id,
                     "build_for_mr: worktree handle had no path; skipping"
                 );
+                failed_repos.push((repo_id, "worktree handle had no path".to_owned()));
                 worktrees.push(wt);
                 continue;
             }
@@ -264,6 +267,7 @@ pub async fn build_for_mr(
                     error = %err,
                     "build_for_mr: indexer failed; skipping"
                 );
+                failed_repos.push((repo_id, format!("indexer: {err}")));
                 worktrees.push(wt);
                 continue;
             }
@@ -274,6 +278,7 @@ pub async fn build_for_mr(
                     error = %err,
                     "build_for_mr: spawn_blocking join failed; skipping"
                 );
+                failed_repos.push((repo_id, format!("spawn_blocking: {err}")));
                 worktrees.push(wt);
                 continue;
             }
@@ -306,6 +311,7 @@ pub async fn build_for_mr(
 
     let report = OverlayBuildReport {
         visited_repos,
+        failed_repos,
         repos_truncated: plan.truncated,
         chunks_truncated: chunk_truncated,
     };
@@ -314,6 +320,7 @@ pub async fn build_for_mr(
         chunks = overlay.chunk_count(),
         touched_files = overlay.touched_count(),
         repos = report.visited_repos.len(),
+        failed = report.failed_repos.len(),
         repos_truncated = report.repos_truncated,
         chunks_truncated = report.chunks_truncated,
         "build_for_mr: finished"
@@ -325,7 +332,13 @@ pub async fn build_for_mr(
 /// signal partial overlays to the retrieval layer.
 #[derive(Debug, Clone)]
 pub struct OverlayBuildReport {
+    /// Repos that were planned, indexed, and folded into the overlay.
     pub visited_repos: Vec<(RepoId, usize)>,
+    /// Repos that were planned but skipped — worktree creation,
+    /// indexing, or join failure. The `String` carries a human-readable
+    /// reason so operator dashboards / retrieval clients can surface
+    /// which deps degraded the overlay.
+    pub failed_repos: Vec<(RepoId, String)>,
     pub repos_truncated: bool,
     pub chunks_truncated: bool,
 }

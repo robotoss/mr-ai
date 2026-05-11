@@ -552,15 +552,7 @@ impl JobHandler for ReindexHandler {
         match tokio::time::timeout(timeout, self.handle_inner(payload.clone())).await {
             Ok(res) => res,
             Err(_) => {
-                if let Ok(parsed) = serde_json::from_value::<ReindexPayload>(payload.clone()) {
-                    if let Ok(Some((_, repo_id))) =
-                        projects::find_repo_by_remote_url_lenient(&self.pool, &parsed.remote_url)
-                            .await
-                    {
-                        let prefix = parsed.path_prefix.as_deref().unwrap_or("");
-                        let _ = index_state::mark_checkpoint(&self.pool, repo_id, prefix).await;
-                    }
-                }
+                self.persist_timeout_checkpoint(&payload).await;
                 Err(WorkerError::Handler(
                     KIND_REINDEX.into(),
                     Box::new(std::io::Error::new(
@@ -572,6 +564,69 @@ impl JobHandler for ReindexHandler {
                     )),
                 ))
             }
+        }
+    }
+}
+
+impl ReindexHandler {
+    /// On `REINDEX_JOB_TIMEOUT_MIN` fire we persist the active path
+    /// prefix (or `""` for the parent job) so future S9+ resume logic
+    /// can pick up where we left off. Each error path produces an
+    /// explicit log so an operator can correlate a stuck `dead` job
+    /// with the reason its checkpoint didn't make it to Postgres.
+    async fn persist_timeout_checkpoint(&self, payload: &Value) {
+        let parsed: ReindexPayload = match serde_json::from_value(payload.clone()) {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::error!(
+                    target = "worker.handler",
+                    error = %err,
+                    "Reindex timeout: payload reparse failed; cannot write checkpoint"
+                );
+                return;
+            }
+        };
+        let resolved = match projects::find_repo_by_remote_url_lenient(
+            &self.pool,
+            &parsed.remote_url,
+        )
+        .await
+        {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                tracing::warn!(
+                    target = "worker.handler",
+                    remote = %parsed.remote_url,
+                    "Reindex timeout: repo not registered; checkpoint skipped"
+                );
+                return;
+            }
+            Err(err) => {
+                tracing::error!(
+                    target = "worker.handler",
+                    error = %err,
+                    remote = %parsed.remote_url,
+                    "Reindex timeout: repo lookup failed; checkpoint skipped"
+                );
+                return;
+            }
+        };
+        let (_, repo_id) = resolved;
+        let prefix = parsed.path_prefix.as_deref().unwrap_or("");
+        match index_state::mark_checkpoint(&self.pool, repo_id, prefix).await {
+            Ok(()) => tracing::warn!(
+                target = "worker.handler",
+                ?repo_id,
+                prefix,
+                "Reindex timeout: checkpoint written"
+            ),
+            Err(err) => tracing::error!(
+                target = "worker.handler",
+                error = %err,
+                ?repo_id,
+                prefix,
+                "Reindex timeout: failed to write checkpoint"
+            ),
         }
     }
 }
@@ -651,6 +706,16 @@ impl ReindexHandler {
                         threshold = split_threshold,
                         "Reindex: file count above REINDEX_SPLIT_FILES; fanning out per-directory"
                     );
+                    // All sub-jobs in ONE transaction. Without this,
+                    // a partial failure (e.g. job 5 of 10 fails to
+                    // insert) would leave the queue with 4 orphan
+                    // sub-jobs *and* the parent retries to enqueue
+                    // another batch, doubling the work indefinitely.
+                    let mut tx = self
+                        .pool
+                        .begin()
+                        .await
+                        .map_err(|e| WorkerError::Persistence(e.into()))?;
                     for dir in &dirs {
                         let payload = json!({
                             "remote_url": parsed.remote_url,
@@ -658,8 +723,8 @@ impl ReindexHandler {
                             "head_sha": parsed.head_sha,
                             "path_prefix": format!("{dir}/"),
                         });
-                        jobs::enqueue(
-                            &self.pool,
+                        jobs::enqueue_in_tx(
+                            &mut tx,
                             KIND_REINDEX,
                             &payload,
                             EnqueueOptions {
@@ -670,6 +735,9 @@ impl ReindexHandler {
                         .await
                         .map_err(WorkerError::Persistence)?;
                     }
+                    tx.commit()
+                        .await
+                        .map_err(|e| WorkerError::Persistence(e.into()))?;
                     return Ok(());
                 }
             }
