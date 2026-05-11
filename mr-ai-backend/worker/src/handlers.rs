@@ -383,6 +383,31 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
+/// Distinct top-level directories that appear among the indexed
+/// files. Used by the S9 auto-split branch — when a workspace exceeds
+/// `REINDEX_SPLIT_FILES`, we fan out one sub-job per top-level dir.
+fn top_level_dirs(workspace: &std::path::Path, files: &[std::path::PathBuf]) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for f in files {
+        let Ok(rel) = f.strip_prefix(workspace) else {
+            continue;
+        };
+        // Take the first segment (top-level directory). Files at the
+        // root are placed in the synthetic bucket `_root_` so they
+        // still get parsed — sub-jobs with `path_prefix = "_root_/"`
+        // simply match nothing and drop them, which is acceptable.
+        let mut comps = rel.components();
+        if let Some(first) = comps.next() {
+            // Only directories; skip files at the root.
+            if comps.next().is_some() {
+                out.insert(first.as_os_str().to_string_lossy().into_owned());
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// Merge several per-language analyzer outcomes into one bundle. Coverage
 /// counters add; nodes/edges concatenate. Duplicate file nodes for the
 /// same `(file, language)` are collapsed downstream by `graph_persist`.
@@ -465,6 +490,11 @@ struct ReindexPayload {
     head_sha: Option<String>,
     #[serde(default)]
     branch: Option<String>,
+    /// Path prefix (repo-relative) the indexer should restrict to. Set
+    /// by the auto-split branch (S9) when the parent job fans out one
+    /// sub-job per top-level directory. `None` means "index everything".
+    #[serde(default)]
+    path_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -484,6 +514,29 @@ impl ReindexHandler {
     }
 }
 
+/// Hard timeout for a single `Reindex` invocation. The walker /
+/// embedding pipeline normally finishes well under this; the timeout
+/// is a safety net against pathological monorepo states. Env knob:
+/// `REINDEX_JOB_TIMEOUT_MIN` (default 30).
+fn reindex_job_timeout() -> std::time::Duration {
+    let minutes = std::env::var("REINDEX_JOB_TIMEOUT_MIN")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30)
+        .max(1);
+    std::time::Duration::from_secs(minutes * 60)
+}
+
+/// File-count threshold above which the parent `Reindex` job fans
+/// out one sub-job per top-level directory. Env knob:
+/// `REINDEX_SPLIT_FILES` (default 5000). `0` disables auto-split.
+fn reindex_split_threshold() -> usize {
+    std::env::var("REINDEX_SPLIT_FILES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(5000)
+}
+
 #[async_trait]
 impl JobHandler for ReindexHandler {
     fn kind(&self) -> &'static str {
@@ -491,6 +544,40 @@ impl JobHandler for ReindexHandler {
     }
 
     async fn handle(&self, payload: Value) -> WorkerResult<()> {
+        // S9: wrap the entire pipeline in a timeout so a runaway
+        // worktree / embedding call can't hold a worker slot forever.
+        // On timeout we persist a checkpoint and surface a retryable
+        // error so the SKIP-LOCKED queue replays the job.
+        let timeout = reindex_job_timeout();
+        match tokio::time::timeout(timeout, self.handle_inner(payload.clone())).await {
+            Ok(res) => res,
+            Err(_) => {
+                if let Ok(parsed) = serde_json::from_value::<ReindexPayload>(payload.clone()) {
+                    if let Ok(Some((_, repo_id))) =
+                        projects::find_repo_by_remote_url_lenient(&self.pool, &parsed.remote_url)
+                            .await
+                    {
+                        let prefix = parsed.path_prefix.as_deref().unwrap_or("");
+                        let _ = index_state::mark_checkpoint(&self.pool, repo_id, prefix).await;
+                    }
+                }
+                Err(WorkerError::Handler(
+                    KIND_REINDEX.into(),
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "Reindex exceeded REINDEX_JOB_TIMEOUT_MIN ({}s)",
+                            timeout.as_secs()
+                        ),
+                    )),
+                ))
+            }
+        }
+    }
+}
+
+impl ReindexHandler {
+    async fn handle_inner(&self, payload: Value) -> WorkerResult<()> {
         let parsed: ReindexPayload =
             serde_json::from_value(payload.clone()).map_err(|e| WorkerError::BadPayload {
                 kind: KIND_REINDEX.into(),
@@ -501,6 +588,7 @@ impl JobHandler for ReindexHandler {
             target = "worker.handler",
             remote = %parsed.remote_url,
             head_sha = ?parsed.head_sha,
+            path_prefix = ?parsed.path_prefix,
             "Reindex: starting"
         );
 
@@ -540,13 +628,65 @@ impl JobHandler for ReindexHandler {
                 )),
             ))?;
 
+        // S9 auto-split: only the parent (no `path_prefix`) job can
+        // fan out — sub-jobs operate on a single top-level directory
+        // and parse it in one pass. We peek at the workspace's file
+        // count via the cheap `walkdir`-based scan, then either fan
+        // out or proceed with the full parse.
+        let split_threshold = reindex_split_threshold();
+        if parsed.path_prefix.is_none() && split_threshold > 0 {
+            let workspace_for_count = workspace.clone();
+            let file_list = tokio::task::spawn_blocking(move || {
+                code_indexer::list_workspace_files(&workspace_for_count)
+            })
+            .await
+            .map_err(|e| WorkerError::Handler(KIND_REINDEX.into(), Box::new(e)))?;
+            if file_list.len() > split_threshold {
+                let dirs = top_level_dirs(&workspace, &file_list);
+                if dirs.len() > 1 {
+                    info!(
+                        target = "worker.handler",
+                        files = file_list.len(),
+                        dirs = dirs.len(),
+                        threshold = split_threshold,
+                        "Reindex: file count above REINDEX_SPLIT_FILES; fanning out per-directory"
+                    );
+                    for dir in &dirs {
+                        let payload = json!({
+                            "remote_url": parsed.remote_url,
+                            "branch": parsed.branch,
+                            "head_sha": parsed.head_sha,
+                            "path_prefix": format!("{dir}/"),
+                        });
+                        jobs::enqueue(
+                            &self.pool,
+                            KIND_REINDEX,
+                            &payload,
+                            EnqueueOptions {
+                                project_id: Some(project_id),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(WorkerError::Persistence)?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         // Run the indexer + analyzer on a blocking pool — tree-sitter is
         // sync and walking 10⁵-file workspaces stalls the runtime
         // otherwise.
         let workspace_clone = workspace.clone();
+        let path_prefix_owned = parsed.path_prefix.clone();
         let analysis = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let chunks = code_indexer::index_workspace(&workspace_clone, false)
-                .map_err(|e| e.to_string())?;
+            let chunks = code_indexer::index_workspace_filtered(
+                &workspace_clone,
+                false,
+                path_prefix_owned.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
 
             // Language fan-out: each analyzer scans only the chunks
             // whose `LanguageKind` it claims, then we merge their

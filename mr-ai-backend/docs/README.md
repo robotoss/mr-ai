@@ -74,6 +74,12 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Retrieve API](reference/retrieve-api.md) | `POST /retrieve` request / response contract — master + MR overlay (S8). |
 | [Job Queue](reference/job-queue.md) | Postgres-backed background queue, retry policy, kinds. |
 
+## Operations
+
+| Doc | What it covers |
+| --- | --- |
+| [Operations](operations.md) | Single-project invariant, env checklist, pre-flight checks, where to look when things break. |
+
 ## Conventions
 
 - **All code, identifiers, and code comments are English.** Documentation prose

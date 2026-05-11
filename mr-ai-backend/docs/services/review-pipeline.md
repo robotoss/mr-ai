@@ -76,9 +76,11 @@ The handler:
    optional `source_branch` / `target_branch` / `head_sha`).
 2. Resolves the repo to `(project_id, repo_id)` and opens a row in
    `mr_reviews` (`pending` → `running`).
-3. Builds a `ProviderConfig` using the legacy `GIT_API_BASE` plus the
-   `git_token` resolved through `SecretProvider` (project-aware routing
-   lands in S7 alongside per-project token mappings).
+3. Builds a `ProviderConfig` using `GIT_API_BASE` plus the
+   `git_token` resolved through `SecretProvider`. The lookup is
+   host-scoped (S6): the host slug parsed from `remote_url`
+   selects `GIT_TOKEN_<HOST_SLUG>` first, falling back to the
+   unscoped `GIT_TOKEN`.
 4. Calls
    [`git_context_engine::build_two_phase_review`](../../git-context-engine/src/lib.rs)
    — the same code path that `/trigger_git_mr` already uses.
