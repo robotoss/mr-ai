@@ -137,7 +137,7 @@ pub async fn llm_rerank(
         return Vec::new();
     }
     let prompt = build_rerank_prompt(plan);
-    let request = UnifiedRequest::user_only(prompt);
+    let request = UnifiedRequest::user_only(prompt).with_prompt_id(domain::PromptId::Rerank);
     let started = std::time::Instant::now();
     let resp = match tokio::time::timeout(timeout, gateway.complete(ModelTier::Smart, request)).await {
         Ok(Ok(resp)) => resp,

@@ -59,6 +59,11 @@ pub struct UsageRecord {
     /// Truncated response (only when `USAGE_LOG_INCLUDE_PROMPTS=true`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_preview: Option<String>,
+    /// Versioned prompt template label (e.g. `"per_hypothesis@v1"`).
+    /// Empty for callers that don't pass `prompt_id` on the request.
+    /// Sprint 4c — drives A/B telemetry off the existing JSONL.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
 }
 
 /* --------------------------------------------------------------------- */
@@ -334,6 +339,7 @@ mod tests {
             batch_size: None,
             prompt_preview: None,
             response_preview: None,
+            prompt_id: None,
         }
     }
 

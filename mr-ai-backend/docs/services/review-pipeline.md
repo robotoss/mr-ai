@@ -130,6 +130,7 @@ review with LLM rerank diagnostics.
 | `REVIEW_V2_ENABLED` | `false` | When `true`, run one Smart/Fast-tier LLM call per hypothesis after rerank. Outcomes recorded in `mr_review_hypotheses` (sprint 4b). |
 | `REVIEW_V2_TIMEOUT_SECS` | `45` | Hard timeout per per-hypothesis call. Timeout → status `timeout`, heuristic stub. |
 | `REVIEW_V2_LOW_TIER_SMART` | `false` | When `true`, low-priority hypotheses also use Smart-tier (risk-averse deploys). Default is Fast-tier for Low. |
+| `LLM_MAX_COST_PER_REQUEST_USD` | unset (disabled) | Per-`request_id` USD budget. Sprint 4c. Crossing the cap returns `GatewayError::CostCapExceeded` from the **next** gateway call. |
 | `REVIEW_PUBLISH_COMMENTS` | `false` | When `true`, run `review_merge_request` and post inline comments. |
 
 ### Per-hypothesis review (sprint 4b)

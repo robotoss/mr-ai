@@ -276,7 +276,8 @@ impl IngestMrHandler {
                     target,
                     anchor,
                 );
-                let req = ai_llm_service::UnifiedRequest::user_only(prompt);
+                let req = ai_llm_service::UnifiedRequest::user_only(prompt)
+                    .with_prompt_id(domain::PromptId::PerHypothesis);
                 let started = std::time::Instant::now();
                 let outcome = tokio::time::timeout(
                     timeout,

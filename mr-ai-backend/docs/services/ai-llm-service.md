@@ -95,6 +95,61 @@ Mixing providers per tier is supported — e.g., Bedrock smart tier with
 Ollama embeddings. See [guides/configuration](../guides/configuration.md)
 for the Bedrock and OpenAI matrices.
 
+## Prompt versioning (sprint 4c)
+
+Every call to `LlmGateway::complete` may carry a `PromptId` —
+a [`domain::PromptId`](../../domain/src/prompt_id.rs) enum that
+names the template behind the request. The id propagates into
+`UsageRecord.prompt_id` as `"name@version"` (e.g.
+`"per_hypothesis@v1"`), so the JSONL usage log can be pivoted by
+template without an extra table.
+
+```rust
+use ai_llm_service::{UnifiedRequest, ModelTier};
+use domain::PromptId;
+
+let req = UnifiedRequest::user_only("…")
+    .with_prompt_id(PromptId::PerHypothesis);
+gateway.complete(ModelTier::Smart, req).await?;
+```
+
+When a prompt template changes meaningfully (output schema, new
+sections), bump the version on the variant rather than renaming
+the variant — historical telemetry then maps cleanly across
+versions. See [`domain::PromptId::version`](../../domain/src/prompt_id.rs).
+
+## Cost cap (sprint 4c)
+
+A per-request USD budget gates expensive prompts. Set
+`LLM_MAX_COST_PER_REQUEST_USD` (positive float) to enable; unset
+or `0.0` keeps the legacy unbounded path.
+
+Enforcement runs in two phases:
+
+1. **Pre-flight estimate** — before each call, estimate the call
+   cost from the prompt char-count (4 chars ≈ 1 token) × the
+   `pricing.toml` rate. If `cumulative + estimate > cap`, the call
+   fails with `GatewayError::CostCapExceeded` and the network
+   request is never sent.
+2. **Post-call enforcement** — after each call, the **actual**
+   cost is added to a per-`request_id` accumulator. If the
+   cumulative crosses the cap, the next call on the same
+   `request_id` will trip pre-flight even if its estimate looked
+   fine in isolation.
+
+Callers should release the accumulator when the logical operation
+finishes:
+
+```rust
+gateway.release_request(&req.request_id);
+```
+
+Otherwise the `DashMap` grows linearly with active operations. The
+worker `IngestMrHandler::handle` does this automatically.
+
+Metrics: `llm_cost_cap_exceeded_total{phase="pre_flight"|"post_call"}`
+landed in [observability](observability.md).
+
 ## Usage example
 
 ```rust

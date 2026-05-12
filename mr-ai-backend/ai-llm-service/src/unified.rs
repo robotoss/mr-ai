@@ -73,6 +73,11 @@ pub struct UnifiedRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
     pub request_id: String,
+    /// Versioned identifier of the prompt template used to produce
+    /// `messages`. Optional for back-compat; recommended on every new
+    /// call so usage telemetry can pivot by template.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<domain::PromptId>,
 }
 
 impl UnifiedRequest {
@@ -86,7 +91,15 @@ impl UnifiedRequest {
             stop: Vec::new(),
             seed: None,
             request_id: new_request_id(),
+            prompt_id: None,
         }
+    }
+
+    /// Builder: attach a [`PromptId`](domain::PromptId) so the gateway
+    /// can record it in `UsageRecord`. Chainable.
+    pub fn with_prompt_id(mut self, prompt_id: domain::PromptId) -> Self {
+        self.prompt_id = Some(prompt_id);
+        self
     }
 
     /// Creates a request with an optional system message and a user message.
@@ -104,6 +117,7 @@ impl UnifiedRequest {
             stop: Vec::new(),
             seed: None,
             request_id: new_request_id(),
+            prompt_id: None,
         }
     }
 }

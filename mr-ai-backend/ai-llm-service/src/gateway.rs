@@ -23,7 +23,7 @@ use crate::health::{HealthRole, HealthSnapshot};
 use crate::providers::{BedrockProvider, OllamaProvider, OpenAiProvider};
 use crate::traits::{EmbeddingProvider, LlmProvider};
 use crate::unified::{
-    EmbeddingRequest, EmbeddingResponse, UnifiedRequest, UnifiedResponse,
+    EmbeddingRequest, EmbeddingResponse, TokenUsage, UnifiedRequest, UnifiedResponse,
 };
 use crate::usage::{
     JsonlUsageRecorder, NoopUsageRecorder, UsageCounters, UsageKind, UsageRecord, UsageRecorder,
@@ -60,6 +60,14 @@ pub struct LlmGateway {
     record_previews: bool,
     redact_secrets: bool,
     preview_chars: usize,
+    /// Per-request USD cap (sprint 4c). `None` disables enforcement —
+    /// the gateway only tracks cumulative cost for telemetry.
+    cost_cap_usd: Option<f64>,
+    /// Cumulative USD per `request_id`. Pruned implicitly: callers
+    /// build a fresh `request_id` per logical operation, so map size
+    /// grows linearly with active requests and shrinks as workers
+    /// drop the handle.
+    cost_tracker: dashmap::DashMap<String, f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +142,13 @@ impl LlmGateway {
             "LlmGateway initialised"
         );
 
+        // Cost cap is opt-in via env. `None` keeps the legacy
+        // unbounded path; any positive value enables enforcement.
+        let cost_cap_usd = std::env::var("LLM_MAX_COST_PER_REQUEST_USD")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| *v > 0.0);
+
         Ok(Self {
             completions,
             embeddings,
@@ -146,6 +161,8 @@ impl LlmGateway {
             record_previews: cfg.usage.include_prompts,
             redact_secrets: cfg.usage.redact_secrets,
             preview_chars: cfg.usage.preview_chars,
+            cost_cap_usd,
+            cost_tracker: dashmap::DashMap::new(),
         })
     }
 
@@ -195,6 +212,96 @@ impl LlmGateway {
             record_previews: false,
             redact_secrets: true,
             preview_chars: 0,
+            cost_cap_usd: None,
+            cost_tracker: dashmap::DashMap::new(),
+        }
+    }
+
+    /// Cheap accessor for the configured per-request budget. Returns
+    /// `None` when enforcement is disabled. Mostly useful for ops
+    /// dashboards and the cost-aware tests below.
+    pub fn cost_cap_usd(&self) -> Option<f64> {
+        self.cost_cap_usd
+    }
+
+    /// Read-only view of the cumulative cost recorded for one
+    /// `request_id`. Returns `None` when no calls have landed.
+    pub fn cumulative_cost(&self, request_id: &str) -> Option<f64> {
+        self.cost_tracker.get(request_id).map(|v| *v)
+    }
+
+    /// Drop the per-request accumulator. Callers should invoke this
+    /// once the logical operation ends so the map doesn't grow
+    /// unboundedly. No-op when nothing was tracked.
+    pub fn release_request(&self, request_id: &str) {
+        self.cost_tracker.remove(request_id);
+    }
+
+    /// Enforce the per-request USD cap **before** an LLM call. The
+    /// estimate is a deliberately coarse char-count heuristic
+    /// (4 chars ≈ 1 token, OpenAI rule of thumb) — enough to reject
+    /// obvious overruns without re-implementing tokenization.
+    fn pre_flight_check(
+        &self,
+        request_id: &str,
+        char_count: usize,
+        tier_provider: ProviderKind,
+        tier_model: &str,
+    ) -> Result<(), GatewayError> {
+        let Some(cap) = self.cost_cap_usd else {
+            return Ok(());
+        };
+        let estimated_tokens = (char_count / 4) as u32;
+        let usage_estimate = TokenUsage {
+            prompt: estimated_tokens,
+            completion: 0,
+            total: estimated_tokens,
+        };
+        let est = self
+            .cost
+            .estimate(tier_provider, tier_model, usage_estimate)
+            .usd;
+        let cumulative = self.cumulative_cost(request_id).unwrap_or(0.0);
+        if cumulative + est > cap {
+            observability::counter!(
+                "llm_cost_cap_exceeded_total",
+                "phase" => "pre_flight",
+            )
+            .increment(1);
+            return Err(GatewayError::CostCapExceeded {
+                request_id: request_id.to_owned(),
+                cumulative_usd: cumulative + est,
+                cap_usd: cap,
+            });
+        }
+        Ok(())
+    }
+
+    /// Update the per-request accumulator and trip the cap if the
+    /// **actual** cost (not the estimate) crossed the budget. The
+    /// current call already happened; this only blocks the next one.
+    fn record_cost(&self, request_id: &str, usd: f64) -> Option<GatewayError> {
+        let cumulative = {
+            let mut entry = self.cost_tracker.entry(request_id.to_owned()).or_insert(0.0);
+            *entry += usd.max(0.0);
+            *entry
+        };
+        let Some(cap) = self.cost_cap_usd else {
+            return None;
+        };
+        if cumulative > cap {
+            observability::counter!(
+                "llm_cost_cap_exceeded_total",
+                "phase" => "post_call",
+            )
+            .increment(1);
+            Some(GatewayError::CostCapExceeded {
+                request_id: request_id.to_owned(),
+                cumulative_usd: cumulative,
+                cap_usd: cap,
+            })
+        } else {
+            None
         }
     }
 
@@ -211,9 +318,32 @@ impl LlmGateway {
             .ok_or(GatewayError::ProviderNotConfigured(tier))?;
 
         let request_id = req.request_id.clone();
+        let prompt_id_label = req.prompt_id.map(|p| p.label());
+        let prompt_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
+        let tier_meta = match tier {
+            ModelTier::Fast => &self.fast_meta,
+            ModelTier::Smart => &self.smart_meta,
+        };
+        // Pre-flight cost cap — char-count heuristic, never an LLM call.
+        self.pre_flight_check(&request_id, prompt_chars, tier_meta.provider, &tier_meta.model)?;
+
         let prompt_preview = self.maybe_prompt_preview(&req);
         let mut resp = provider.complete(req).await?;
         resp.cost = self.cost.estimate(resp.provider, &resp.model, resp.usage);
+
+        // Post-call accumulator. The current call already happened —
+        // the error here blocks any **next** call on the same
+        // request_id from running.
+        if let Some(err) = self.record_cost(&request_id, resp.cost.usd) {
+            // We still return the successful response so the caller
+            // sees what was produced; subsequent gateway calls will
+            // fail with the same error.
+            tracing::warn!(
+                target = "llm.cost_cap",
+                request_id = %request_id,
+                "cost cap tripped after call: {err}"
+            );
+        }
 
         info!(
             request_id = %request_id,
@@ -278,6 +408,7 @@ impl LlmGateway {
             batch_size: None,
             prompt_preview,
             response_preview,
+            prompt_id: prompt_id_label,
         });
 
         Ok(resp)
@@ -354,6 +485,7 @@ impl LlmGateway {
             batch_size: Some(batch_size),
             prompt_preview,
             response_preview: None,
+            prompt_id: None,
         });
 
         Ok(resp)
@@ -489,6 +621,8 @@ impl LlmGateway {
             record_previews: false,
             redact_secrets: true,
             preview_chars: 0,
+            cost_cap_usd: None,
+            cost_tracker: dashmap::DashMap::new(),
         }
     }
 }
@@ -580,5 +714,73 @@ fn build_embedding_provider(
         ProviderKind::Bedrock => {
             Ok(Arc::new(BedrockProvider::new(cfg)?) as Arc<dyn EmbeddingProvider>)
         }
+    }
+}
+
+#[cfg(test)]
+mod cost_cap_tests {
+    use super::*;
+
+    /// Build a tiny gateway with a known cap so we can exercise the
+    /// pre-flight + post-call paths without hitting a network. We
+    /// construct `LlmGateway` directly since the cap is the only
+    /// field that matters for these tests; provider maps are left
+    /// empty because none of these tests reach a `complete` call.
+    fn gateway_with_cap(cap_usd: Option<f64>) -> LlmGateway {
+        let meta = ProviderMeta {
+            provider: ProviderKind::Ollama,
+            model: "test".into(),
+            endpoint: "memory://x".into(),
+        };
+        LlmGateway {
+            completions: HashMap::new(),
+            embeddings: HashMap::new(),
+            cost: CostEstimator::new(PriceTable::empty()),
+            fast_meta: meta.clone(),
+            smart_meta: meta.clone(),
+            embedding_meta: meta,
+            counters: UsageCounters::new(),
+            recorder: Arc::new(crate::usage::NoopUsageRecorder),
+            record_previews: false,
+            redact_secrets: true,
+            preview_chars: 0,
+            cost_cap_usd: cap_usd,
+            cost_tracker: dashmap::DashMap::new(),
+        }
+    }
+
+    #[test]
+    fn cumulative_cost_starts_empty_and_tracks_record_cost() {
+        let g = gateway_with_cap(Some(0.01));
+        assert_eq!(g.cumulative_cost("r1"), None);
+        let _ = g.record_cost("r1", 0.002);
+        assert!((g.cumulative_cost("r1").unwrap() - 0.002).abs() < 1e-9);
+        let _ = g.record_cost("r1", 0.003);
+        assert!((g.cumulative_cost("r1").unwrap() - 0.005).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_cost_returns_cost_cap_exceeded_when_cumulative_crosses_cap() {
+        let g = gateway_with_cap(Some(0.005));
+        assert!(g.record_cost("r1", 0.003).is_none());
+        let err = g.record_cost("r1", 0.004);
+        assert!(matches!(err, Some(GatewayError::CostCapExceeded { .. })));
+    }
+
+    #[test]
+    fn record_cost_is_noop_when_cap_disabled() {
+        let g = gateway_with_cap(None);
+        let _ = g.record_cost("r1", 999.0);
+        assert!(g.cumulative_cost("r1").is_some());
+        // No error returned.
+        assert!(g.record_cost("r1", 999.0).is_none());
+    }
+
+    #[test]
+    fn release_request_drops_the_accumulator() {
+        let g = gateway_with_cap(Some(1.0));
+        let _ = g.record_cost("r1", 0.1);
+        g.release_request("r1");
+        assert!(g.cumulative_cost("r1").is_none());
     }
 }

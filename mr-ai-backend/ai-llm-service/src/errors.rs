@@ -31,6 +31,13 @@ pub enum GatewayError {
     ProviderNotConfigured(ModelTier),
     HttpTransport(reqwest::Error),
     Timeout(Duration),
+    /// Pre-flight estimate or post-call accumulator exceeded the
+    /// per-request budget. Sprint 4c (🅰).
+    CostCapExceeded {
+        request_id: String,
+        cumulative_usd: f64,
+        cap_usd: f64,
+    },
 }
 
 impl fmt::Display for GatewayError {
@@ -46,6 +53,13 @@ impl fmt::Display for GatewayError {
             }
             GatewayError::HttpTransport(e) => format!("transport error: {e}"),
             GatewayError::Timeout(d) => format!("operation timed out after {d:?}"),
+            GatewayError::CostCapExceeded {
+                request_id,
+                cumulative_usd,
+                cap_usd,
+            } => format!(
+                "cost cap exceeded: request_id={request_id} cumulative=${cumulative_usd:.6} cap=${cap_usd:.6}"
+            ),
         };
         write!(f, "{base} [LLM Gateway]")
     }
@@ -61,7 +75,8 @@ impl StdError for GatewayError {
             GatewayError::HttpTransport(e) => Some(e),
             GatewayError::UnsupportedTier(_)
             | GatewayError::ProviderNotConfigured(_)
-            | GatewayError::Timeout(_) => None,
+            | GatewayError::Timeout(_)
+            | GatewayError::CostCapExceeded { .. } => None,
         }
     }
 }

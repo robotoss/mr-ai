@@ -12,6 +12,8 @@ serde     = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tracing   = { workspace = true }
 observability = { workspace = true }
+domain = { workspace = true }
+dashmap = "6"
 tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 serde_json = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }

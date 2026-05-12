@@ -189,6 +189,7 @@ pub async fn run_pre_review_planning(
 
         let mut req = UnifiedRequest::user_only(&prompt);
         req.messages.insert(0, UnifiedMessage::system(system_msg));
+        req.prompt_id = Some(domain::PromptId::PreReview);
         let raw = gateway.complete(ModelTier::Smart, req).await?.content;
 
         debug!(

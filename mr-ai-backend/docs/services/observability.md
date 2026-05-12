@@ -232,13 +232,28 @@ returns 503 with `error: DASHBOARD_DISABLED`. See [api → routes →
 JSON shape, and [operations](../guides/observability.md#operator-dashboard)
 for the operator-side polling cadence.
 
+## LLM quality counters (sprint 4 of 🅰)
+
+The 🅰 branch piggy-backs on the same recorder for its own
+telemetry. New counters:
+
+| Name | Type | Labels | Source |
+|---|---|---|---|
+| `mr_review_hypothesis_total` | Counter | `outcome` (`attempted` for now; succeeded/refused/etc. follow) | worker `per_hypothesis_review` |
+| `llm_cost_cap_exceeded_total` | Counter | `phase` (`pre_flight` / `post_call`) | `LlmGateway` cost-cap enforcement |
+
+`UsageRecord.prompt_id` (in `usage.jsonl`) is the join column for
+A/B telemetry: pivot by `prompt_id` (`"name@version"`) to compare
+cost / latency / outcome across prompt template versions.
+
 ## Roadmap
 
 Sprint 1 (commit `3c4a33d`) shipped metrics + `/metrics`. Sprint 2
 (`3222f15`) added OTLP + tracing. Sprint 3 (`1ec6c87`) added audit.
-Sprint 4 (this commit) closes the layer with `/health/dashboard`.
-The next observability work belongs to the 🅰 (LLM quality) and 🅲
-(multi-tenant) branches.
+Sprint 4 (`b6fe055`) closed the layer with `/health/dashboard`.
+🅰 LLM Quality sprint 4a (`2d9b3c8`) wired rerank; sprint 4b
+(`76418dd`) per-hypothesis review. Remaining work belongs to the
+🅲 (multi-tenant) branch.
 
 ## Related docs
 
