@@ -315,6 +315,7 @@ pub fn build_retrieve_filter(
 /// [`search_top_k`] but applies a `Filter::must` server-side so the
 /// vector candidate pool already respects tenancy / hierarchy / file
 /// scoping. Returns `Vec<SearchHit>` with payload populated.
+#[tracing::instrument(name = "qdrant.search_top_k_with_filter", skip_all, fields(k))]
 pub async fn search_top_k_with_filter(
     client: &Qdrant,
     cfg: &RagConfig,

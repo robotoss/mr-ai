@@ -113,8 +113,56 @@ counters are `u64`. Divide by `1e6` to get dollars:
 sum by (tier, model) (rate(llm_cost_micro_usd_total[5m])) / 1e6
 ```
 
-> Sprint-1 scope: metrics + `/metrics` endpoint only. OTLP tracing,
-> audit log, and `/health/dashboard` land in subsequent commits.
+## Enabling OTLP tracing
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to a gRPC collector URL and
+`init_telemetry` adds a `tracing_opentelemetry` exporter alongside
+the existing stdout + JSON-file subscribers. Unset means OTLP stays
+disabled — no extra layer, no overhead.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://otel-collector:4317"
+export OTEL_SERVICE_NAME="mr-ai-backend"
+cargo run
+```
+
+Minimal collector example (one yaml, drop into `docker-compose`):
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+processors:
+  batch: {}
+exporters:
+  jaeger:
+    endpoint: jaeger:14250
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger]
+```
+
+Sampling defaults to head-based 100% (`OTEL_TRACES_SAMPLER=always_on`)
+so error paths are always captured. Use tail sampling on the collector
+side for production volume control.
+
+The crate adds `#[tracing::instrument]` macros on ~14 boundary
+functions — webhook handlers, route handlers, context engine entry
+points, worker stages, Qdrant search, LLM gateway calls. A single
+trace_id threads webhook → job → handler → LLM → Qdrant via W3C
+`traceparent` propagation embedded in the job payload.
+
+See the [observability service page](../services/observability.md#tracing-sprint-2)
+for the full list of instrumented functions and the propagation
+protocol.
+
+> Sprint-2 scope: metrics + tracing. Audit log and
+> `/health/dashboard` land in subsequent commits.
 
 ## Logging stack
 

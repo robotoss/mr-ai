@@ -61,6 +61,15 @@ use crate::review::prompt::LlmReviewRequest;
 ///
 /// Returns `(pre_review_plan, final_llm_request)`.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    name = "review.two_phase",
+    skip_all,
+    fields(
+        provider = ?cfg.kind,
+        mr_iid = id.iid,
+        project = %id.project,
+    ),
+)]
 pub async fn build_two_phase_review(
     project_name: &str,
     project_id: ProjectId,

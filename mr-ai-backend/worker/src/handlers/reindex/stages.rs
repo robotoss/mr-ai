@@ -125,6 +125,7 @@ impl ReindexHandler {
         })
     }
 
+    #[tracing::instrument(name = "reindex.analyze_workspace", skip_all)]
     pub(super) async fn analyze_workspace(
         &self,
         ws: &WorkspaceReady,
@@ -198,6 +199,7 @@ impl ReindexHandler {
         Ok(AnalysisResult { chunks, outcome })
     }
 
+    #[tracing::instrument(name = "reindex.persist_graph", skip_all)]
     pub(super) async fn persist_graph(
         &self,
         resolved: &RepoResolved,
@@ -240,6 +242,7 @@ impl ReindexHandler {
         Ok(())
     }
 
+    #[tracing::instrument(name = "reindex.upsert_chunks", skip_all, fields(chunks = chunks.len()))]
     pub(super) async fn upsert_chunks(
         &self,
         resolved: &RepoResolved,

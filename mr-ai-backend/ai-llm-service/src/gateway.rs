@@ -199,6 +199,7 @@ impl LlmGateway {
     }
 
     /// Routes a completion to the requested tier and emits the analytics log line.
+    #[tracing::instrument(name = "llm.complete", skip_all, fields(tier = ?tier))]
     pub async fn complete(
         &self,
         tier: ModelTier,
@@ -283,6 +284,7 @@ impl LlmGateway {
     }
 
     /// Routes an embedding request to the requested tier.
+    #[tracing::instrument(name = "llm.embed_batch", skip_all, fields(tier = ?tier, batch_size = req.inputs.len()))]
     pub async fn embed_batch(
         &self,
         tier: EmbeddingTier,

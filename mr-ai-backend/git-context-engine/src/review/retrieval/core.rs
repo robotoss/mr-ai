@@ -44,6 +44,14 @@ pub struct RetrieveCoreInput<'a> {
 ///   [`GitContextEngineError::Internal`] (config error surfaced eagerly
 ///   so callers don't get a confusing Qdrant error downstream).
 /// - Qdrant search failure → [`GitContextEngineError::Internal`].
+#[tracing::instrument(
+    name = "retrieve_core",
+    skip_all,
+    fields(
+        top_k = input.top_k,
+        min_score = input.min_score,
+    ),
+)]
 pub async fn retrieve_core(
     input: RetrieveCoreInput<'_>,
 ) -> Result<Vec<SearchHit>, GitContextEngineError> {

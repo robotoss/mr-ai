@@ -47,6 +47,15 @@ pub async fn retrieve_route(
     response
 }
 
+#[tracing::instrument(
+    name = "retrieve",
+    skip_all,
+    fields(
+        query_len = req.query.len(),
+        top_k = ?req.top_k,
+        expand = req.expand,
+    ),
+)]
 async fn retrieve_route_inner(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RetrieveRequest>,

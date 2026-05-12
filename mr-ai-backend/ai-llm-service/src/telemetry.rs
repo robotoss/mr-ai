@@ -20,5 +20,8 @@ pub fn init_tracing(cfg: &LogConfig) -> Result<TelemetryGuard, GatewayError> {
         TelemetryError::LogDir { path, source } => GatewayError::Health(HealthError::Decode(
             format!("failed to create log dir {path}: {source}"),
         )),
+        TelemetryError::Otlp(err) => GatewayError::Health(HealthError::Decode(
+            format!("OTLP exporter init failed: {err}"),
+        )),
     })
 }

@@ -227,6 +227,10 @@ async fn process_one(
         project_id = %project_id
     );
     let _enter = span.enter();
+    // Re-parent under the webhook handler's trace (when OTLP is on
+    // and the webhook injected `traceparent` into the payload). Noop
+    // when either side is unconfigured.
+    observability::set_parent_from_payload(&job.payload);
     debug!("dispatch");
 
     let Some(handler) = registry.get(&job.kind) else {

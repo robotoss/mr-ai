@@ -173,6 +173,7 @@ impl IngestMrHandler {
     ///
     /// `resolved` carries the `(project_id, repo_id)` pair that scopes
     /// RAG retrieval inside the context engine (S1 multi-tenant filter).
+    #[tracing::instrument(name = "ingest_mr.build_review", skip_all)]
     pub(super) async fn build_review(
         &self,
         ctx: &ProviderCtx,

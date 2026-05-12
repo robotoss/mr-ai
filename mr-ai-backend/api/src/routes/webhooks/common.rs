@@ -132,8 +132,12 @@ pub async fn record_and_enqueue(
             event_kind,
             job_kind,
             repo,
-            job_payload,
+            mut job_payload,
         } => {
+            // Inject the current span's W3C traceparent so the worker
+            // can attach the resulting job span to the same trace as
+            // this webhook handler. Noop when OTLP is not configured.
+            observability::inject_into_payload(&mut job_payload);
             let rec = WebhookRecord {
                 provider,
                 event_id: event_id.clone(),

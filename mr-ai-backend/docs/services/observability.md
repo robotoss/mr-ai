@@ -82,14 +82,69 @@ appender. The api binary (`src/main.rs`) binds it with
 process. **Do not let it drop early** — pending log lines will be
 silently lost.
 
+## Tracing (sprint 2)
+
+OTLP export is **opt-in**: set `OTEL_EXPORTER_OTLP_ENDPOINT` to a
+gRPC collector URL (e.g. `http://otel-collector:4317`) and
+`init_telemetry` adds a `tracing_opentelemetry` layer next to the
+existing stdout + JSON-file layers. With the env var unset the layer
+isn't installed at all — dev runs are quiet.
+
+Tunables (all env-driven, all optional):
+
+| Var | Default | Purpose |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (OTLP disabled) | gRPC endpoint of the OTel collector. |
+| `OTEL_SERVICE_NAME` | `mr-ai-backend` | `service.name` resource attribute. |
+| `OTEL_TRACES_SAMPLER` | `always_on` (head 100%) | Standard OTel env knob; tail-sample on the collector. |
+
+### Instrumented boundary points
+
+`#[tracing::instrument]` is placed at ~14 boundary functions so the
+trace tree has shape without flooding the OTel collector. Adding more
+on internal helpers is left as a follow-up if a specific debugging
+need surfaces.
+
+| Layer | Function |
+|---|---|
+| webhooks | `webhook.gitlab`, `webhook.github`, `webhook.bitbucket` |
+| http routes | `retrieve`, `trigger_mr`, `admin.reindex_repo` |
+| context engine | `review.two_phase`, `retrieve_core` |
+| worker | `reindex.handle_inner`, `reindex.analyze_workspace`, `reindex.persist_graph`, `reindex.upsert_chunks`, `ingest_mr.handle`, `ingest_mr.build_review` |
+| rag-base | `qdrant.search_top_k_with_filter` |
+| ai-llm-service | `llm.complete`, `llm.embed_batch` |
+
+### W3C trace propagation across the worker boundary
+
+The webhook handler and worker run in different tokio tasks (and in
+production may run on different machines). To stitch their spans into
+a single trace:
+
+1. Webhook handler calls
+   [`observability::inject_into_payload(&mut payload)`](../../observability/src/tracing/propagation.rs)
+   inside the transactional `record_and_enqueue` step. The global W3C
+   `TraceContextPropagator` writes `traceparent` into the job payload
+   JSON.
+2. Worker `process_one` calls `observability::set_parent_from_payload`
+   right after `span.enter()` so the new job-span becomes a child of
+   the webhook's remote context.
+
+Both helpers are **no-ops when OTLP is disabled** — the global
+propagator falls back to the default and the payload field stays
+absent.
+
+Inspect the round-trip without standing up a collector by running the
+crate's unit tests:
+
+```bash
+cargo test -p observability tracing::propagation
+```
+
 ## Roadmap
 
-Sprint 1 (this commit) ships metrics + `/metrics`. Later sprints layer
-on top of the same crate:
+Sprint 1 (commit `3c4a33d`) shipped metrics + `/metrics`. Sprint 2
+(this commit) adds OTLP + tracing instrumentation. Remaining:
 
-- **Sprint 2**: opt-in OTLP exporter (`OTEL_EXPORTER_OTLP_ENDPOINT`) +
-  `#[tracing::instrument]` boundary macros + W3C `traceparent`
-  propagation across the worker job boundary.
 - **Sprint 3**: `observability::audit::middleware` + new `audit_log`
   Postgres table + scheduled cleanup task.
 - **Sprint 4**: `/health/dashboard` aggregate snapshot consumed by ops

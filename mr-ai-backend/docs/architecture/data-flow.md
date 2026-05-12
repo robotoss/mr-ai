@@ -129,6 +129,31 @@ sequenceDiagram
 
 ## Cross-cutting concerns
 
+### Distributed trace context (sprint 2)
+
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, every `info_span!` and
+`#[tracing::instrument]`-decorated function emits an OTel span. The
+span tree threads through the webhook → worker boundary via a W3C
+`traceparent` written into the job payload:
+
+```
+webhook.gitlab  ──[ inject_into_payload ]──▶  jobs(payload.traceparent)
+                                                       │
+                                                       ▼
+                       worker.process_one ──[ set_parent_from_payload ]──▶ job-span
+                                                       │
+                                                       ▼
+                       reindex.handle_inner → analyze_workspace → persist_graph → upsert_chunks
+                                                                                       │
+                                                                                       ▼
+                                                                       qdrant.search_top_k_with_filter
+                                                                       llm.embed_batch / llm.complete
+```
+
+The propagation helpers live in
+[`observability::tracing::propagation`](../../observability/src/tracing/propagation.rs)
+and degrade to no-ops when OTLP is disabled.
+
 ### Per-request analytics
 
 Every `gateway.complete(...)` and `gateway.embed_batch(...)` call emits a

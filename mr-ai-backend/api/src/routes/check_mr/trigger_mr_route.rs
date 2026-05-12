@@ -28,9 +28,12 @@ use crate::{
 /// If the secret matches the configured `trigger_secret`, the git-context-engine
 /// will fetch the MR, run RAG + rules and post comments back via API.
 #[instrument(
-    name = "trigger__mr_route",
-    skip(state, headers, body),
-    fields(project = %state.config.project_slug)
+    name = "trigger_mr",
+    skip_all,
+    fields(
+        project = %state.config.project_slug,
+        mr_iid = body.mr_iid,
+    ),
 )]
 pub async fn trigger_mr_route(
     State(state): State<Arc<AppState>>,

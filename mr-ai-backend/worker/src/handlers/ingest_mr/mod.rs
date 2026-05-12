@@ -78,6 +78,7 @@ impl JobHandler for IngestMrHandler {
         KIND_INGEST_MR
     }
 
+    #[tracing::instrument(name = "ingest_mr.handle", skip_all)]
     async fn handle(&self, payload: Value) -> WorkerResult<()> {
         let parsed = Self::parse_payload(payload.clone())?;
         let resolved = self.resolve_repo(&parsed).await?;

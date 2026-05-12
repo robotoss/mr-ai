@@ -35,6 +35,11 @@ pub struct ReindexRepoResponse {
     pub remote_url: String,
 }
 
+#[tracing::instrument(
+    name = "admin.reindex_repo",
+    skip_all,
+    fields(remote = %req.remote_url),
+)]
 pub async fn reindex_repo_route(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReindexRepoRequest>,

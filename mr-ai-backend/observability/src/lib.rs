@@ -15,9 +15,11 @@
 
 mod init;
 pub mod metrics;
+pub mod tracing;
 
 pub use init::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
 pub use metrics::{install_prometheus_recorder, MetricsHandle};
+pub use tracing::propagation::{inject_into_payload, set_parent_from_payload};
 
 /// Re-export the upstream `metrics` macros so downstream crates can
 /// `use observability::{counter, histogram, gauge};` without each crate

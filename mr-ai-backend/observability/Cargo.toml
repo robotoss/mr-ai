@@ -13,5 +13,15 @@ thiserror = { workspace = true }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
 
+# OpenTelemetry stack (opt-in via OTEL_EXPORTER_OTLP_ENDPOINT at runtime).
+# Versions pinned together — opentelemetry, the SDK, the OTLP exporter,
+# and the `tracing` bridge must stay in lockstep or trait impls don't
+# match.
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.32"
+serde_json = { workspace = true }
+
 [dev-dependencies]
 metrics-util = "0.19"

@@ -114,6 +114,7 @@ impl ReindexHandler {
     /// Linear composition of typed stages. Each stage is independently
     /// tested in its own module; this method is the only place where
     /// stage outputs flow into the next stage's input.
+    #[tracing::instrument(name = "reindex.handle_inner", skip_all)]
     async fn handle_inner(&self, payload: Value) -> WorkerResult<()> {
         let parsed = Self::parse_payload(payload)?;
         info!(

@@ -26,6 +26,11 @@ use super::common::{
     Decision, body_hash_hex, pick_remote_url, record_and_enqueue, resolve_repo,
 };
 
+#[tracing::instrument(
+    name = "webhook.github",
+    skip_all,
+    fields(body_size = body.len()),
+)]
 pub async fn github_webhook_route(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
