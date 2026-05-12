@@ -131,6 +131,10 @@ impl JobHandler for IngestMrHandler {
         // pre-rerank order for diagnostics; the published comments and
         // any downstream consumers see the reordered version.
         Self::reorder_targets_by_rerank(&mut request, ranked_hits.as_deref());
+        // Optional review v2: per-hypothesis LLM calls with tier
+        // routing. Diagnostic only at this stage — outcomes recorded
+        // in `mr_review_hypotheses` and surfaced in the bundle.
+        let review_v2 = self.per_hypothesis_review(row.review_id, &request).await;
         let publish = self.maybe_publish(request, &provider_ctx).await;
 
         let snapshot = json!({
@@ -142,6 +146,7 @@ impl JobHandler for IngestMrHandler {
             "head_sha": parsed.head_sha,
             "request": bundle_json,
             "rerank": rerank,
+            "review_v2": review_v2,
             "publish": publish,
         });
         self.finalize(row.review_id, &snapshot, target_count).await

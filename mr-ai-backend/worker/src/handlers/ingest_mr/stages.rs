@@ -222,6 +222,124 @@ impl IngestMrHandler {
         (diagnostic, Some(hits))
     }
 
+    /// Optional per-hypothesis review (sprint 4b). One LLM call per
+    /// hypothesis in each target's `planned_anchors`. Tier routed by
+    /// priority: High/Med → Smart, Low → Fast. Strict JSON schema
+    /// validation; refusal / parse failure / timeout fall back to a
+    /// `heuristic` outcome and the row is written either way so
+    /// `mr_review_hypotheses` reflects the actual attempt count.
+    ///
+    /// Gated by `REVIEW_V2_ENABLED` (default off). Returns a summary
+    /// JSON that lands in the bundle diagnostic field.
+    pub(super) async fn per_hypothesis_review(
+        &self,
+        review_id: uuid::Uuid,
+        request: &LlmReviewRequest,
+    ) -> Value {
+        if !env_flag("REVIEW_V2_ENABLED") {
+            return Value::Null;
+        }
+        let timeout = std::time::Duration::from_secs(
+            std::env::var("REVIEW_V2_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(45),
+        );
+        let low_tier_smart = env_flag("REVIEW_V2_LOW_TIER_SMART");
+
+        let mut summary = json!({
+            "stage": "per_hypothesis_review",
+            "attempted": 0,
+            "succeeded": 0,
+            "refused": 0,
+            "json_invalid": 0,
+            "timeout": 0,
+            "heuristic": 0,
+        });
+
+        for target in &request.targets {
+            for anchor in &target.planned_anchors {
+                let priority_code = priority_to_code(&anchor.priority);
+                let tier = if priority_code == 2 && !low_tier_smart {
+                    // Low priority → Fast-tier
+                    ai_llm_service::ModelTier::Fast
+                } else {
+                    ai_llm_service::ModelTier::Smart
+                };
+                let tier_label = match tier {
+                    ai_llm_service::ModelTier::Fast => "fast",
+                    ai_llm_service::ModelTier::Smart => "smart",
+                };
+
+                let prompt = git_context_engine::review::prompt::per_hypothesis::build_per_hypothesis_prompt(
+                    &request.change,
+                    target,
+                    anchor,
+                );
+                let req = ai_llm_service::UnifiedRequest::user_only(prompt);
+                let started = std::time::Instant::now();
+                let outcome = tokio::time::timeout(
+                    timeout,
+                    self.gateway.concrete().complete(tier, req),
+                )
+                .await;
+                let elapsed_ms = started.elapsed().as_millis() as i32;
+
+                let (status, response_json, cost_usd) = classify_outcome(
+                    outcome,
+                    &anchor.hypothesis_id,
+                );
+
+                let row = persistence::repos::mr_review_hypotheses::HypothesisRow {
+                    review_id,
+                    hypothesis_id: anchor.hypothesis_id.clone(),
+                    priority: priority_code,
+                    tier_used: tier_label.to_owned(),
+                    status: status.clone(),
+                    llm_response: response_json,
+                    latency_ms: Some(elapsed_ms),
+                    cost_usd,
+                    created_at: chrono::Utc::now(),
+                };
+                if let Err(err) =
+                    persistence::repos::mr_review_hypotheses::insert(&self.pool, &row).await
+                {
+                    warn!(
+                        target = "review_v2",
+                        error = %err,
+                        review_id = %review_id,
+                        hypothesis = %row.hypothesis_id,
+                        "mr_review_hypotheses insert failed; pipeline continues"
+                    );
+                }
+
+                if let Some(counter) = summary.get_mut(status.as_str()) {
+                    if let Some(n) = counter.as_i64() {
+                        *counter = Value::from(n + 1);
+                    }
+                }
+                if let Some(attempted) = summary.get_mut("attempted") {
+                    if let Some(n) = attempted.as_i64() {
+                        *attempted = Value::from(n + 1);
+                    }
+                }
+            }
+        }
+
+        observability::counter!(
+            "mr_review_hypothesis_total",
+            "outcome" => "attempted",
+        )
+        .increment(
+            summary
+                .get("attempted")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as u64,
+        );
+
+        summary
+    }
+
     /// Reorder `request.targets` by descending rerank score. Each
     /// target's chunk_id (`"{file_path}#{hunk_index}"`) is the join
     /// key against `Vec<ScoredHit>`. Targets without a corresponding
@@ -319,12 +437,79 @@ fn map_provider_to_context(provider: ProviderKind) -> ContextProviderKind {
     map_provider(provider)
 }
 
+/// Map priority string ("High" / "Medium" / "Low") to a stable i16
+/// code (0/1/2). Unknown values fall back to 1 ("Medium").
+fn priority_to_code(priority: &str) -> i16 {
+    match priority {
+        "High" => 0,
+        "Medium" | "Med" => 1,
+        "Low" => 2,
+        _ => 1,
+    }
+}
+
+/// Classify the result of a single per-hypothesis LLM call. Returns
+/// `(status, response_json, cost_usd)`. Refusal detection runs only
+/// when the JSON parse fails so a model that returns "{ ... refused
+/// language ... }" isn't double-classified.
+fn classify_outcome(
+    outcome: Result<
+        Result<ai_llm_service::UnifiedResponse, ai_llm_service::GatewayError>,
+        tokio::time::error::Elapsed,
+    >,
+    expected_hypothesis_id: &str,
+) -> (String, Option<Value>, Option<f64>) {
+    match outcome {
+        Ok(Ok(resp)) => {
+            let cost = Some(resp.cost.usd);
+            match git_context_engine::review::prompt::per_hypothesis::validate_verdict(
+                &resp.content,
+                expected_hypothesis_id,
+            ) {
+                Ok(verdict) => {
+                    let v = serde_json::to_value(verdict).unwrap_or(Value::Null);
+                    ("succeeded".to_owned(), Some(v), cost)
+                }
+                Err(parse_err) => {
+                    if git_context_engine::review::prompt::per_hypothesis::looks_like_refusal(
+                        &resp.content,
+                    ) {
+                        (
+                            "refused".to_owned(),
+                            Some(json!({"raw": resp.content, "reason": parse_err})),
+                            cost,
+                        )
+                    } else {
+                        (
+                            "json_invalid".to_owned(),
+                            Some(json!({"raw": resp.content, "reason": parse_err})),
+                            cost,
+                        )
+                    }
+                }
+            }
+        }
+        Ok(Err(err)) => (
+            "json_invalid".to_owned(),
+            Some(json!({"gateway_error": err.to_string()})),
+            None,
+        ),
+        Err(_elapsed) => (
+            "timeout".to_owned(),
+            Some(json!({"reason": "tokio::time::timeout"})),
+            None,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use git_context_engine::review::prompt::{LlmReviewChangeMeta, LlmReviewRequest, LlmReviewTarget};
     use git_context_engine::review::retrieval::plan::{ScoredHit, SeedSource};
+    use serde_json::Value;
 
     use crate::handlers::ingest_mr::IngestMrHandler;
+    use crate::handlers::ingest_mr::stages::{classify_outcome, priority_to_code};
 
     fn target(file_path: &str, hunk_index: usize) -> LlmReviewTarget {
         LlmReviewTarget {
@@ -398,6 +583,110 @@ mod tests {
         assert_eq!(request.targets[0].file_path, "a.rs");
         assert_eq!(request.targets[1].file_path, "b.rs");
     }
+
+    #[test]
+    fn priority_to_code_maps_known_strings_and_falls_back_to_medium() {
+        assert_eq!(priority_to_code("High"), 0);
+        assert_eq!(priority_to_code("Medium"), 1);
+        assert_eq!(priority_to_code("Med"), 1);
+        assert_eq!(priority_to_code("Low"), 2);
+        assert_eq!(priority_to_code("Whatever"), 1);
+    }
+
+    #[test]
+    fn classify_outcome_timeout_yields_timeout_status() {
+        // Build a synthetic Elapsed via select! — easiest path.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let elapsed: Result<_, tokio::time::error::Elapsed> = rt.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_millis(1), async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                // unreachable; just so the closure has the right type.
+                Ok::<_, ai_llm_service::GatewayError>(
+                    ai_llm_service::UnifiedResponse {
+                        request_id: "_".into(),
+                        provider: ai_llm_service::ProviderKind::Ollama,
+                        model: "_".into(),
+                        content: "_".into(),
+                        usage: ai_llm_service::TokenUsage::default(),
+                        cost: ai_llm_service::CostEstimate { usd: 0.0 },
+                        latency_ms: 0,
+                    },
+                )
+            })
+            .await
+        });
+        let (status, _, cost) = classify_outcome(elapsed, "H1");
+        assert_eq!(status, "timeout");
+        assert!(cost.is_none());
+    }
+
+    #[test]
+    fn classify_outcome_valid_response_yields_succeeded() {
+        let resp = ai_llm_service::UnifiedResponse {
+            request_id: "r".into(),
+            provider: ai_llm_service::ProviderKind::Ollama,
+            model: "x".into(),
+            content: r#"{"hypothesis_id":"H1","verdict":"supported","comment":"ok","confidence":0.7}"#
+                .into(),
+            usage: ai_llm_service::TokenUsage::default(),
+            cost: ai_llm_service::CostEstimate { usd: 0.001 },
+            latency_ms: 12,
+        };
+        let outcome: Result<
+            Result<ai_llm_service::UnifiedResponse, ai_llm_service::GatewayError>,
+            tokio::time::error::Elapsed,
+        > = Ok(Ok(resp));
+        let (status, payload, cost) = classify_outcome(outcome, "H1");
+        assert_eq!(status, "succeeded");
+        assert!(payload.is_some());
+        assert!((cost.unwrap() - 0.001).abs() < 1e-9);
+    }
+
+    #[test]
+    fn classify_outcome_refusal_text_yields_refused() {
+        let resp = ai_llm_service::UnifiedResponse {
+            request_id: "r".into(),
+            provider: ai_llm_service::ProviderKind::Ollama,
+            model: "x".into(),
+            content: "I cannot help with that request.".into(),
+            usage: ai_llm_service::TokenUsage::default(),
+            cost: ai_llm_service::CostEstimate { usd: 0.0 },
+            latency_ms: 5,
+        };
+        let outcome: Result<
+            Result<ai_llm_service::UnifiedResponse, ai_llm_service::GatewayError>,
+            tokio::time::error::Elapsed,
+        > = Ok(Ok(resp));
+        let (status, _payload, _cost) = classify_outcome(outcome, "H1");
+        assert_eq!(status, "refused");
+    }
+
+    #[test]
+    fn classify_outcome_garbage_json_yields_json_invalid() {
+        let resp = ai_llm_service::UnifiedResponse {
+            request_id: "r".into(),
+            provider: ai_llm_service::ProviderKind::Ollama,
+            model: "x".into(),
+            content: "definitely not json".into(),
+            usage: ai_llm_service::TokenUsage::default(),
+            cost: ai_llm_service::CostEstimate { usd: 0.0 },
+            latency_ms: 5,
+        };
+        let outcome: Result<
+            Result<ai_llm_service::UnifiedResponse, ai_llm_service::GatewayError>,
+            tokio::time::error::Elapsed,
+        > = Ok(Ok(resp));
+        let (status, _payload, _cost) = classify_outcome(outcome, "H1");
+        assert_eq!(status, "json_invalid");
+    }
+
+    // Silences the "unused" warning that fires when running tests with
+    // certain feature combinations.
+    #[allow(dead_code)]
+    fn _value_marker(_: Value) {}
 
     #[test]
     fn reorder_targets_by_rerank_leaves_unranked_at_tail() {

@@ -231,6 +231,33 @@ Log line:
 INFO persistence: project group synced slug=flutter-monorepo repos=4
 ```
 
+## MR review hypotheses (sprint 4b)
+
+`mr_review_hypotheses` (migration `20260513_0014`) records per-
+hypothesis review outcomes when `REVIEW_V2_ENABLED=true`. One row per
+`(review_id, hypothesis_id)` pair so worker retries can't double-insert.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | BIGSERIAL | PK |
+| `review_id` | UUID | FK → `mr_reviews(id)` ON DELETE CASCADE |
+| `hypothesis_id` | TEXT | e.g. `H1`, `H2`. Together with `review_id` is unique. |
+| `priority` | SMALLINT | `0=High`, `1=Medium`, `2=Low` |
+| `tier_used` | TEXT | `smart` or `fast` (driven by priority) |
+| `status` | TEXT | `succeeded` / `refused` / `timeout` / `json_invalid` / `heuristic` |
+| `llm_response` | JSONB | validated payload (`HypothesisVerdict`) or stub |
+| `latency_ms` | INTEGER | wall-clock for the per-hypothesis call |
+| `cost_usd` | DOUBLE PRECISION | from `CostEstimator` for accountable analytics |
+| `created_at` | TIMESTAMPTZ | row insertion time |
+
+Indexes: `review_id`, `status` (the latter to filter by failure mode
+when investigating drift).
+
+Read/write through
+[`persistence::repos::mr_review_hypotheses`](../../persistence/src/repos/mr_review_hypotheses.rs).
+Insert is `ON CONFLICT (review_id, hypothesis_id) DO NOTHING` so worker
+retries are safe.
+
 ## Rerank cache (sprint 4a)
 
 `rerank_cache` (migration `20260513_0013`) deduplicates expensive

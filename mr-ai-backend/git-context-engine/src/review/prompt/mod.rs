@@ -17,6 +17,7 @@
 //!     changes in this MR, not comment on every tiny style nit.
 
 pub mod builder;
+pub mod per_hypothesis;
 
 use serde::{Deserialize, Serialize};
 

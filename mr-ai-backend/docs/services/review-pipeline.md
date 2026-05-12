@@ -125,9 +125,40 @@ review with LLM rerank diagnostics.
 | `GIT_API_BASE` | (required) | Provider base URL passed into both `git-context-engine` and `ai-review-engine` config. |
 | `GIT_TOKEN` | (required) | Provider auth token. Resolved via `SecretProvider`. |
 | `PROJECTS_CONFIG` | `projects.toml` | Single `[[project]]` declaration sourced at boot; its slug is forwarded into the prompt assembly path. |
-| `RAG_LLM_RERANK_ENABLED` | `false` | When `true`, run the LLM rerank diagnostic step after the bundle is built. |
+| `RAG_LLM_RERANK_ENABLED` | `false` | When `true`, run the LLM rerank diagnostic step after the bundle is built **and** reorder review targets by rerank score before publish (sprint 4a). |
 | `RAG_RERANK_TIMEOUT_SECS` | `20` | Hard timeout for the rerank LLM call. |
+| `REVIEW_V2_ENABLED` | `false` | When `true`, run one Smart/Fast-tier LLM call per hypothesis after rerank. Outcomes recorded in `mr_review_hypotheses` (sprint 4b). |
+| `REVIEW_V2_TIMEOUT_SECS` | `45` | Hard timeout per per-hypothesis call. Timeout → status `timeout`, heuristic stub. |
+| `REVIEW_V2_LOW_TIER_SMART` | `false` | When `true`, low-priority hypotheses also use Smart-tier (risk-averse deploys). Default is Fast-tier for Low. |
 | `REVIEW_PUBLISH_COMMENTS` | `false` | When `true`, run `review_merge_request` and post inline comments. |
+
+### Per-hypothesis review (sprint 4b)
+
+When `REVIEW_V2_ENABLED=true`, after rerank the worker iterates over
+every `planned_anchors` entry per target and emits **one focused LLM
+call per hypothesis**:
+
+- Tier routing: `High`/`Medium` → Smart, `Low` → Fast (override with
+  `REVIEW_V2_LOW_TIER_SMART=true`).
+- Prompt built by
+  [`git_context_engine::review::prompt::per_hypothesis::build_per_hypothesis_prompt`](../../git-context-engine/src/review/prompt/per_hypothesis.rs)
+  — single hypothesis, single file, strict JSON schema for the
+  response (`HypothesisVerdict`).
+- Outcome classifier (`classify_outcome` in worker stages):
+  - `succeeded` — JSON parse + schema validation OK.
+  - `refused` — JSON parse failed AND response matches refusal
+    phrases (`"i cannot..."`, `"as an ai..."`).
+  - `json_invalid` — JSON parse failed, no refusal language.
+  - `timeout` — `REVIEW_V2_TIMEOUT_SECS` elapsed.
+- One row per `(review_id, hypothesis_id)` lands in
+  [`mr_review_hypotheses`](persistence.md#mr-review-hypotheses-sprint-4b)
+  with `tier_used`, `status`, `latency_ms`, `cost_usd`.
+- Heuristic stub (existing pre-review hypothesis text) covers any
+  non-`succeeded` row when the publisher runs.
+
+The bundle snapshot under `mr_reviews.bundle.review_v2` records
+attempted / succeeded / refused / json_invalid / timeout / heuristic
+counters so a dashboard can flag drift.
 
 ## Failure modes
 
