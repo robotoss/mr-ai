@@ -202,14 +202,43 @@ Disk usage is well-bounded: ~200 bytes/row × ~1000 admin calls/day ×
 
 See also [operations](../guides/observability.md#audit-retention).
 
+## Dashboard (sprint 4)
+
+`GET /health/dashboard` (open route) serves a cached aggregate of the
+runtime's operational state. The cache is built by
+[`services::dashboard_monitor`](../../services/src/dashboard_monitor.rs),
+a single background task spawned in `api::start` that wakes every
+`DASHBOARD_REFRESH_SECS` (default 30) and runs four cheap queries +
+one LLM-gateway `usage_snapshot()` call. The HTTP handler reads the
+cached snapshot under a `RwLock` and returns it without touching the
+DB — sub-10ms response.
+
+| Var | Default | Effect |
+|---|---|---|
+| `DASHBOARD_REFRESH_SECS` | `30` | Interval between snapshot refreshes. |
+
+Panels:
+
+- **jobs** — `(queued|running|dead|done|failed)` × kind counts from
+  the `jobs` table.
+- **mr_reviews** — `by_status` aggregate from `mr_reviews`.
+- **llm** — `total_calls`, `total_tokens`, `total_cost_usd` from the
+  gateway's in-memory `UsageSnapshot`.
+- **worker** — `pool_size` echoed from the configured `WorkerConfig`.
+
+When persistence is disabled the monitor isn't spawned and the route
+returns 503 with `error: DASHBOARD_DISABLED`. See [api → routes →
+`/health/dashboard`](api.md#healthdashboard-response-shape) for the
+JSON shape, and [operations](../guides/observability.md#operator-dashboard)
+for the operator-side polling cadence.
+
 ## Roadmap
 
 Sprint 1 (commit `3c4a33d`) shipped metrics + `/metrics`. Sprint 2
-(commit `3222f15`) added OTLP + tracing. Sprint 3 (this commit) adds
-audit. Remaining:
-
-- **Sprint 4**: `/health/dashboard` aggregate snapshot consumed by ops
-  UIs.
+(`3222f15`) added OTLP + tracing. Sprint 3 (`1ec6c87`) added audit.
+Sprint 4 (this commit) closes the layer with `/health/dashboard`.
+The next observability work belongs to the 🅰 (LLM quality) and 🅲
+(multi-tenant) branches.
 
 ## Related docs
 

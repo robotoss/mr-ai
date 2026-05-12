@@ -38,8 +38,34 @@ Routes split into two groups by auth:
 | `POST` | `/trigger_git_mr` | `X-Admin-Token` | [`trigger_mr_route`](../../api/src/routes/check_mr/trigger_mr_route.rs) | End-to-end MR review pipeline. |
 | `POST` | `/webhooks/{gitlab,github,bitbucket}` | provider HMAC | [`webhooks/*`](../../api/src/routes/webhooks) | Inbound push / MR webhooks. |
 | `GET` | `/health/{live,ready,detailed}` | none | [`health/*`](../../api/src/routes/health) | Liveness / readiness probes. |
+| `GET` | `/health/dashboard` | none | [`health/dashboard`](../../api/src/routes/health/dashboard.rs) | Cached ops aggregate (jobs by state, MR reviews, LLM usage, worker pool). Refreshed every `DASHBOARD_REFRESH_SECS` (default 30s). 503 when persistence is disabled. |
+| `GET` | `/metrics` | none | [`metrics/metrics_route`](../../api/src/routes/metrics/metrics_route.rs) | Prometheus text exposition. Open route — network-level isolation expected (see observability service page). |
 | `GET` | `/usage` | none | [`usage_route`](../../api/src/routes/usage/usage_route.rs) | Live snapshot: total calls, tokens, USD cost, per-(tier,provider,model) breakdown. |
 | (any) | `/*` | — | `handler_404` | Fallback. |
+
+### `/health/dashboard` response shape
+
+```json
+{
+  "as_of": "2026-05-12T10:00:30Z",
+  "jobs": {
+    "queued":  {"Reindex": 5, "IngestMr": 2},
+    "running": {"Reindex": 1, "IngestMr": 1},
+    "dead":    {"IngestMr": 3},
+    "done":    {},
+    "failed":  {}
+  },
+  "mr_reviews": {
+    "by_status": {"pending": 1, "published": 142, "failed": 7}
+  },
+  "llm":    {"total_calls": 234, "total_tokens": 12345, "total_cost_usd": 0.82},
+  "worker": {"pool_size": 4}
+}
+```
+
+First poll right after boot may show `as_of=null` and zero counters
+— the monitor refreshes on a fixed interval (default 30s); the first
+refresh runs immediately so warm-up is ~one DB round-trip.
 
 ## Architecture
 

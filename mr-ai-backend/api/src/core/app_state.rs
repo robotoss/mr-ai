@@ -137,10 +137,14 @@ pub struct AppState {
     /// in tests / when the recorder couldn't be installed (e.g. second
     /// install in a single process).
     pub metrics: Option<observability::MetricsHandle>,
+    /// Cached snapshot served by `/health/dashboard`. `None` when
+    /// persistence is disabled (the monitor needs a `PgPool`).
+    pub dashboard: Option<services::dashboard_monitor::DashboardCache>,
 }
 
 impl AppState {
     /// Create state with full dependency wiring.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<AppConfig>,
         gateway: Arc<LlmGateway>,
@@ -149,6 +153,7 @@ impl AppState {
         llm_health: LlmHealthMonitor,
         rag_cfg: Arc<RagConfig>,
         metrics: Option<observability::MetricsHandle>,
+        dashboard: Option<services::dashboard_monitor::DashboardCache>,
     ) -> Self {
         Self {
             config,
@@ -158,6 +163,7 @@ impl AppState {
             llm_health,
             rag_cfg,
             metrics,
+            dashboard,
         }
     }
 }

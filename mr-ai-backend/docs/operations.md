@@ -99,7 +99,22 @@ The audit middleware **never** stores request bodies — only
 correlation metadata but no PII / credentials. Tokens are stored as a
 16-char sha256 prefix; the original `X-Admin-Token` is unrecoverable.
 
-## 7. Where to look when things break
+## 7. Operator dashboard
+
+Quick health overview without standing up Grafana:
+
+```bash
+curl -s "$API_BASE/health/dashboard" | jq .
+```
+
+Returns jobs by state × kind, MR review counts by status, LLM total
+calls / tokens / cost, and worker pool size. Refreshed every 30s by a
+background task; the response is cached so polling every second is
+free. See [observability service →
+dashboard](services/observability.md#dashboard-sprint-4) for the
+shape and tuning knobs.
+
+## 8. Where to look when things break
 
 | Symptom | Where |
 | --- | --- |

@@ -24,7 +24,8 @@ use crate::{
         },
         check_mr::trigger_mr_route::trigger_mr_route,
         health::{
-            detailed::detailed_route, live::live_route, ready::ready_route,
+            dashboard::dashboard_route, detailed::detailed_route, live::live_route,
+            ready::ready_route,
         },
         metrics::metrics_route::metrics_route,
         retrieve::retrieve_route::retrieve_route,
@@ -168,6 +169,28 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         }
     };
 
+    // Dashboard snapshotter — spawns only when persistence is on.
+    // Refresh cadence is small (30s default) so an ops UI can poll
+    // every second without pressuring the database.
+    let dashboard_refresh_secs: u64 = env::var("DASHBOARD_REFRESH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    let dashboard_cache = if let Some(pool) = db_pool.as_ref() {
+        let cache = services::dashboard_monitor::spawn_dashboard_monitor(
+            services::dashboard_monitor::DashboardMonitorInputs {
+                pool: pool.clone(),
+                gateway: gateway.clone(),
+                worker_pool_size: worker::WorkerConfig::from_env().pool_size,
+                refresh_interval: std::time::Duration::from_secs(dashboard_refresh_secs),
+            },
+        );
+        println!("{}", "✅ Dashboard monitor spawned".green());
+        Some(cache)
+    } else {
+        None
+    };
+
     // Build shared state
     let shared_state = Arc::new(AppState::new(
         config.clone(),
@@ -177,6 +200,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         llm_health_monitor,
         rag_cfg.clone(),
         metrics_handle,
+        dashboard_cache,
     ));
     println!("{}", "✅ Shared state initialized".green());
 
@@ -245,6 +269,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         .route("/health/live", get(live_route))
         .route("/health/ready", get(ready_route))
         .route("/health/detailed", get(detailed_route))
+        .route("/health/dashboard", get(dashboard_route))
         .route("/metrics", get(metrics_route))
         .route("/usage", get(usage_route))
         .fallback(handler_404)

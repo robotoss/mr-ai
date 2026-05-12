@@ -14,6 +14,7 @@
 //! Per-provider Git health (`/health/git/<provider>`) lands alongside the
 //! webhook secret-rotation hooks in S5-B.
 
+pub mod dashboard;
 pub mod detailed;
 pub mod live;
 pub mod ready;

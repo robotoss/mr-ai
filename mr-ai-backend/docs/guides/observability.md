@@ -175,6 +175,25 @@ Schema, retention, and the cleanup task knobs live on the
 [observability service page](../services/observability.md#audit-sprint-3)
 and in [operations → audit retention](../operations.md#6-audit-retention).
 
+## Operator dashboard
+
+Sprint 4 ships a cached aggregate at `GET /health/dashboard`. Open
+route, sub-10ms response, refreshes every `DASHBOARD_REFRESH_SECS`
+(default 30s). Poll it from a UI or status page without worrying about
+DB load.
+
+```bash
+curl -s :8080/health/dashboard | jq .
+```
+
+Right after boot the response is the default snapshot (`as_of=null`
++ zero counters); the first refresh fires immediately so warm-up
+takes ~one DB round-trip. When persistence is disabled the route
+returns `503 DASHBOARD_DISABLED`.
+
+Response shape, refresh model, and the env knob are documented on
+the [api routes page](../services/api.md#healthdashboard-response-shape).
+
 ## Logging stack
 
 Initialised by [`init_tracing(&LogConfig)`](../../ai-llm-service/src/telemetry.rs)

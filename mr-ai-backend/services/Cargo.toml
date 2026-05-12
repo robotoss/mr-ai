@@ -12,5 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 ai-llm-service = { path = "../ai-llm-service" }
+persistence = { workspace = true }
+sqlx = { workspace = true }
 
 anyhow = { workspace = true }
