@@ -72,6 +72,12 @@ pub async fn enqueue_in_tx(
     .execute(&mut **tx)
     .await?;
 
+    observability::counter!(
+        observability::metrics::JOBS_ENQUEUED_TOTAL,
+        "kind" => kind.to_owned()
+    )
+    .increment(1);
+
     Ok(id)
 }
 

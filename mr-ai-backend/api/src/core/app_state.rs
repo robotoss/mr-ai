@@ -133,6 +133,10 @@ pub struct AppState {
     /// `/retrieve` hot path reads it on every request, and re-reading
     /// ~14 env vars per call burns CPU + read-locks. Cache once here.
     pub rag_cfg: Arc<RagConfig>,
+    /// Prometheus exposition handle. `/metrics` renders from it. `None`
+    /// in tests / when the recorder couldn't be installed (e.g. second
+    /// install in a single process).
+    pub metrics: Option<observability::MetricsHandle>,
 }
 
 impl AppState {
@@ -144,6 +148,7 @@ impl AppState {
         db: Option<PgPool>,
         llm_health: LlmHealthMonitor,
         rag_cfg: Arc<RagConfig>,
+        metrics: Option<observability::MetricsHandle>,
     ) -> Self {
         Self {
             config,
@@ -152,6 +157,7 @@ impl AppState {
             db,
             llm_health,
             rag_cfg,
+            metrics,
         }
     }
 }

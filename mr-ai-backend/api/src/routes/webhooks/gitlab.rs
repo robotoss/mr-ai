@@ -32,6 +32,12 @@ pub async fn gitlab_webhook_route(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<impl IntoResponse> {
+    observability::counter!(
+        observability::metrics::WEBHOOK_RECEIVED_TOTAL,
+        "provider" => "gitlab",
+    )
+    .increment(1);
+
     let pool = state
         .db
         .as_ref()

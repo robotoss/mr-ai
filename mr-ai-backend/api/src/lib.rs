@@ -26,6 +26,7 @@ use crate::{
         health::{
             detailed::detailed_route, live::live_route, ready::ready_route,
         },
+        metrics::metrics_route::metrics_route,
         retrieve::retrieve_route::retrieve_route,
         usage::usage_route::usage_route,
         webhooks::{
@@ -150,6 +151,23 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
             })?,
     );
 
+    // Prometheus recorder — install once at boot. Failure to install
+    // (e.g. recorder already set in test harness) degrades to `None`
+    // so `/metrics` returns an empty body instead of poisoning startup.
+    let metrics_handle = match observability::install_prometheus_recorder() {
+        Ok(handle) => {
+            println!("{}", "✅ Prometheus recorder installed".green());
+            Some(handle)
+        }
+        Err(err) => {
+            eprintln!(
+                "{}",
+                format!("⚠️  Prometheus recorder install failed: {err}").yellow()
+            );
+            None
+        }
+    };
+
     // Build shared state
     let shared_state = Arc::new(AppState::new(
         config.clone(),
@@ -158,6 +176,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         db_pool.clone(),
         llm_health_monitor,
         rag_cfg.clone(),
+        metrics_handle,
     ));
     println!("{}", "✅ Shared state initialized".green());
 
@@ -209,6 +228,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         .route("/health/live", get(live_route))
         .route("/health/ready", get(ready_route))
         .route("/health/detailed", get(detailed_route))
+        .route("/metrics", get(metrics_route))
         .route("/usage", get(usage_route))
         .fallback(handler_404)
         .layer(middleware::from_fn(json_error_mapper))

@@ -259,6 +259,11 @@ impl IngestMrHandler {
         mr_reviews::finish(&self.pool, review_id, "published", snapshot)
             .await
             .map_err(WorkerError::Persistence)?;
+        observability::counter!(
+            observability::metrics::MR_REVIEWS_TOTAL,
+            "status" => "published",
+        )
+        .increment(1);
         info!(
             target = "worker.handler",
             %review_id,

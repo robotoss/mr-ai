@@ -322,6 +322,7 @@ pub async fn search_top_k_with_filter(
     filter: Filter,
     k: usize,
 ) -> Result<Vec<SearchHit>, RagBaseError> {
+    let started = std::time::Instant::now();
     if query_vec.len() != cfg.embedding.dim {
         return Err(RagBaseError::InvalidConfig(format!(
             "query vector length {} != EMBEDDING_DIM {}",
@@ -356,6 +357,11 @@ pub async fn search_top_k_with_filter(
         .into_iter()
         .map(map_scored_point_to_hit)
         .collect::<Vec<_>>();
+    observability::histogram!(
+        observability::metrics::QDRANT_SEARCH_LATENCY_SECONDS,
+        "op" => "search",
+    )
+    .record(started.elapsed().as_secs_f64());
     Ok(hits)
 }
 

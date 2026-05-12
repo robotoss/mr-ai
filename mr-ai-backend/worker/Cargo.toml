@@ -14,6 +14,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 domain = { workspace = true }
 persistence = { workspace = true }
+observability = { workspace = true }
 project-code-store = { path = "../project_code_store" }
 code-indexer = { path = "../code-indexer" }
 git-context-engine = { path = "../git-context-engine" }

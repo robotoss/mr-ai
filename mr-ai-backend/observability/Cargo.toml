@@ -1,0 +1,17 @@
+[package]
+name = "observability"
+version = "0.1.0"
+edition = "2024"
+license = "FSL-1.1"
+description = "Telemetry + Prometheus metrics + (later) OTLP tracing + audit middleware for mr-ai-backend."
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+thiserror = { workspace = true }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+
+[dev-dependencies]
+metrics-util = "0.19"

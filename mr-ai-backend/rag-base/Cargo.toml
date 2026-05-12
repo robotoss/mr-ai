@@ -21,6 +21,7 @@ tracing = { workspace = true }
 ai-llm-service = { path = "../ai-llm-service" }
 code-indexer = { path = "../code-indexer" }
 domain = { workspace = true }
+observability = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

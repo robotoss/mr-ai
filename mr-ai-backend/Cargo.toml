@@ -13,6 +13,7 @@ members = [
     "api",
     "code-indexer",
     "git-context-engine",
+    "observability",
     "project_code_store",
     "rag-base",
     "services",
@@ -57,3 +58,4 @@ domain = { path = "domain" }
 secrets = { path = "secrets" }
 persistence = { path = "persistence" }
 worker = { path = "worker" }
+observability = { path = "observability" }

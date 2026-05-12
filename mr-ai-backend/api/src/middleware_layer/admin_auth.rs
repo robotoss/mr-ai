@@ -94,6 +94,7 @@ mod tests {
             None,
             services::llm_health::LlmHealthMonitor::empty(),
             rag_cfg,
+            None, // metrics handle: tests don't install a global recorder
         ))
     }
 

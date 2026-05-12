@@ -31,6 +31,12 @@ pub async fn github_webhook_route(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<impl IntoResponse> {
+    observability::counter!(
+        observability::metrics::WEBHOOK_RECEIVED_TOTAL,
+        "provider" => "github",
+    )
+    .increment(1);
+
     let pool = state
         .db
         .as_ref()

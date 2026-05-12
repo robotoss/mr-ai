@@ -244,23 +244,58 @@ async fn process_one(
             cfg.max_backoff,
         )
         .await;
+        observability::counter!(
+            observability::metrics::JOBS_DONE_TOTAL,
+            "kind" => job.kind.clone(),
+            "outcome" => "dead",
+        )
+        .increment(1);
         return;
     };
 
-    match handler.handle(job.payload.clone()).await {
+    let started = std::time::Instant::now();
+    let outcome = handler.handle(job.payload.clone()).await;
+    let elapsed_secs = started.elapsed().as_secs_f64();
+
+    observability::histogram!(
+        observability::metrics::JOB_DURATION_SECONDS,
+        "kind" => job.kind.clone()
+    )
+    .record(elapsed_secs);
+
+    match outcome {
         Ok(()) => {
             if let Err(err) = jobs::complete(pool, job.id).await {
                 error!(error = %err, "complete() failed");
             } else {
                 debug!("done");
             }
+            observability::counter!(
+                observability::metrics::JOBS_DONE_TOTAL,
+                "kind" => job.kind.clone(),
+                "outcome" => "ok",
+            )
+            .increment(1);
         }
         Err(err) => {
             let backoff = compute_backoff(cfg, job.attempt);
             warn!(error = %err, retry_in_ms = backoff.num_milliseconds(), "handler failed");
+            // `attempt` is 1-indexed and `claim_next` already incremented it,
+            // so `attempt >= max_attempts` means this was the final retry.
+            let outcome_label = if job.attempt >= job.max_attempts {
+                "dead"
+            } else {
+                "fail"
+            };
             if let Err(err) = jobs::fail(pool, &job, &err.to_string(), backoff).await {
                 error!(error = %err, "fail() failed");
             }
+            observability::counter!(
+                observability::metrics::JOBS_DONE_TOTAL,
+                "kind" => job.kind.clone(),
+                "outcome" => outcome_label,
+            )
+            .increment(1);
         }
     }
 }

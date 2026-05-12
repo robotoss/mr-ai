@@ -232,11 +232,41 @@ impl LlmGateway {
         } else {
             None
         };
+        let tier_lbl = tier_label(tier).to_string();
+        let provider_lbl = resp.provider.to_string();
+        let model_lbl = resp.model.clone();
+        observability::counter!(
+            observability::metrics::LLM_CALLS_TOTAL,
+            "kind" => "completion",
+            "tier" => tier_lbl.clone(),
+            "provider" => provider_lbl.clone(),
+            "model" => model_lbl.clone(),
+        )
+        .increment(1);
+        // Cost counter tracked in micro-USD as `u64` since
+        // `metrics::Counter::increment` only accepts integers; one
+        // `1e-6 USD` cent is the natural minimum granularity for
+        // current pricing tables. Prometheus query: divide by 1_000_000.
+        let cost_micro_usd = (resp.cost.usd.max(0.0) * 1_000_000.0) as u64;
+        observability::counter!(
+            observability::metrics::LLM_COST_MICRO_USD_TOTAL,
+            "tier" => tier_lbl.clone(),
+            "provider" => provider_lbl.clone(),
+            "model" => model_lbl.clone(),
+        )
+        .increment(cost_micro_usd);
+        observability::histogram!(
+            observability::metrics::LLM_LATENCY_SECONDS,
+            "kind" => "completion",
+            "tier" => tier_lbl.clone(),
+        )
+        .record(resp.latency_ms as f64 / 1000.0);
+
         self.observe(UsageRecord {
             timestamp: Utc::now(),
             request_id: request_id.clone(),
             kind: UsageKind::Completion,
-            tier: tier_label(tier).to_string(),
+            tier: tier_lbl,
             provider: resp.provider,
             model: resp.model.clone(),
             prompt_tokens: resp.usage.prompt,
@@ -281,11 +311,37 @@ impl LlmGateway {
             "embedding ok"
         );
 
+        let tier_lbl = embedding_tier_label(tier).to_string();
+        let provider_lbl = resp.provider.to_string();
+        let model_lbl = resp.model.clone();
+        observability::counter!(
+            observability::metrics::LLM_CALLS_TOTAL,
+            "kind" => "embedding",
+            "tier" => tier_lbl.clone(),
+            "provider" => provider_lbl.clone(),
+            "model" => model_lbl.clone(),
+        )
+        .increment(1);
+        let cost_micro_usd = (resp.cost.usd.max(0.0) * 1_000_000.0) as u64;
+        observability::counter!(
+            observability::metrics::LLM_COST_MICRO_USD_TOTAL,
+            "tier" => tier_lbl.clone(),
+            "provider" => provider_lbl.clone(),
+            "model" => model_lbl.clone(),
+        )
+        .increment(cost_micro_usd);
+        observability::histogram!(
+            observability::metrics::LLM_LATENCY_SECONDS,
+            "kind" => "embedding",
+            "tier" => tier_lbl.clone(),
+        )
+        .record(resp.latency_ms as f64 / 1000.0);
+
         self.observe(UsageRecord {
             timestamp: Utc::now(),
             request_id: request_id.clone(),
             kind: UsageKind::Embedding,
-            tier: embedding_tier_label(tier).to_string(),
+            tier: tier_lbl,
             provider: resp.provider,
             model: resp.model.clone(),
             prompt_tokens: resp.usage.prompt,

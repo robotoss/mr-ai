@@ -68,6 +68,54 @@ let mr = retry_async(
 
 
 
+## Prometheus metrics
+
+`GET /metrics` (open route, no auth) returns a Prometheus text
+exposition seeded by the
+[`observability`](../services/observability.md) crate. Install once at
+boot in `api::start`; the `MetricsHandle` is stored on `AppState` so
+the handler renders the current snapshot per request.
+
+```bash
+curl -s :8080/metrics | head -20
+# HELP jobs_done_total ...
+# TYPE jobs_done_total counter
+jobs_done_total{kind="Reindex",outcome="ok"} 142
+jobs_done_total{kind="Reindex",outcome="fail"} 3
+jobs_done_total{kind="IngestMr",outcome="ok"} 11
+# HELP retrieve_latency_seconds ...
+# TYPE retrieve_latency_seconds histogram
+retrieve_latency_seconds_bucket{le="0.005"} 0
+...
+```
+
+Names + labels live in
+[`observability/src/metrics/names.rs`](../../observability/src/metrics/names.rs)
+and are documented in detail on the
+[observability service page](../services/observability.md). Cardinality
+is intentionally minimal — `project_id` / `route` / `repo_id` labels
+are deferred until multi-tenant work.
+
+Minimal Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: mr-ai-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["mr-ai-backend:8080"]
+```
+
+Cost is tracked in **micro-USD** as `llm_cost_micro_usd_total` because
+counters are `u64`. Divide by `1e6` to get dollars:
+
+```promql
+sum by (tier, model) (rate(llm_cost_micro_usd_total[5m])) / 1e6
+```
+
+> Sprint-1 scope: metrics + `/metrics` endpoint only. OTLP tracing,
+> audit log, and `/health/dashboard` land in subsequent commits.
+
 ## Logging stack
 
 Initialised by [`init_tracing(&LogConfig)`](../../ai-llm-service/src/telemetry.rs)

@@ -40,6 +40,17 @@ pub async fn retrieve_route(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RetrieveRequest>,
 ) -> Response {
+    let started = std::time::Instant::now();
+    let response = retrieve_route_inner(State(state), Json(req)).await;
+    observability::histogram!(observability::metrics::RETRIEVE_LATENCY_SECONDS)
+        .record(started.elapsed().as_secs_f64());
+    response
+}
+
+async fn retrieve_route_inner(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RetrieveRequest>,
+) -> Response {
     if req.query.trim().is_empty() {
         return bad_request("query required");
     }
@@ -270,6 +281,8 @@ pub async fn retrieve_route(
     };
 
     hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    observability::histogram!(observability::metrics::RETRIEVE_HITS).record(hits.len() as f64);
 
     (
         StatusCode::OK,
