@@ -11,6 +11,7 @@ pub mod project;
 pub mod prompt_id;
 pub mod retrieval;
 pub mod review;
+pub mod scope;
 
 pub use chunk_id::{derive_chunk_id, ChunkIdParts};
 pub use graph::{EdgeKind, GraphEdge, GraphNode, NodeKind, NodeSpan};
@@ -20,3 +21,4 @@ pub use project::{ProjectGroup, ProjectRepo, RepoDependency};
 pub use prompt_id::PromptId;
 pub use retrieval::{ChunkKind, RetrievalConfig};
 pub use review::{ReviewBundle, ReviewTargetRef};
+pub use scope::AuthorizedScope;

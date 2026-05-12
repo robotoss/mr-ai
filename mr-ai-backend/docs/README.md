@@ -45,6 +45,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `overlay` | In-memory `OverlayGraph` builder + transitive walker for MR retrieval (S7). | [overlay](services/overlay.md) |
 | `persistence` | Postgres — pool, migrations, transactions, queue mechanics, per-service responsibility. | [persistence](services/persistence.md) |
 | `observability` | Telemetry init + Prometheus metrics + (later) OTLP tracing + audit middleware. | [observability](services/observability.md) |
+| (cross-cutting) | Multi-tenant isolation — type-system perimeter + Postgres RLS + (deferred) physical isolation. | [multi-tenant](services/multi-tenant.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 

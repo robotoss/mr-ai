@@ -15,6 +15,9 @@ use tracing::{info, warn};
 pub mod graph_persist;
 pub mod projects_config;
 pub mod repos;
+pub mod tenant;
+
+pub use tenant::with_tenant;
 
 /// Embedded migrations (compiled from `migrations/` at build time).
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
