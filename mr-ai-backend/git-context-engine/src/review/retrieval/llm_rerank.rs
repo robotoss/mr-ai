@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, warn};
 
-use crate::retrieval::plan::{heuristic_rerank, RetrievalPlan, ScoredHit};
+use crate::review::retrieval::plan::{heuristic_rerank, RetrievalPlan, ScoredHit};
 
 #[derive(Debug, Error)]
 pub enum LlmRerankError {
@@ -175,7 +175,7 @@ pub async fn llm_rerank(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::retrieval::plan::{RetrievalSeed, SeedSource};
+    use crate::review::retrieval::plan::{RetrievalSeed, SeedSource};
     use domain::RetrievalConfig;
 
     fn seed(id: &str, score: f32) -> RetrievalSeed {

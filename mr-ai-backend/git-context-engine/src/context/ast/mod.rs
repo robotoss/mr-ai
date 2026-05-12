@@ -10,7 +10,7 @@ pub use types::{
 
 use tracing::debug;
 
-use crate::diff_model::ReviewTarget;
+use crate::diff::ReviewTarget;
 use crate::errors::GitContextEngineResult;
 
 /// High-level interface for building AST/RAG context for a diff target.

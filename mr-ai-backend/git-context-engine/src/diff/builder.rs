@@ -2,9 +2,9 @@
 
 use tracing::debug;
 
-use crate::diff_model::ReviewTarget;
-use crate::diff_model::render::render_hunk_as_diff;
-use crate::git_providers::types::{ChangeSet, FileChange};
+use crate::diff::ReviewTarget;
+use crate::diff::render::render_hunk_as_diff;
+use crate::providers::git_providers::types::{ChangeSet, FileChange};
 
 /// Builds a flat list of review targets from a provider-agnostic change set.
 ///

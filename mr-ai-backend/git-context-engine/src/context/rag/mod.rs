@@ -1,7 +1,7 @@
 //! RAG integration layer for diff-based review targets.
 //!
 //! Each `ReviewTarget` is turned into a semantic query and resolved via
-//! [`crate::retrieval::retrieve_core`] — the canonical retrieval entry
+//! [`crate::review::retrieval::retrieve_core`] — the canonical retrieval entry
 //! point shared with the HTTP `/retrieve` endpoint. Results land in
 //! `TargetRagContext` so the prompt builder can attach them to LLM
 //! prompts.
@@ -19,11 +19,11 @@ use rag_base::structs::rag_base_config::RagConfig;
 use rag_base::structs::rag_store::SearchHit;
 use tracing::{debug, warn};
 
-use crate::diff_model::ReviewTarget;
-use crate::pre_review::{
+use crate::diff::ReviewTarget;
+use crate::review::pre_review::{
     PreReviewHypothesis, PreReviewPlan, PreReviewTargetPlan, RequiredContextHint,
 };
-use crate::retrieval::{retrieve_core, RetrieveCoreInput};
+use crate::review::retrieval::{retrieve_core, RetrieveCoreInput};
 
 /// Rag results are kept un-thresholded inside the review pipeline so a
 /// dim/sparse query still produces *some* context. The HTTP `/retrieve`

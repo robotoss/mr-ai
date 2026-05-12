@@ -9,8 +9,8 @@
 //!   * POST /projects/:id/merge_requests/:iid/discussions
 
 use crate::errors::GitContextEngineResult;
-use crate::git_providers::types::*;
-use crate::parser::{looks_like_binary_patch, parse_unified_diff_advanced};
+use crate::providers::git_providers::types::*;
+use crate::providers::parser::{looks_like_binary_patch, parse_unified_diff_advanced};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

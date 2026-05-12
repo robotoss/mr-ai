@@ -1,7 +1,7 @@
 //! Utilities for parsing unified diffs for git-context-engine.
 
 use crate::errors::{DiffParseError, GitContextEngineResult};
-use crate::git_providers::types::{DiffHunk, DiffLine};
+use crate::providers::git_providers::types::{DiffHunk, DiffLine};
 
 /// Heuristic to detect whether a unified diff text represents a binary patch.
 ///

@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 
 use tracing::{debug, warn};
 
-use crate::diff_model::ReviewTarget;
+use crate::diff::ReviewTarget;
 use crate::errors::GitContextEngineResult;
-use crate::git_providers::types::ChangeSet;
+use crate::providers::git_providers::types::ChangeSet;
 
 // Adjust these paths to your actual `code-indexer` layout.
 use code_indexer::diff_types::{DiffAstModel, DiffFileEntry};

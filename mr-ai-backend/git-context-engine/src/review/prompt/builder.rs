@@ -14,15 +14,15 @@ use std::fmt::Write as FmtWrite;
 
 use tracing::{debug, warn};
 
-use crate::ast_context::{AstContext, AstContextProvider};
-use crate::diff_model::ReviewTarget;
+use crate::context::ast::{AstContext, AstContextProvider};
+use crate::diff::ReviewTarget;
 use crate::errors::GitContextEngineResult;
-use crate::git_providers::types::CrBundle;
-use crate::pre_review::utils::build_planned_anchors_for_target;
-use crate::pre_review::{PreReviewHypothesis, PreReviewPlan};
-use crate::prompt::{LlmPlannedAnchor, LlmReviewRequest, LlmReviewTarget};
-use crate::rag_layer::TargetRagContext;
-use crate::rules::{RuleSet, compose_rules_for_file};
+use crate::providers::git_providers::types::CrBundle;
+use crate::review::pre_review::utils::build_planned_anchors_for_target;
+use crate::review::pre_review::{PreReviewHypothesis, PreReviewPlan};
+use crate::review::prompt::{LlmPlannedAnchor, LlmReviewRequest, LlmReviewTarget};
+use crate::context::rag::TargetRagContext;
+use crate::context::rules::{RuleSet, compose_rules_for_file};
 
 /// Builds a full LLM review request from a provider bundle and review targets.
 ///

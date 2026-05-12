@@ -2,8 +2,8 @@
 
 use std::fmt::Write;
 
-use crate::diff_model::ReviewTarget;
-use crate::git_providers::types::{DiffHunk, DiffLine};
+use crate::diff::ReviewTarget;
+use crate::providers::git_providers::types::{DiffHunk, DiffLine};
 
 /// Renders a single hunk into a human-readable diff text.
 ///

@@ -22,13 +22,13 @@ use ai_llm_service::{LlmGateway, ModelTier, UnifiedRequest, UnifiedMessage};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::diff_model::ReviewTarget;
+use crate::diff::ReviewTarget;
 use crate::errors::GitContextEngineResult;
-use crate::git_providers::types::ChangeRequestId;
-use crate::git_providers::types::CrBundle;
-use crate::prompt::LlmReviewChangeMeta;
-use crate::rag_layer::TargetRagContext;
-use crate::rules::RuleSet;
+use crate::providers::git_providers::types::ChangeRequestId;
+use crate::providers::git_providers::types::CrBundle;
+use crate::review::prompt::LlmReviewChangeMeta;
+use crate::context::rag::TargetRagContext;
+use crate::context::rules::RuleSet;
 
 /// Logical planning unit for a single diff hunk.
 ///
@@ -218,7 +218,7 @@ pub async fn run_pre_review_planning(
         out_targets.push(plan);
     }
 
-    let change_meta = crate::prompt::LlmReviewChangeMeta {
+    let change_meta = crate::review::prompt::LlmReviewChangeMeta {
         provider: format!("{:?}", bundle.meta.provider),
         project: bundle.meta.id.project.clone(),
         iid: bundle.meta.id.iid,

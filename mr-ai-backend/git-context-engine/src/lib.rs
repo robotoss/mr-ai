@@ -1,16 +1,33 @@
+//! `git-context-engine`: the MR-review brain. Single-pass flow:
+//!
+//! ```text
+//!     providers  →  diff  →  context  →  review
+//!     fetch CR      hunks    AST/RAG/    pre-review +
+//!     bundle                 overlay/    prompt +
+//!                            rules       retrieve_core
+//! ```
+//!
+//! Each top-level module corresponds to one stage. Cross-module use is
+//! strictly downstream — earlier stages never depend on later ones.
+
 mod errors;
-pub mod git_providers;
 
-pub mod ast_context;
-pub mod diff_model;
-pub mod overlay;
-mod pre_review;
-pub mod prompt;
-mod rag_layer;
-pub mod retrieval;
-pub mod rules;
+pub mod context;
+pub mod diff;
+pub mod providers;
+pub mod review;
 
-mod parser; // already used by git_providers; left as-is
+// Back-compat aliases for callers that still import the legacy flat
+// names. New code should prefer the layered paths above.
+pub use crate::context::ast as ast_context;
+pub use crate::context::overlay;
+pub use crate::context::rag as rag_layer;
+pub use crate::context::rules;
+pub use crate::diff as diff_model;
+pub use crate::providers::git_providers;
+pub use crate::review::pre_review;
+pub use crate::review::prompt;
+pub use crate::review::retrieval;
 
 use std::{
     fs,
@@ -24,13 +41,14 @@ use qdrant_client::Qdrant;
 use rag_base::structs::rag_base_config::RagConfig;
 use tracing::{debug, info, warn};
 
-use crate::diff_model::build_review_targets;
+use crate::context::ast::NoopAstContextProvider;
+use crate::context::rag::build_rag_contexts_for_targets;
+use crate::context::rules::builtin::default_rule_set;
+use crate::diff::build_review_targets;
 pub use crate::errors::{GitContextEngineError, GitContextEngineResult};
-use crate::git_providers::types::{ChangeRequestId, CrBundle};
-use crate::git_providers::{ProviderClient, ProviderConfig};
-use crate::prompt::LlmReviewRequest;
-use crate::rules::builtin::default_rule_set;
-use crate::{ast_context::NoopAstContextProvider, rag_layer::build_rag_contexts_for_targets};
+use crate::providers::git_providers::types::{ChangeRequestId, CrBundle};
+use crate::providers::git_providers::{ProviderClient, ProviderConfig};
+use crate::review::prompt::LlmReviewRequest;
 
 /// Builds a two-phase review:
 /// 1. Pre-review planning with narrow RAG.
@@ -97,7 +115,7 @@ pub async fn build_two_phase_review(
     .await;
 
     // 2) pre-review plan (and his dump temp/pre_review — inside module)
-    let prereview_plan = pre_review::run_pre_review_planning(
+    let prereview_plan = crate::review::pre_review::run_pre_review_planning(
         project_name,
         &bundle,
         &targets,
@@ -109,7 +127,7 @@ pub async fn build_two_phase_review(
     .await?;
 
     // 3) Enriched RAG, with plan
-    let enriched_rag = crate::rag_layer::build_enriched_rag_contexts(
+    let enriched_rag = crate::context::rag::build_enriched_rag_contexts(
         gateway.clone(),
         &qdrant,
         &rag_cfg,
@@ -125,7 +143,7 @@ pub async fn build_two_phase_review(
     // 4) final request in LLM for review
     let ast_provider = NoopAstContextProvider;
 
-    let final_request = crate::prompt::builder::build_llm_review_request(
+    let final_request = crate::review::prompt::builder::build_llm_review_request(
         &bundle,
         &targets,
         &ast_provider,

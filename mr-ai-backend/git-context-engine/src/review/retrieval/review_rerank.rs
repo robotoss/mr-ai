@@ -14,9 +14,9 @@ use std::time::Duration;
 use ai_llm_service::LlmGateway;
 use domain::RetrievalConfig;
 
-use crate::prompt::LlmReviewRequest;
-use crate::retrieval::llm_rerank::llm_rerank;
-use crate::retrieval::plan::{
+use crate::review::prompt::LlmReviewRequest;
+use crate::review::retrieval::llm_rerank::llm_rerank;
+use crate::review::retrieval::plan::{
     heuristic_rerank, RetrievalPlan, RetrievalSeed, ScoredHit, SeedSource,
 };
 
@@ -73,7 +73,7 @@ pub async fn rerank_review_request(
     }
 }
 
-fn priority_to_score(anchors: &[crate::prompt::LlmPlannedAnchor]) -> f32 {
+fn priority_to_score(anchors: &[crate::review::prompt::LlmPlannedAnchor]) -> f32 {
     if anchors.is_empty() {
         return 0.5;
     }
@@ -95,7 +95,7 @@ fn priority_to_score(anchors: &[crate::prompt::LlmPlannedAnchor]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prompt::{LlmPlannedAnchor, LlmReviewChangeMeta, LlmReviewTarget};
+    use crate::review::prompt::{LlmPlannedAnchor, LlmReviewChangeMeta, LlmReviewTarget};
 
     fn meta() -> LlmReviewChangeMeta {
         LlmReviewChangeMeta {

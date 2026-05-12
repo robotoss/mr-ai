@@ -11,7 +11,7 @@ pub use aggregate::{aggregate_review_targets, MultiRepoBundle, RepoContribution}
 pub use builder::build_review_targets;
 pub use render::render_review_target_diff;
 
-use crate::git_providers::types::DiffHunk;
+use crate::providers::git_providers::types::DiffHunk;
 
 /// A single diff hunk that should be reviewed as an atomic unit.
 ///

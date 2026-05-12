@@ -10,7 +10,7 @@
 //! S4-A ships stages 1+2 as a thin orchestration layer that the real
 //! review handler can call directly (the rerank lives behind a trait so
 //! the worker can stub it during tests). The legacy
-//! `crate::rag_layer::build_rag_contexts_for_targets` continues to back
+//! `crate::context::rag::build_rag_contexts_for_targets` continues to back
 //! the existing `/trigger_git_mr` flow until the worker takes over.
 
 pub mod core;

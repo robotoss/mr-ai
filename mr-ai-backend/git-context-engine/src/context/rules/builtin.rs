@@ -3,7 +3,7 @@
 //! These rules are always present and then extended by markdown rules
 //! loaded from `rules/global/*.md` and `rules/<lang>/*.md`.
 
-use crate::rules::RuleSet;
+use crate::context::rules::RuleSet;
 
 /// Default review profile used when no custom profile is configured.
 pub fn default_rule_set() -> RuleSet {

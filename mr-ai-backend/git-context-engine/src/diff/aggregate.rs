@@ -9,9 +9,9 @@
 
 use tracing::debug;
 
-use crate::diff_model::builder::build_review_targets;
-use crate::diff_model::ReviewTarget;
-use crate::git_providers::types::ChangeSet;
+use crate::diff::builder::build_review_targets;
+use crate::diff::ReviewTarget;
+use crate::providers::git_providers::types::ChangeSet;
 
 /// One repository's contribution to a multi-repo review.
 #[derive(Debug, Clone)]
@@ -59,7 +59,7 @@ pub fn aggregate_review_targets(contributions: &[RepoContribution]) -> MultiRepo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git_providers::types::{DiffHunk, FileChange};
+    use crate::providers::git_providers::types::{DiffHunk, FileChange};
 
     fn change_set(file: &str, hunks: usize) -> ChangeSet {
         let mut file_change = FileChange {

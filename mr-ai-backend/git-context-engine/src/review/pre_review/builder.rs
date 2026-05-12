@@ -9,10 +9,10 @@
 
 use std::fmt::Write as FmtWrite;
 
-use crate::diff_model::ReviewTarget;
-use crate::git_providers::types::CrBundle;
-use crate::rag_layer::TargetRagContext;
-use crate::rules::RuleSet;
+use crate::diff::ReviewTarget;
+use crate::providers::git_providers::types::CrBundle;
+use crate::context::rag::TargetRagContext;
+use crate::context::rules::RuleSet;
 
 /// Builds a pre-review planning prompt for a single review target.
 ///
