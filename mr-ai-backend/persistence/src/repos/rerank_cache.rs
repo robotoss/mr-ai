@@ -8,6 +8,7 @@
 //! without a migration.
 
 use chrono::{DateTime, Utc};
+use domain::ProjectId;
 use serde_json::Value;
 use sqlx::PgPool;
 
@@ -46,21 +47,28 @@ pub async fn lookup(pool: &PgPool, cache_key: &str) -> Result<Option<CachedEntry
 /// Insert or refresh a cache row. ON CONFLICT updates `hits_json` and
 /// pushes `expires_at` forward — a second writer for the same key
 /// "wins" and keeps the cache warm.
+///
+/// `project_id` is stored explicitly (sprint C2) so the row's tenant
+/// scope is queryable for ops dashboards and visible to the RLS
+/// policy. The `cache_key` already embeds `project_id` in its hash,
+/// so the column is denormalised but stable.
 pub async fn upsert(
     pool: &PgPool,
     cache_key: &str,
+    project_id: ProjectId,
     hits_json: &Value,
     ttl_hours: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO rerank_cache (cache_key, hits_json, created_at, expires_at) \
-         VALUES ($1, $2, now(), now() + make_interval(hours => $3)) \
+        "INSERT INTO rerank_cache (cache_key, project_id, hits_json, created_at, expires_at) \
+         VALUES ($1, $2, $3, now(), now() + make_interval(hours => $4)) \
          ON CONFLICT (cache_key) DO UPDATE SET \
              hits_json = EXCLUDED.hits_json, \
              created_at = EXCLUDED.created_at, \
              expires_at = EXCLUDED.expires_at",
     )
     .bind(cache_key)
+    .bind(project_id.as_uuid())
     .bind(hits_json)
     .bind(ttl_hours)
     .execute(pool)

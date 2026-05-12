@@ -164,22 +164,35 @@ pub async fn rerank_with_cache(
     reorder_by_ranked(hits, &ranked);
 
     if let Some(pool) = pool {
-        match serde_json::to_value(&ranked) {
-            Ok(hits_json) => {
-                if let Err(err) =
-                    rerank_cache::upsert(pool, &key, &hits_json, ttl_hours).await
-                {
-                    warn!(
-                        target = "retrieve.rerank",
-                        error = %err,
-                        "rerank cache upsert failed; result still returned"
-                    );
+        // Sprint C2: rerank_cache.project_id is NOT NULL; parse the
+        // string-form project_id (simple or hyphenated) back into a
+        // typed `ProjectId`. The string was minted from a valid UUID
+        // upstream — parse failure is treated as a soft cache miss
+        // (we log + continue without persisting).
+        match uuid::Uuid::parse_str(project_id).map(domain::ProjectId::from_uuid) {
+            Ok(pid) => match serde_json::to_value(&ranked) {
+                Ok(hits_json) => {
+                    if let Err(err) =
+                        rerank_cache::upsert(pool, &key, pid, &hits_json, ttl_hours).await
+                    {
+                        warn!(
+                            target = "retrieve.rerank",
+                            error = %err,
+                            "rerank cache upsert failed; result still returned"
+                        );
+                    }
                 }
-            }
+                Err(err) => warn!(
+                    target = "retrieve.rerank",
+                    error = %err,
+                    "rerank cache serialize failed; result still returned"
+                ),
+            },
             Err(err) => warn!(
                 target = "retrieve.rerank",
                 error = %err,
-                "rerank cache serialize failed; result still returned"
+                project_id = %project_id,
+                "rerank cache: project_id string not a valid UUID; result still returned"
             ),
         }
     }

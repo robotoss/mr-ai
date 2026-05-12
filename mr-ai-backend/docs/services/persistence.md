@@ -231,6 +231,50 @@ Log line:
 INFO persistence: project group synced slug=flutter-monorepo repos=4
 ```
 
+## Row-level security (sprint C2 of 🅲)
+
+Migrations `20260513_0015_rls_enable` and `20260513_0016_rls_transitive`
+attach RLS policies to every table that carries `project_id`
+(directly or transitively). Policies compare each row to
+`current_setting('app.current_tenant', true)::uuid`; `SET LOCAL` of
+that variable is the job of
+[`persistence::with_tenant`](../../persistence/src/tenant.rs).
+
+| Table | Policy form | Notes |
+|---|---|---|
+| `projects` | direct (`id = setting`) | `id` is the project_id |
+| `project_repos` | direct (`project_id = setting`) | |
+| `jobs` | direct (`project_id = setting`) | Nullable column — system jobs (project_id NULL) are visible only without `SET LOCAL` |
+| `mr_reviews` | direct (`project_id = setting`) | NOT NULL |
+| `audit_log` | direct (`project_id = setting`) | Becomes NOT NULL in C4 |
+| `secrets_metadata` | direct (`project_id = setting`) | NULL = global secrets, invisible to tenants |
+| `rerank_cache` | direct (`project_id = setting`) | Column added in migration 0017; existing rows truncated |
+| `index_state` | transitive (`repo_id IN (SELECT id FROM project_repos WHERE ...)`) | |
+| `graph_nodes` | transitive via `repo_id` | |
+| `graph_edges` | transitive on **both** endpoints (`from_node` + `to_node` → `graph_nodes.repo_id`) | Cross-tenant edge invisible to both sides |
+| `mr_review_hypotheses` | transitive via `review_id → mr_reviews.project_id` | |
+| `project_dependencies` | transitive on both endpoints | |
+
+`webhook_events` is intentionally **not** under RLS — no `project_id`
+column, table is a global idempotency ledger.
+
+### Contract: `SET LOCAL` vs missing setting
+
+`current_setting('app.current_tenant', true)::uuid` returns NULL
+when the setting is missing. NULL doesn't compare equal to anything
+under standard policy syntax → 0 rows visible. The behaviour is
+intentional: migrations and admin tooling that need cross-tenant
+access either use a `BYPASSRLS` role (Postgres superuser bypasses by
+default) or call `persistence::with_unscoped_tx` explicitly.
+
+### Enforcement mode (`ENABLE` vs `FORCE`)
+
+C2 uses plain `ENABLE`. The table owner (the app's database role)
+bypasses RLS by default, so existing pool-based callsites keep
+working through C3 + C4 while we migrate them to `with_tenant`.
+Sprint C5 issues `ALTER TABLE ... FORCE ROW LEVEL SECURITY` once
+every callsite is on the helper.
+
 ## MR review hypotheses (sprint 4b)
 
 `mr_review_hypotheses` (migration `20260513_0014`) records per-
