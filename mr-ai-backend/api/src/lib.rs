@@ -235,6 +235,13 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     // (constant-time) against `TRIGGER_SECRET`. Webhooks have their
     // own HMAC verification, health probes stay open for k8s.
     //
+    // Layered middlewares (outer-most first; axum applies bottom-up):
+    //   admin_auth   — validates X-Admin-Token (401 on miss)
+    //   extract_tenant — resolves X-Project-Slug → AuthorizedScope
+    //                     (sprint C3; 400 on miss/unknown)
+    // 401 fires before 400 so a caller missing both headers sees the
+    // identity error first — typical security ergonomics.
+    //
     // When Postgres is available, additionally wrap every admin call
     // in the audit middleware so request_id + route + status + latency
     // + payload sha land in `audit_log`. Audit writes are spawned on
@@ -244,6 +251,10 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         .route("/admin/reindex_all", post(reindex_all_route))
         .route("/retrieve", post(retrieve_route))
         .route("/trigger_git_mr", axum::routing::post(trigger_mr_route))
+        .route_layer(middleware::from_fn_with_state(
+            shared_state.clone(),
+            crate::middleware_layer::tenant::extract_tenant,
+        ))
         .route_layer(middleware::from_fn_with_state(
             shared_state.clone(),
             crate::middleware_layer::admin_auth::admin_auth,

@@ -27,7 +27,34 @@ audited at code review:
 Grep `AuthorizedScope::from_project_id` to enumerate every trust
 point. Any new caller fails review unless it can justify itself.
 
-### 2. Postgres row-level security (sprint C2, planned)
+### Tenant transport (sprint C3)
+
+The admin router (4 routes: `/admin/reindex_repo`,
+`/admin/reindex_all`, `/retrieve`, `/trigger_git_mr`) requires the
+`X-Project-Slug` header. The
+[`extract_tenant`](../../api/src/middleware_layer/tenant.rs)
+middleware resolves slug → `ProjectId` via
+`projects::find_project_id_by_slug`, wraps it in `AuthorizedScope`,
+and places the scope into request extensions for downstream
+handlers to consume via `Extension<AuthorizedScope>`.
+
+| Failure mode | Status | Body code |
+|---|---|---|
+| Header absent / empty | 400 | `MISSING_PROJECT_SLUG` |
+| Slug not in `projects` | 400 | `UNKNOWN_PROJECT` |
+| Persistence disabled | 503 | `PERSISTENCE_DISABLED` |
+| Lookup query failed | 500 | `TENANT_LOOKUP_FAILED` |
+
+Public routes (`/health/*`, `/metrics`, `/usage`, `/webhooks/*`)
+do **not** require the header — they're either tenant-agnostic
+(health, metrics) or derive the tenant from payload via the
+webhook signature path (handled inside `webhooks::common`).
+
+`admin_auth` runs **before** `extract_tenant` in the layer stack, so
+a request missing both headers sees the 401 first. Routine
+ergonomics: identity errors before scope errors.
+
+### 2. Postgres row-level security (sprint C2)
 
 Every table with `project_id` (or with a transitive path to it via
 `repo_id` / `review_id`) gets `ENABLE ROW LEVEL SECURITY` plus a

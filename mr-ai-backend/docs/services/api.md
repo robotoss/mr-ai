@@ -43,6 +43,34 @@ Routes split into two groups by auth:
 | `GET` | `/usage` | none | [`usage_route`](../../api/src/routes/usage/usage_route.rs) | Live snapshot: total calls, tokens, USD cost, per-(tier,provider,model) breakdown. |
 | (any) | `/*` | — | `handler_404` | Fallback. |
 
+### `X-Project-Slug` requirement (sprint C3 of 🅲)
+
+Every admin-router request (`/admin/reindex_repo`,
+`/admin/reindex_all`, `/retrieve`, `/trigger_git_mr`) must carry
+the `X-Project-Slug: <slug>` header. The middleware resolves slug
+→ `ProjectId` and threads an `AuthorizedScope` into request
+extensions for downstream handlers (Sprint C4 starts consuming it).
+
+```bash
+curl -X POST :8080/retrieve \
+  -H "X-Admin-Token: $TRIGGER_SECRET" \
+  -H "X-Project-Slug: acme" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"auth middleware","top_k":5}'
+```
+
+| Failure | Status | Code |
+|---|---|---|
+| Header absent | 400 | `MISSING_PROJECT_SLUG` |
+| Slug unknown | 400 | `UNKNOWN_PROJECT` |
+| Persistence disabled | 503 | `PERSISTENCE_DISABLED` |
+
+`admin_auth` runs before `extract_tenant` — missing both headers
+sees 401 first.
+
+Webhooks, `/health/*`, `/metrics`, `/usage` do **not** require the
+header.
+
 ### `/retrieve` LLM rerank (sprint 4a)
 
 When the request body sets `"rerank": true`, the handler runs a
