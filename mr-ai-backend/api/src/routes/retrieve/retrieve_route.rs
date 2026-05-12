@@ -291,6 +291,49 @@ async fn retrieve_route_inner(
 
     hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
+    // Optional LLM rerank (sprint 4a). Cached in Postgres `rerank_cache`
+    // by a content hash of the inputs; default off so the legacy path
+    // stays free.
+    if req.rerank {
+        let rerank_top_k = req.rerank_top_k.unwrap_or(top_k).max(1);
+        // Limit the pool we hand to the LLM — `rerank_top_k * 3` is a
+        // conservative widening that lets the LLM promote otherwise-
+        // tail hits without overloading the prompt.
+        let candidate_cap = rerank_top_k.saturating_mul(3).max(rerank_top_k);
+        if hits.len() > candidate_cap {
+            hits.truncate(candidate_cap);
+        }
+        let timeout_secs = std::env::var("RAG_RERANK_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(20);
+        let ttl_hours = std::env::var("RERANK_CACHE_TTL_HOURS")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(RetrieveRequest::RERANK_CACHE_TTL_HOURS_DEFAULT);
+        let from_cache = crate::routes::retrieve::rerank::rerank_with_cache(
+            Some(pool),
+            state.gateway.clone(),
+            std::time::Duration::from_secs(timeout_secs),
+            ttl_hours,
+            &req.query,
+            &project_id_str,
+            repo_id_str.as_deref(),
+            rerank_top_k,
+            &mut hits,
+        )
+        .await;
+        if hits.len() > rerank_top_k {
+            hits.truncate(rerank_top_k);
+        }
+        tracing::debug!(
+            target = "retrieve",
+            from_cache,
+            rerank_top_k,
+            "rerank applied"
+        );
+    }
+
     observability::histogram!(observability::metrics::RETRIEVE_HITS).record(hits.len() as f64);
 
     (

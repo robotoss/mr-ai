@@ -103,7 +103,7 @@ impl JobHandler for IngestMrHandler {
             "IngestMr: review row opened"
         );
 
-        let request = match self.build_review(&provider_ctx, &resolved).await {
+        let mut request = match self.build_review(&provider_ctx, &resolved).await {
             Ok(request) => request,
             Err(err) => {
                 let msg = err.to_string();
@@ -125,7 +125,12 @@ impl JobHandler for IngestMrHandler {
         });
         let target_count = request.targets.len();
 
-        let rerank = self.maybe_rerank(&request).await;
+        let (rerank, ranked_hits) = self.maybe_rerank(&request).await;
+        // Apply rerank ordering so the publisher emits the most-likely-
+        // important hunks first. `bundle_json` above captured the
+        // pre-rerank order for diagnostics; the published comments and
+        // any downstream consumers see the reordered version.
+        Self::reorder_targets_by_rerank(&mut request, ranked_hits.as_deref());
         let publish = self.maybe_publish(request, &provider_ctx).await;
 
         let snapshot = json!({

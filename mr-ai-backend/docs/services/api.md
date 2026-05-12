@@ -43,6 +43,39 @@ Routes split into two groups by auth:
 | `GET` | `/usage` | none | [`usage_route`](../../api/src/routes/usage/usage_route.rs) | Live snapshot: total calls, tokens, USD cost, per-(tier,provider,model) breakdown. |
 | (any) | `/*` | — | `handler_404` | Fallback. |
 
+### `/retrieve` LLM rerank (sprint 4a)
+
+When the request body sets `"rerank": true`, the handler runs a
+Smart-tier LLM rerank over the merged vector + graph + overlay hit
+set before returning. The reordered hits replace the natural score
+ordering; each hit's `score` field carries the LLM's [0.0, 1.0]
+rescaled value.
+
+```json
+{
+  "query": "auth middleware",
+  "top_k": 5,
+  "rerank": true,
+  "rerank_top_k": 5
+}
+```
+
+| Field | Default | Effect |
+|---|---|---|
+| `rerank` | `false` | Opt-in per call. Off → legacy path, no LLM cost. |
+| `rerank_top_k` | `top_k` | Cap on the post-rerank result count. Up to `rerank_top_k * 3` candidates are sent to the LLM. |
+
+Caching: `(query, project_id, repo_id, rerank_top_k, sorted chunk_ids)` is hashed to a `cache_key` and persisted in
+[`rerank_cache`](persistence.md#rerank-cache-sprint-4a). Default TTL
+1h (`RERANK_CACHE_TTL_HOURS`). A hit returns instantly without an LLM
+call. Cleanup task in `api::start` prunes expired rows.
+
+Knobs:
+- `RAG_RERANK_TIMEOUT_SECS` (default 20) — hard timeout on the rerank
+  LLM call; failure transparently falls back to heuristic rerank.
+- `RERANK_CACHE_TTL_HOURS` (default 1).
+- `RERANK_CACHE_CLEANUP_INTERVAL_SECS` (default 86400).
+
 ### `/health/dashboard` response shape
 
 ```json

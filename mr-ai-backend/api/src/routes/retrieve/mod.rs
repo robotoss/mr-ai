@@ -4,6 +4,7 @@
 //! response contract are documented in
 //! [`docs/reference/retrieve-api.md`](../../../../docs/reference/retrieve-api.md).
 
+pub mod rerank;
 pub mod request;
 pub mod response;
 pub mod retrieve_route;

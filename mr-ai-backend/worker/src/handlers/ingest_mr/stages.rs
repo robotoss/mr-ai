@@ -194,13 +194,20 @@ impl IngestMrHandler {
         .map_err(|e| e.to_string())
     }
 
-    /// Optional rerank stage. Diagnostic only — recorded in the bundle
-    /// so reviewers can see how the LLM scored each hunk relative to
-    /// the others. Heuristic fallback is built into
-    /// `rerank_review_request`. Disabled by default.
-    pub(super) async fn maybe_rerank(&self, request: &LlmReviewRequest) -> Value {
+    /// Optional rerank stage. Returns:
+    /// - diagnostic JSON (for `mr_reviews.bundle.rerank`),
+    /// - typed `Vec<ScoredHit>` (when enabled) so the next stage can
+    ///   reorder `request.targets` by score before the prompt builder
+    ///   feeds them to the reviewer LLM.
+    ///
+    /// Heuristic fallback is built into `rerank_review_request`. Gated
+    /// by `RAG_LLM_RERANK_ENABLED` (default off).
+    pub(super) async fn maybe_rerank(
+        &self,
+        request: &LlmReviewRequest,
+    ) -> (Value, Option<Vec<git_context_engine::review::retrieval::plan::ScoredHit>>) {
         if !env_flag("RAG_LLM_RERANK_ENABLED") {
-            return Value::Null;
+            return (Value::Null, None);
         }
         let cfg = RetrievalConfig::from_env();
         let timeout = std::time::Duration::from_secs(
@@ -211,7 +218,37 @@ impl IngestMrHandler {
         );
         let hits =
             rerank_review_request(self.gateway.concrete(), request, cfg, timeout).await;
-        serde_json::to_value(&hits).unwrap_or(Value::Null)
+        let diagnostic = serde_json::to_value(&hits).unwrap_or(Value::Null);
+        (diagnostic, Some(hits))
+    }
+
+    /// Reorder `request.targets` by descending rerank score. Each
+    /// target's chunk_id (`"{file_path}#{hunk_index}"`) is the join
+    /// key against `Vec<ScoredHit>`. Targets without a corresponding
+    /// score keep their relative order at the tail. No-op when
+    /// `ranked` is `None` or empty (rerank disabled / failed).
+    pub(super) fn reorder_targets_by_rerank(
+        request: &mut LlmReviewRequest,
+        ranked: Option<&[git_context_engine::review::retrieval::plan::ScoredHit]>,
+    ) {
+        let Some(ranked) = ranked else {
+            return;
+        };
+        if ranked.is_empty() {
+            return;
+        }
+        let order: std::collections::HashMap<String, usize> = ranked
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h.chunk_id.clone(), i))
+            .collect();
+        request.targets.sort_by(|a, b| {
+            let key_a = format!("{}#{}", a.file_path, a.hunk_index);
+            let key_b = format!("{}#{}", b.file_path, b.hunk_index);
+            let pos_a = order.get(&key_a).copied().unwrap_or(usize::MAX);
+            let pos_b = order.get(&key_b).copied().unwrap_or(usize::MAX);
+            pos_a.cmp(&pos_b)
+        });
     }
 
     /// Optional comment-publish stage. Consumes `request`. Default-off
@@ -280,4 +317,102 @@ impl IngestMrHandler {
 /// for what is essentially a 3-arm match.
 fn map_provider_to_context(provider: ProviderKind) -> ContextProviderKind {
     map_provider(provider)
+}
+
+#[cfg(test)]
+mod tests {
+    use git_context_engine::review::prompt::{LlmReviewChangeMeta, LlmReviewRequest, LlmReviewTarget};
+    use git_context_engine::review::retrieval::plan::{ScoredHit, SeedSource};
+
+    use crate::handlers::ingest_mr::IngestMrHandler;
+
+    fn target(file_path: &str, hunk_index: usize) -> LlmReviewTarget {
+        LlmReviewTarget {
+            file_path: file_path.to_owned(),
+            hunk_index,
+            prompt_text: format!("{file_path}#{hunk_index}"),
+            planned_anchors: Vec::new(),
+        }
+    }
+
+    fn request_with(targets: Vec<LlmReviewTarget>) -> LlmReviewRequest {
+        LlmReviewRequest {
+            change: LlmReviewChangeMeta {
+                provider: "gitlab".into(),
+                project: "p".into(),
+                iid: 1,
+                title: "t".into(),
+                description: "d".into(),
+                author_name: "a".into(),
+                web_url: "https://example/mr".into(),
+                gitlab_head_sha: "h".into(),
+                gitlab_base_sha: "b".into(),
+                gitlab_start_sha: None,
+            },
+            targets,
+        }
+    }
+
+    fn ranked(chunk_id: &str, score: f32) -> ScoredHit {
+        ScoredHit {
+            chunk_id: chunk_id.into(),
+            file: chunk_id.split('#').next().unwrap_or("").into(),
+            symbol_path: format!("{chunk_id}::sym"),
+            score,
+            via: SeedSource::Vector,
+            hops: 0,
+        }
+    }
+
+    #[test]
+    fn reorder_targets_by_rerank_sorts_by_score_descending() {
+        let mut request = request_with(vec![
+            target("a.rs", 0),
+            target("b.rs", 0),
+            target("c.rs", 0),
+        ]);
+        let r = vec![
+            // LLM bumps c above b above a.
+            ranked("c.rs#0", 0.95),
+            ranked("b.rs#0", 0.80),
+            ranked("a.rs#0", 0.40),
+        ];
+        IngestMrHandler::reorder_targets_by_rerank(&mut request, Some(&r));
+        assert_eq!(request.targets[0].file_path, "c.rs");
+        assert_eq!(request.targets[1].file_path, "b.rs");
+        assert_eq!(request.targets[2].file_path, "a.rs");
+    }
+
+    #[test]
+    fn reorder_targets_by_rerank_passes_through_when_disabled() {
+        let mut request = request_with(vec![
+            target("a.rs", 0),
+            target("b.rs", 0),
+        ]);
+        IngestMrHandler::reorder_targets_by_rerank(&mut request, None);
+        assert_eq!(request.targets[0].file_path, "a.rs");
+        assert_eq!(request.targets[1].file_path, "b.rs");
+
+        // Empty ranking is also a no-op (rerank produced no results).
+        IngestMrHandler::reorder_targets_by_rerank(&mut request, Some(&[]));
+        assert_eq!(request.targets[0].file_path, "a.rs");
+        assert_eq!(request.targets[1].file_path, "b.rs");
+    }
+
+    #[test]
+    fn reorder_targets_by_rerank_leaves_unranked_at_tail() {
+        let mut request = request_with(vec![
+            target("a.rs", 0),
+            target("b.rs", 0),
+            target("c.rs", 0),
+        ]);
+        let r = vec![
+            ranked("c.rs#0", 0.95),
+            // a.rs#0 and b.rs#0 not in the ranking — should land after c.rs.
+        ];
+        IngestMrHandler::reorder_targets_by_rerank(&mut request, Some(&r));
+        assert_eq!(request.targets[0].file_path, "c.rs");
+        // a/b keep their original relative order at the tail.
+        assert!(request.targets[1].file_path == "a.rs" || request.targets[1].file_path == "b.rs");
+    }
 }

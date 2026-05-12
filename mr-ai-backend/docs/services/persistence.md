@@ -231,6 +231,29 @@ Log line:
 INFO persistence: project group synced slug=flutter-monorepo repos=4
 ```
 
+## Rerank cache (sprint 4a)
+
+`rerank_cache` (migration `20260513_0013`) deduplicates expensive
+Smart-tier LLM rerank calls hit by `/retrieve?rerank=true`. Cache key
+is sha256 of `(query + project_id + repo_id + top_k + sorted chunk_ids)`
+so two requests with the same logical input always hit the same row.
+
+| Column | Type | Notes |
+|---|---|---|
+| `cache_key` | CHAR(64) | sha256 hex, PK |
+| `hits_json` | JSONB | serialized `Vec<ScoredHit>` from the rerank call |
+| `created_at` | TIMESTAMPTZ | row insertion time |
+| `expires_at` | TIMESTAMPTZ | `created_at + RERANK_CACHE_TTL_HOURS` (default 1h) |
+
+Indexes: `expires_at` for the cleanup task.
+
+Read/write through [`persistence::repos::rerank_cache`](../../persistence/src/repos/rerank_cache.rs).
+The api's `/retrieve` handler calls `lookup` before invoking the LLM
+and `upsert` after — a cache miss costs one Smart-tier call;
+subsequent hits within TTL return without LLM traffic. Cleanup task
+spawned in `api::start` runs every `RERANK_CACHE_CLEANUP_INTERVAL_SECS`
+(default 24h) and removes rows where `expires_at < now()`.
+
 ## Audit log (sprint 3)
 
 `audit_log` (migration `20260512_0012`) records every request that hits

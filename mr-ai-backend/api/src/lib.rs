@@ -258,7 +258,11 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
             observability::audit_layer,
         ));
         spawn_audit_cleanup(pool.clone());
-        println!("{}", "✅ Audit middleware + cleanup task wired".green());
+        spawn_rerank_cache_cleanup(pool.clone());
+        println!(
+            "{}",
+            "✅ Audit middleware + cleanup task + rerank_cache cleanup wired".green()
+        );
     }
 
     let app = Router::new()
@@ -373,6 +377,43 @@ fn spawn_audit_cleanup(pool: sqlx::PgPool) {
                     target = "audit.cleanup",
                     error = %err,
                     "audit_log: cleanup query failed; will retry next tick"
+                ),
+            }
+        }
+    });
+}
+
+/// Background task that prunes expired `rerank_cache` rows. Same
+/// shape as `spawn_audit_cleanup`: 5-minute boot delay, then every
+/// `RERANK_CACHE_CLEANUP_INTERVAL_SECS` (default 24h). Cache rows
+/// already carry `expires_at`; the cleanup just deletes those past
+/// `now()`. Errors logged, never crash the task.
+fn spawn_rerank_cache_cleanup(pool: sqlx::PgPool) {
+    let interval_secs: u64 = env::var("RERANK_CACHE_CLEANUP_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24 * 60 * 60);
+    const BOOT_DELAY_SECS: u64 = 5 * 60;
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(BOOT_DELAY_SECS)).await;
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        loop {
+            ticker.tick().await;
+            let cutoff = chrono::Utc::now();
+            match persistence::repos::rerank_cache::delete_expired(&pool, cutoff).await {
+                Ok(n) if n > 0 => tracing::info!(
+                    target = "rerank_cache.cleanup",
+                    deleted = n,
+                    "rerank_cache: pruned expired rows"
+                ),
+                Ok(_) => tracing::debug!(
+                    target = "rerank_cache.cleanup",
+                    "rerank_cache: nothing to prune"
+                ),
+                Err(err) => tracing::warn!(
+                    target = "rerank_cache.cleanup",
+                    error = %err,
+                    "rerank_cache: cleanup query failed; will retry next tick"
                 ),
             }
         }

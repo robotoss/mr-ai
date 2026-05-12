@@ -59,6 +59,21 @@ pub struct RetrieveRequest {
     /// expansion and overlay merge.
     #[serde(default)]
     pub min_score: Option<f32>,
+
+    /// When `true`, run LLM rerank (Smart-tier) on the merged hit set
+    /// before returning. Reordered hits replace the natural vector +
+    /// graph + overlay ordering. Cached in Postgres `rerank_cache` by
+    /// a content hash of (query + project_id + repo_id + top_k +
+    /// chunk_id set). Default `false` — opt-in per call.
+    #[serde(default)]
+    pub rerank: bool,
+
+    /// Cap on hits returned after rerank. Defaults to `top_k` when
+    /// unset. The rerank step considers up to `rerank_top_k * 3`
+    /// candidates from the merged hit pool so the LLM can promote
+    /// otherwise-tail hits.
+    #[serde(default)]
+    pub rerank_top_k: Option<usize>,
 }
 
 fn default_expand() -> bool {
@@ -70,4 +85,6 @@ impl RetrieveRequest {
     pub const DEFAULT_MAX_HOPS: usize = 1;
     pub const MAX_HOPS_CEILING: usize = 3;
     pub const DEFAULT_MIN_SCORE: f32 = 0.0;
+    /// Default TTL for rerank_cache rows when no env override.
+    pub const RERANK_CACHE_TTL_HOURS_DEFAULT: i64 = 1;
 }
