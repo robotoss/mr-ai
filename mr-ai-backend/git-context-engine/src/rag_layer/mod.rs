@@ -1,18 +1,35 @@
 //! RAG integration layer for diff-based review targets.
 //!
-//! This module takes `ReviewTarget`s, builds text queries from their
-//! diff previews and queries the rag-base vector index (`search_code`).
-//! The result can then be attached to LLM prompts for MR review.
+//! Each `ReviewTarget` is turned into a semantic query and resolved via
+//! [`crate::retrieval::retrieve_core`] — the canonical retrieval entry
+//! point shared with the HTTP `/retrieve` endpoint. Results land in
+//! `TargetRagContext` so the prompt builder can attach them to LLM
+//! prompts.
+//!
+//! Filtering is tenancy-aware: every call is scoped by `project_id` and,
+//! when available, `repo_id` so cross-tenant payloads can't leak into a
+//! review.
 
 use std::sync::Arc;
 
-use crate::{
-    diff_model::ReviewTarget,
-    pre_review::{PreReviewHypothesis, PreReviewPlan, PreReviewTargetPlan, RequiredContextHint},
-};
 use ai_llm_service::LlmGateway;
-use rag_base::{CodeSearchResult, search_code};
+use domain::{ProjectId, RepoId};
+use qdrant_client::Qdrant;
+use rag_base::structs::rag_base_config::RagConfig;
+use rag_base::structs::rag_store::SearchHit;
 use tracing::{debug, warn};
+
+use crate::diff_model::ReviewTarget;
+use crate::pre_review::{
+    PreReviewHypothesis, PreReviewPlan, PreReviewTargetPlan, RequiredContextHint,
+};
+use crate::retrieval::{retrieve_core, RetrieveCoreInput};
+
+/// Rag results are kept un-thresholded inside the review pipeline so a
+/// dim/sparse query still produces *some* context. The HTTP `/retrieve`
+/// route applies its own `min_score`; here we leave the call to the
+/// caller (prompt builder may decide to drop low-score hits later).
+const REVIEW_MIN_SCORE: f32 = 0.0;
 
 /// RAG context for a single review target (one diff hunk).
 #[derive(Debug, Clone)]
@@ -22,7 +39,7 @@ pub struct TargetRagContext {
     /// Zero-based hunk index inside the file.
     pub hunk_index: usize,
     /// General code search results (semantic matches from the vector index).
-    pub general_results: Vec<CodeSearchResult>,
+    pub general_results: Vec<SearchHit>,
     /// Additional focused results driven by pre-review hypotheses.
     pub focused: Vec<FocusedRagBlock>,
 }
@@ -43,21 +60,25 @@ pub struct FocusedRagBlock {
     /// Optional suggested file patterns from `required_context`.
     pub suggested_files: Vec<String>,
     /// Search results for this specific context request.
-    pub results: Vec<CodeSearchResult>,
+    pub results: Vec<SearchHit>,
 }
 
 /// Build general RAG contexts for a set of review targets.
 ///
-/// - `project_name` is the index name used by rag-base.
+/// - `project_id` / `repo_id` scope the search via Qdrant payload filters
+///   (`project_id` is required; `repo_id` narrows further when known).
 /// - `targets` are the diff hunks to enrich.
-/// - `k` is the maximum number of results per hunk.
+/// - `k` is the maximum number of results per hunk (default 8).
 ///
-/// This function is best-effort: on rag-base errors it logs a warning
+/// This function is best-effort: on retrieve errors it logs a warning
 /// and returns empty `general_results` for that target so the review
 /// pipeline can continue.
 pub async fn build_rag_contexts_for_targets(
     gateway: Arc<LlmGateway>,
-    project_name: &str,
+    qdrant: &Qdrant,
+    rag_cfg: &RagConfig,
+    project_id: ProjectId,
+    repo_id: Option<RepoId>,
     targets: &[ReviewTarget],
     k: Option<usize>,
 ) -> Vec<TargetRagContext> {
@@ -68,17 +89,29 @@ pub async fn build_rag_contexts_for_targets(
         // 1) Build a text query from the diff hunk.
         let query = build_query_from_review_target(target);
 
-        // 2) Query rag-base for semantically similar code.
-        let results = match search_code(gateway.clone(), project_name, &query, Some(k)).await {
+        // 2) Query the canonical retrieve_core for semantically similar
+        //    code, filtered by tenancy.
+        let results = match retrieve_core(RetrieveCoreInput {
+            gateway: gateway.clone(),
+            qdrant,
+            rag_cfg,
+            project_id,
+            repo_id,
+            query,
+            top_k: k,
+            min_score: REVIEW_MIN_SCORE,
+            chunk_kinds: None,
+        })
+        .await
+        {
             Ok(results) => results,
             Err(err) => {
                 // Do not fail the whole pipeline; log and continue.
                 warn!(
-                    project = %project_name,
                     file = %target.file_path,
                     hunk = target.hunk_index,
                     error = %err,
-                    "rag_layer: general search_code failed for target",
+                    "rag_layer: general retrieve_core failed for target",
                 );
                 Vec::new()
             }
@@ -120,7 +153,10 @@ fn build_query_from_review_target(target: &ReviewTarget) -> String {
 /// `focus_k` – max number of focused results per required_context.
 pub async fn build_enriched_rag_contexts(
     gateway: Arc<LlmGateway>,
-    project_name: &str,
+    qdrant: &Qdrant,
+    rag_cfg: &RagConfig,
+    project_id: ProjectId,
+    repo_id: Option<RepoId>,
     targets: &[ReviewTarget],
     prereview_plan: &PreReviewPlan,
     base_k: Option<usize>,
@@ -130,8 +166,16 @@ pub async fn build_enriched_rag_contexts(
     let focus_k = focus_k.unwrap_or(3);
 
     // 1) Build general RAG contexts first (same as before).
-    let mut contexts =
-        build_rag_contexts_for_targets(gateway.clone(), project_name, targets, Some(base_k)).await;
+    let mut contexts = build_rag_contexts_for_targets(
+        gateway.clone(),
+        qdrant,
+        rag_cfg,
+        project_id,
+        repo_id,
+        targets,
+        Some(base_k),
+    )
+    .await;
 
     // Helper to find a per-target plan by (file_path, hunk_index).
     fn find_plan_for_target<'a>(
@@ -164,23 +208,27 @@ pub async fn build_enriched_rag_contexts(
             for rc in &hyp.required_context {
                 let composed_query = build_query_for_required_context(&ctx.file_path, hyp, rc);
 
-                let results = match search_code(
-                    gateway.clone(),
-                    project_name,
-                    &composed_query,
-                    Some(focus_k),
-                )
+                let results = match retrieve_core(RetrieveCoreInput {
+                    gateway: gateway.clone(),
+                    qdrant,
+                    rag_cfg,
+                    project_id,
+                    repo_id,
+                    query: composed_query,
+                    top_k: focus_k,
+                    min_score: REVIEW_MIN_SCORE,
+                    chunk_kinds: None,
+                })
                 .await
                 {
                     Ok(r) => r,
                     Err(err) => {
                         warn!(
-                            project = %project_name,
                             file = %ctx.file_path,
                             hunk_index = ctx.hunk_index,
                             hypothesis_id = %hyp.id,
                             error = %err,
-                            "rag_layer: focused search_code failed for required_context",
+                            "rag_layer: focused retrieve_core failed for required_context",
                         );
                         Vec::new()
                     }
@@ -218,9 +266,6 @@ pub async fn build_enriched_rag_contexts(
 /// - hypothesis title as an additional semantic hint,
 /// - current file path,
 /// - tags from `required_context`.
-///
-/// If you later introduce a custom search DSL (e.g. `code:foo file:bar`),
-/// you can adjust this function accordingly.
 fn build_query_for_required_context(
     file_path: &str,
     hyp: &PreReviewHypothesis,
@@ -228,20 +273,13 @@ fn build_query_for_required_context(
 ) -> String {
     let mut parts = Vec::new();
 
-    // 1) Base query from the model.
     if !rc.query.trim().is_empty() {
         parts.push(rc.query.trim().to_string());
     }
-
-    // 2) Hypothesis title as a semantic hint.
     if !hyp.title.trim().is_empty() {
         parts.push(hyp.title.trim().to_string());
     }
-
-    // 3) File path helps bias search toward this part of the codebase.
     parts.push(file_path.to_string());
-
-    // 4) Tags from required_context.
     if !rc.tags.is_empty() {
         parts.push(rc.tags.join(" "));
     }

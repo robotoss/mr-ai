@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::embedding::embed_texts;
 use crate::errors::rag_base_error::RagBaseError;
-use crate::jsonl_reader::{ChunkScope, chunk_to_triple};
+use crate::chunk_mapping::{ChunkScope, chunk_to_triple};
 use crate::structs::rag_base_config::RagConfig;
 use crate::structs::rag_store::{UpsertReport, VectorPayload};
 use crate::vector_db::{

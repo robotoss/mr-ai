@@ -1,8 +1,6 @@
 //! Configuration layer: reads runtime settings from environment variables
 //! and exposes strongly typed configs for embeddings, Qdrant, and search.
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use crate::errors::rag_base_error::RagBaseError;
@@ -132,10 +130,9 @@ impl Default for ChunkClampConfig {
 /// Top-level runtime configuration for the RAG module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RagConfig {
-    /// Logical project name (used to resolve default input path).
+    /// Logical project name (used in logs only since S5 multi-tenancy
+    /// moved real scoping onto Qdrant payload filters).
     pub project_name: String,
-    /// Input JSONL with CodeChunks (one JSON object per line).
-    pub code_jsonl: PathBuf,
     /// Embeddings backend configuration.
     pub embedding: EmbeddingConfig,
     /// Qdrant connectivity & collection settings.
@@ -165,21 +162,16 @@ impl RagConfig {
     /// - `CLAMP_PREVIEW_MAX_LINES` (default: 50)
     /// - `CLAMP_EMBED_MAX_LINES` (default: 80)
     /// - `CHUNK_MIN_CHARS` (default: 16)
-    /// - `INDEX_JSONL_PATH` (default: `code_data/out/<project>/code_chunks.jsonl`)
     ///
     /// The embedding **model** and **endpoint** are owned by the LLM Gateway
     /// (`ai-llm-service`) — they are not read here. `project_name` is the
-    /// single-project slug captured at boot from `projects.toml`
-    /// (S5 invariant); callers that do not need a JSONL path may pass
-    /// `None` and accept the placeholder "default".
+    /// single-project slug captured at boot from `projects.toml`; callers
+    /// that do not have one may pass `None` and accept the placeholder
+    /// "default".
     pub fn from_env(project_name: Option<&str>) -> Result<Self, RagBaseError> {
         let name = project_name
             .map(|s| s.to_string())
             .unwrap_or_else(|| "default".to_string());
-
-        let code_jsonl = std::env::var("INDEX_JSONL_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(format!("code_data/out/{name}/code_chunks.jsonl")));
 
         // Embedding — only `dim` is consumed locally (used to validate
         // vectors returned by the gateway and to size the Qdrant collection).
@@ -240,7 +232,6 @@ impl RagConfig {
 
         Ok(Self {
             project_name: name,
-            code_jsonl,
             embedding,
             qdrant,
             search,

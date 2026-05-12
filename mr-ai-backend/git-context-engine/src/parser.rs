@@ -1,6 +1,6 @@
 //! Utilities for parsing unified diffs for git-context-engine.
 
-use crate::errors::{GitContextEngineDiffParseError, GitContextEngineResult};
+use crate::errors::{DiffParseError, GitContextEngineResult};
 use crate::git_providers::types::{DiffHunk, DiffLine};
 
 /// Heuristic to detect whether a unified diff text represents a binary patch.
@@ -151,15 +151,15 @@ fn parse_hunk_header(rest: &str) -> GitContextEngineResult<HunkHeader> {
     // find "-a,b" and "+c,d"
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() < 2 {
-        return Err(GitContextEngineDiffParseError::InvalidHunkHeader(s.to_string()).into());
+        return Err(DiffParseError::InvalidHunkHeader(s.to_string()).into());
     }
 
     let old_part = parts[0]
         .strip_prefix('-')
-        .ok_or_else(|| GitContextEngineDiffParseError::InvalidHunkHeader(s.to_string()))?;
+        .ok_or_else(|| DiffParseError::InvalidHunkHeader(s.to_string()))?;
     let new_part = parts[1]
         .strip_prefix('+')
-        .ok_or_else(|| GitContextEngineDiffParseError::InvalidHunkHeader(s.to_string()))?;
+        .ok_or_else(|| DiffParseError::InvalidHunkHeader(s.to_string()))?;
 
     let (old_start, old_lines) = split_range(old_part)?;
     let (new_start, new_lines) = split_range(new_part)?;
@@ -176,15 +176,15 @@ fn split_range(s: &str) -> GitContextEngineResult<(u32, u32)> {
     let mut it = s.split(',');
     let start = it
         .next()
-        .ok_or_else(|| GitContextEngineDiffParseError::InvalidHunkHeader(s.to_string()))?;
+        .ok_or_else(|| DiffParseError::InvalidHunkHeader(s.to_string()))?;
     let len = it.next().unwrap_or("0"); // len may be omitted; treat as 0
 
     let start: u32 = start
         .parse()
-        .map_err(|_| GitContextEngineDiffParseError::InvalidHunkHeader(s.to_string()))?;
+        .map_err(|_| DiffParseError::InvalidHunkHeader(s.to_string()))?;
     let len: u32 = len
         .parse()
-        .map_err(|_| GitContextEngineDiffParseError::InvalidHunkHeader(s.to_string()))?;
+        .map_err(|_| DiffParseError::InvalidHunkHeader(s.to_string()))?;
 
     Ok((start, len))
 }

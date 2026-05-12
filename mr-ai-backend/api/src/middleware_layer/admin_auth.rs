@@ -77,7 +77,6 @@ mod tests {
         });
         let rag_cfg = Arc::new(rag_base::structs::rag_base_config::RagConfig {
             project_name: "test".into(),
-            code_jsonl: PathBuf::from("/tmp/unused"),
             qdrant: rag_base::structs::rag_base_config::QdrantConfig {
                 url: "http://localhost:6334".into(),
                 collection: "test".into(),

@@ -87,7 +87,6 @@ fn build_state(
     });
     let rag_cfg = Arc::new(rag_base::structs::rag_base_config::RagConfig {
         project_name: "smoke".into(),
-        code_jsonl: std::path::PathBuf::from("/tmp/unused.jsonl"),
         qdrant: rag_base::structs::rag_base_config::QdrantConfig {
             url: "http://localhost:6334".into(),
             collection: "smoke".into(),

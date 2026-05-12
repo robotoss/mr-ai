@@ -89,10 +89,56 @@ pub async fn trigger_mr_route(
     );
 
     // --- Run review pipeline ----------------------------------------------------
+    // Resolve (project_id, primary_repo_id) for tenant-scoped RAG. The
+    // manual trigger predates the multi-tenant filter, so we look up the
+    // single project's primary repo from the DB. If persistence is off
+    // we can't run the review — fail loudly instead of bypassing the
+    // tenant filter silently.
+    let Some(pool) = state.db.as_ref() else {
+        let resp: ApiResponse<()> = ApiResponse::error(
+            "PERSISTENCE_DISABLED",
+            "Postgres pool is required for /trigger_git_mr".to_string(),
+            Vec::new(),
+        );
+        return resp.into_response_with_status(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let repos = match persistence::repos::projects::list_repos_for_project(
+        pool,
+        state.config.default_project_id,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            let resp: ApiResponse<()> =
+                ApiResponse::error("REPO_LOOKUP_FAILED", err.to_string(), Vec::new());
+            return resp.into_response_with_status(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let Some(primary_repo) = repos.iter().find(|r| r.is_primary).or_else(|| repos.first())
+    else {
+        let resp: ApiResponse<()> = ApiResponse::error(
+            "NO_REPO_FOR_PROJECT",
+            "no repo configured for default project".to_string(),
+            Vec::new(),
+        );
+        return resp.into_response_with_status(StatusCode::BAD_REQUEST);
+    };
+    let qdrant_client = match rag_base::vector_db::connect(state.rag_cfg.as_ref()).await {
+        Ok(c) => Arc::new(c),
+        Err(err) => {
+            let resp: ApiResponse<()> =
+                ApiResponse::error("QDRANT_CONNECT_FAILED", err.to_string(), Vec::new());
+            return resp.into_response_with_status(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
 
-    // let result = get_ai_request_data(&state.config.project_slug, cfg, id).await;
     let result = build_two_phase_review(
         &state.config.project_slug,
+        state.config.default_project_id,
+        primary_repo.id,
+        qdrant_client,
+        state.rag_cfg.clone(),
         cfg,
         id,
         state.gateway.clone(),

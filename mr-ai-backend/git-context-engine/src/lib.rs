@@ -19,106 +19,36 @@ use std::{
 };
 
 use ai_llm_service::LlmGateway;
+use domain::{ProjectId, RepoId};
+use qdrant_client::Qdrant;
+use rag_base::structs::rag_base_config::RagConfig;
 use tracing::{debug, info, warn};
 
 use crate::diff_model::build_review_targets;
-use crate::errors::GitContextEngineResult;
+pub use crate::errors::{GitContextEngineError, GitContextEngineResult};
 use crate::git_providers::types::{ChangeRequestId, CrBundle};
 use crate::git_providers::{ProviderClient, ProviderConfig};
 use crate::prompt::LlmReviewRequest;
-use crate::prompt::builder::build_llm_review_request;
 use crate::rules::builtin::default_rule_set;
 use crate::{ast_context::NoopAstContextProvider, rag_layer::build_rag_contexts_for_targets};
-
-/// Builds AI request data for a single change request.
-///
-/// This function is invoked by the HTTP layer when (for example)
-/// `/trigger_gitlab_mr` is called. It is responsible for:
-///   * fetching MR/PR data from the Git provider
-///   * building review targets from the diff
-///   * computing AST/RAG context for each target
-///   * applying review rules
-///   * producing a structured `LlmReviewRequest` value
-///
-/// The returned value can be passed to any AI provider layer to
-/// actually run the model and turn model responses into comments.
-pub async fn get_ai_request_data(
-    gateway: Arc<LlmGateway>,
-    project_name: &str,
-    cfg: ProviderConfig,
-    id: ChangeRequestId,
-) -> GitContextEngineResult<LlmReviewRequest> {
-    info!(
-        provider = ?cfg.kind,
-        project = %id.project,
-        iid = id.iid,
-        "get_ai_request_data: started"
-    );
-
-    let client = ProviderClient::from_config(cfg.clone())?;
-
-    let bundle: CrBundle = client.fetch_bundle(&id).await?;
-
-    debug!(
-        project = %bundle.meta.id.project,
-        iid = bundle.meta.id.iid,
-        files = bundle.changes.files.len(),
-        commits = bundle.commits.len(),
-        "get_ai_request_data: bundle fetched from provider"
-    );
-
-    let targets = build_review_targets(&bundle.changes);
-
-    if targets.is_empty() {
-        warn!(
-            project = %bundle.meta.id.project,
-            iid = bundle.meta.id.iid,
-            "get_ai_request_data: no diff hunks to review"
-        );
-    }
-
-    // Build RAG contexts for each diff hunk.
-    let rag_contexts =
-        build_rag_contexts_for_targets(gateway.clone(), project_name, &targets, Some(5)).await;
-
-    // By default use a no-op AST context provider.
-    // The host application can later construct a real provider
-    // (for example backed by a vector index) and call the lower-level
-    // pieces directly if needed.
-    let ast_provider = NoopAstContextProvider;
-
-    let rules = default_rule_set();
-
-    // TODO: extend `build_llm_review_request` to accept `&rag_contexts`
-    // and include them into per-target prompts.
-    let request = build_llm_review_request(
-        &bundle,
-        &targets,
-        &ast_provider,
-        &rules,
-        &rag_contexts,
-        None,
-    )?;
-
-    dump_llm_request_to_temp(&request, &bundle.meta.id);
-
-    info!(
-        project = %bundle.meta.id.project,
-        iid = bundle.meta.id.iid,
-        target_count = request.targets.len(),
-        "get_ai_request_data: AI request data built"
-    );
-
-    Ok(request)
-}
 
 /// Builds a two-phase review:
 /// 1. Pre-review planning with narrow RAG.
 /// 2. Final review request with enriched RAG guided by the plan.
 ///
+/// `project_id` + `primary_repo_id` scope all RAG retrieval to the right
+/// Qdrant payload subset (S1 multi-tenant). `qdrant` + `rag_cfg` are
+/// captured once at boot and shared across calls — no per-request env
+/// reads on this hot path.
+///
 /// Returns `(pre_review_plan, final_llm_request)`.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_two_phase_review(
     project_name: &str,
+    project_id: ProjectId,
+    primary_repo_id: RepoId,
+    qdrant: Arc<Qdrant>,
+    rag_cfg: Arc<RagConfig>,
     cfg: ProviderConfig,
     id: ChangeRequestId,
     gateway: Arc<LlmGateway>,
@@ -155,8 +85,16 @@ pub async fn build_two_phase_review(
     let rules = default_rule_set();
 
     // 1) short RAG for preview
-    let prereview_rag =
-        build_rag_contexts_for_targets(gateway.clone(), project_name, &targets, Some(2)).await;
+    let prereview_rag = build_rag_contexts_for_targets(
+        gateway.clone(),
+        &qdrant,
+        &rag_cfg,
+        project_id,
+        Some(primary_repo_id),
+        &targets,
+        Some(2),
+    )
+    .await;
 
     // 2) pre-review plan (and his dump temp/pre_review — inside module)
     let prereview_plan = pre_review::run_pre_review_planning(
@@ -173,7 +111,10 @@ pub async fn build_two_phase_review(
     // 3) Enriched RAG, with plan
     let enriched_rag = crate::rag_layer::build_enriched_rag_contexts(
         gateway.clone(),
-        project_name,
+        &qdrant,
+        &rag_cfg,
+        project_id,
+        Some(primary_repo_id),
         &targets,
         &prereview_plan,
         Some(5), // base_k
@@ -223,13 +164,12 @@ fn dump_llm_request_to_temp(request: &LlmReviewRequest, id: &ChangeRequestId) {
         safe_project, id.iid, ts
     );
 
-    // Resolve "./temp" relative to current working directory.
     let base_dir = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(err) => {
             warn!(
                 error = %err,
-                "get_ai_request_data: failed to resolve current_dir for temp dump",
+                "build_two_phase_review: failed to resolve current_dir for temp dump",
             );
             return;
         }
@@ -241,7 +181,7 @@ fn dump_llm_request_to_temp(request: &LlmReviewRequest, id: &ChangeRequestId) {
         warn!(
             dir = %temp_dir.display(),
             error = %err,
-            "get_ai_request_data: failed to create temp directory",
+            "build_two_phase_review: failed to create temp directory",
         );
         return;
     }
@@ -254,12 +194,12 @@ fn dump_llm_request_to_temp(request: &LlmReviewRequest, id: &ChangeRequestId) {
                 warn!(
                     path = %path.display(),
                     error = %err,
-                    "get_ai_request_data: failed to write LLM request to temp file",
+                    "build_two_phase_review: failed to write LLM request to temp file",
                 );
             } else {
                 debug!(
                     path = %path.display(),
-                    "get_ai_request_data: LLM request dumped to temp file",
+                    "build_two_phase_review: LLM request dumped to temp file",
                 );
             }
         }
@@ -268,7 +208,7 @@ fn dump_llm_request_to_temp(request: &LlmReviewRequest, id: &ChangeRequestId) {
                 project = %id.project,
                 iid = id.iid,
                 error = %err,
-                "get_ai_request_data: failed to serialize LLM request to JSON",
+                "build_two_phase_review: failed to serialize LLM request to JSON",
             );
         }
     }

@@ -126,7 +126,6 @@ async fn qdrant_delete_and_scroll_helpers() {
 
     let cfg = RagConfig {
         project_name: "test".into(),
-        code_jsonl: std::path::PathBuf::from("/tmp/unused.jsonl"),
         qdrant: QdrantConfig {
             url: url.clone(),
             collection: collection.clone(),
@@ -240,7 +239,6 @@ async fn upsert_repo_chunks_dedup_pipeline() {
     let collection = "s2_dedup".to_owned();
     let cfg = RagConfig {
         project_name: "test".into(),
-        code_jsonl: std::path::PathBuf::from("/tmp/unused.jsonl"),
         qdrant: QdrantConfig {
             url: url.clone(),
             collection: collection.clone(),

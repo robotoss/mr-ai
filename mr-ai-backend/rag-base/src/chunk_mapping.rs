@@ -1,11 +1,8 @@
 //! Chunk → `(id, embed_text, VectorPayload)` mapping shared by the
-//! worker ingest pipeline (S2).
-//!
-//! The module is named `jsonl_reader` for historical reasons — the
-//! original JSONL streaming reader lived here. After S5 the JSONL
-//! bootstrap (`/vector_base_index`) is gone, and only the per-chunk
-//! mapper survives. It powers the in-memory pipeline used by
-//! `rag_base::upsert_repo_chunks`.
+//! worker ingest pipeline (S2). Previously called `jsonl_reader` when
+//! the module also streamed JSONL on disk; S5 removed the bootstrap
+//! and only the per-chunk mapper survives, so the file now matches
+//! its single responsibility by name.
 
 use std::collections::BTreeSet;
 

@@ -26,7 +26,6 @@ use crate::{
         health::{
             detailed::detailed_route, live::live_route, ready::ready_route,
         },
-        rag_base::search_vector_base_route::search_vector_base_route,
         retrieve::retrieve_route::retrieve_route,
         usage::usage_route::usage_route,
         webhooks::{
@@ -139,6 +138,18 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
             ))?,
     );
 
+    // Shared Qdrant client — one connection seeded at boot so both
+    // `/retrieve` and the worker's IngestMr path reuse it.
+    let qdrant_client = Arc::new(
+        rag_base::vector_db::connect(&rag_cfg)
+            .await
+            .map_err(|e| AppError::Http {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: "QDRANT_CONNECT_FAILED",
+                message: e.to_string(),
+            })?,
+    );
+
     // Build shared state
     let shared_state = Arc::new(AppState::new(
         config.clone(),
@@ -146,7 +157,7 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         secrets_provider,
         db_pool.clone(),
         llm_health_monitor,
-        rag_cfg,
+        rag_cfg.clone(),
     ));
     println!("{}", "✅ Shared state initialized".green());
 
@@ -158,6 +169,8 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
             worker::handlers::DefaultRegistryConfig {
                 pool: pool.clone(),
                 gateway: gateway.clone(),
+                qdrant: qdrant_client.clone(),
+                rag_cfg: rag_cfg.clone(),
                 git_api_base: config.git_api_base.clone(),
                 project_name_legacy: config.project_slug.clone(),
             },
@@ -182,7 +195,6 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
         .route("/admin/reindex_repo", post(reindex_repo_route))
         .route("/admin/reindex_all", post(reindex_all_route))
         .route("/retrieve", post(retrieve_route))
-        .route("/search_vector_base", post(search_vector_base_route))
         .route("/trigger_git_mr", axum::routing::post(trigger_mr_route))
         .route_layer(middleware::from_fn_with_state(
             shared_state.clone(),

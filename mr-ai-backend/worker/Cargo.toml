@@ -20,6 +20,7 @@ git-context-engine = { path = "../git-context-engine" }
 ai-llm-service = { path = "../ai-llm-service" }
 ai-review-engine = { path = "../ai-review-engine" }
 rag-base = { path = "../rag-base" }
+qdrant-client = "1.15"
 secrets = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

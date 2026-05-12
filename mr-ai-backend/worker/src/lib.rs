@@ -26,6 +26,7 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 pub mod handlers;
+pub mod ports;
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
