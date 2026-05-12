@@ -23,5 +23,17 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = ["
 tracing-opentelemetry = "0.32"
 serde_json = { workspace = true }
 
+# Audit middleware (sprint 3): axum middleware + sha2 for payload
+# hashing. async-trait used by the `AuditPort` abstraction so
+# observability doesn't depend on a concrete persistence type.
+axum = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+
 [dev-dependencies]
 metrics-util = "0.19"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }

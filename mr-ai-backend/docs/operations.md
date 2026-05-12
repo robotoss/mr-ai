@@ -74,7 +74,32 @@ Full table: [Configuration](guides/configuration.md).
 - [ ] `curl -X POST /admin/reindex_repo` **without** `X-Admin-Token`
   returns `401 UNAUTHORIZED` (sanity check the middleware is wired).
 
-## 6. Where to look when things break
+## 6. Audit retention
+
+`audit_log` records every admin / retrieve / trigger request — see
+[persistence → audit log](services/persistence.md#audit-log-sprint-3).
+A background task in `api::start` runs once a day and deletes rows
+older than the configured retention window.
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUDIT_RETENTION_DAYS` | `30` | rows older than this are pruned |
+| `AUDIT_CLEANUP_INTERVAL_SECS` | `86_400` (24h) | gap between passes |
+
+Disk budget: ~200 bytes/row × ~1000 admin calls/day × 30 days ≈ 6 MB
+at the default. Operator-side cleanup if the task ever stalls:
+
+```bash
+psql $DATABASE_URL -c \
+  "DELETE FROM audit_log WHERE created_at < now() - interval '30 days';"
+```
+
+The audit middleware **never** stores request bodies — only
+`payload_size` + `payload_sha256`. So a leak of `audit_log` exposes
+correlation metadata but no PII / credentials. Tokens are stored as a
+16-char sha256 prefix; the original `X-Admin-Token` is unrecoverable.
+
+## 7. Where to look when things break
 
 | Symptom | Where |
 | --- | --- |

@@ -140,13 +140,74 @@ crate's unit tests:
 cargo test -p observability tracing::propagation
 ```
 
+## Audit (sprint 3)
+
+Sprint 3 records every request through the admin router into a
+Postgres `audit_log` table. The middleware lives in this crate, the
+write port is a trait so persistence stays out of the observability
+crate's dependency graph.
+
+```text
+┌────────────────────────┐
+│  admin_router request  │
+└─────────┬──────────────┘
+          ▼
+┌────────────────────────┐
+│  audit_layer           │ ← captures request_id, route, method,
+│                        │   body (sha256 only), token (hash[..16])
+└─────────┬──────────────┘
+          ▼
+┌────────────────────────┐
+│  next.run(request)     │ ← handler executes; we measure latency
+└─────────┬──────────────┘
+          ▼
+┌────────────────────────┐
+│  tokio::spawn ──────►  │  AuditPort::record(entry)
+│  detached writer       │  (PgAuditPort in production)
+└─────────┬──────────────┘
+          ▼
+       audit_log row
+```
+
+What's recorded vs. **not** recorded:
+
+| Captured | Stored as |
+|---|---|
+| Request method + path | `method`, `route` |
+| Request body | `payload_size` (bytes) + `payload_sha256` — body itself never persists |
+| X-Admin-Token | `token_hash` = first 16 chars of sha256(token); enough to correlate users without leaking the secret |
+| X-Request-Id | `request_id` for cross-system tracing |
+| Response status + latency | `status`, `latency_ms` |
+| Body too large (>1MB) | `payload_size=MAX, payload_sha256=NULL` — the request continues with an empty body, which is what most handlers reject anyway |
+
+The middleware also covers `/retrieve` and `/trigger_git_mr` (they sit
+on the same admin router). Webhooks deliberately skip audit_log —
+they already have `webhook_events` for the same job.
+
+### Retention
+
+`api::start` spawns a background task that runs
+`persistence::repos::audit::delete_expired` every
+`AUDIT_CLEANUP_INTERVAL_SECS` (default 24h), removing rows older than
+`AUDIT_RETENTION_DAYS` (default 30). First tick is delayed 5 minutes
+after boot to avoid contention with worker pool startup.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `AUDIT_RETENTION_DAYS` | `30` | rows older than this are deleted |
+| `AUDIT_CLEANUP_INTERVAL_SECS` | `86_400` (24h) | gap between cleanup passes |
+
+Disk usage is well-bounded: ~200 bytes/row × ~1000 admin calls/day ×
+30 days ≈ 6 MB at the default budget.
+
+See also [operations](../guides/observability.md#audit-retention).
+
 ## Roadmap
 
 Sprint 1 (commit `3c4a33d`) shipped metrics + `/metrics`. Sprint 2
-(this commit) adds OTLP + tracing instrumentation. Remaining:
+(commit `3222f15`) added OTLP + tracing. Sprint 3 (this commit) adds
+audit. Remaining:
 
-- **Sprint 3**: `observability::audit::middleware` + new `audit_log`
-  Postgres table + scheduled cleanup task.
 - **Sprint 4**: `/health/dashboard` aggregate snapshot consumed by ops
   UIs.
 

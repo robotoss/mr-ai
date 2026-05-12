@@ -13,10 +13,12 @@
 //! `tracing-appender` `WorkerGuard` alive for the program's lifetime and
 //! (b) expose a `render()` for the `/metrics` HTTP handler.
 
+pub mod audit;
 mod init;
 pub mod metrics;
 pub mod tracing;
 
+pub use audit::{audit_layer, AuditEntry, AuditMiddlewareState, AuditPort};
 pub use init::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
 pub use metrics::{install_prometheus_recorder, MetricsHandle};
 pub use tracing::propagation::{inject_into_payload, set_parent_from_payload};

@@ -112,6 +112,7 @@ version = "0.1.0"
 dependencies = [
  "ai-llm-service",
  "ai-review-engine",
+ "async-trait",
  "axum 0.8.7",
  "chrono",
  "code-indexer",
@@ -2042,6 +2043,9 @@ dependencies = [
 name = "observability"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "axum 0.8.7",
+ "chrono",
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
@@ -2049,11 +2053,15 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
+ "tokio",
+ "tower 0.5.2",
  "tracing",
  "tracing-appender",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

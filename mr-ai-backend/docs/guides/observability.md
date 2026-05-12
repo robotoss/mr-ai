@@ -164,6 +164,17 @@ protocol.
 > Sprint-2 scope: metrics + tracing. Audit log and
 > `/health/dashboard` land in subsequent commits.
 
+## Audit log
+
+Sprint 3 adds an `audit_log` Postgres table populated by middleware on
+the admin router. Every `/admin/*`, `/retrieve`, `/trigger_git_mr`
+request leaves one row — request_id, route, method, status, latency,
+payload size + sha256, token hash. Bodies are **never** stored.
+
+Schema, retention, and the cleanup task knobs live on the
+[observability service page](../services/observability.md#audit-sprint-3)
+and in [operations → audit retention](../operations.md#6-audit-retention).
+
 ## Logging stack
 
 Initialised by [`init_tracing(&LogConfig)`](../../ai-llm-service/src/telemetry.rs)

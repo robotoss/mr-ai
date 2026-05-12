@@ -231,6 +231,36 @@ Log line:
 INFO persistence: project group synced slug=flutter-monorepo repos=4
 ```
 
+## Audit log (sprint 3)
+
+`audit_log` (migration `20260512_0012`) records every request that hits
+the admin router. One row per call:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | BIGSERIAL | PK |
+| `request_id` | TEXT | `X-Request-Id` from the client, `-` when absent |
+| `route` | TEXT | URI path, e.g. `/admin/reindex_repo` |
+| `method` | TEXT | `POST` / `GET` |
+| `status` | SMALLINT | HTTP response code |
+| `latency_ms` | INTEGER | wall-clock between request enter and response |
+| `payload_size` | INTEGER | request body length in bytes (NULL if body capture failed) |
+| `payload_sha256` | CHAR(64) | sha256 of the request body — bodies themselves are **never** stored |
+| `token_hash` | CHAR(16) | first 16 hex chars of `sha256(X-Admin-Token)`, NULL when unauth |
+| `project_id` | UUID | NULL until 🅲 multi-tenant lands |
+| `created_at` | TIMESTAMPTZ | row creation time |
+
+Indexes: `created_at`, `request_id`, partial on `project_id` IS NOT NULL.
+
+Writes go through [`persistence::repos::audit::insert`](../../persistence/src/repos/audit.rs).
+The observability crate's middleware drops to `tokio::spawn` so the
+response is never blocked. Failures surface only in the `audit` log
+target.
+
+Retention is enforced by a background task in `api::start` calling
+[`delete_expired`](../../persistence/src/repos/audit.rs); see
+[operations](../operations.md#audit-retention).
+
 ## Observability cheatsheet
 
 Every persistence-side log is emitted with `target = "persistence"`

@@ -210,7 +210,12 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     // triggers heavy worker jobs is gated by `X-Admin-Token` matched
     // (constant-time) against `TRIGGER_SECRET`. Webhooks have their
     // own HMAC verification, health probes stay open for k8s.
-    let admin_router = Router::new()
+    //
+    // When Postgres is available, additionally wrap every admin call
+    // in the audit middleware so request_id + route + status + latency
+    // + payload sha land in `audit_log`. Audit writes are spawned on
+    // detached tasks so they never block the response.
+    let mut admin_router = Router::new()
         .route("/admin/reindex_repo", post(reindex_repo_route))
         .route("/admin/reindex_all", post(reindex_all_route))
         .route("/retrieve", post(retrieve_route))
@@ -219,6 +224,18 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
             shared_state.clone(),
             crate::middleware_layer::admin_auth::admin_auth,
         ));
+    if let Some(pool) = db_pool.as_ref() {
+        let audit_port: observability::audit::SharedAuditPort = std::sync::Arc::new(
+            crate::middleware_layer::audit_port_pg::PgAuditPort::new(pool.clone()),
+        );
+        let audit_state = observability::AuditMiddlewareState::new(audit_port);
+        admin_router = admin_router.route_layer(middleware::from_fn_with_state(
+            audit_state,
+            observability::audit_layer,
+        ));
+        spawn_audit_cleanup(pool.clone());
+        println!("{}", "✅ Audit middleware + cleanup task wired".green());
+    }
 
     let app = Router::new()
         .merge(admin_router)
@@ -293,6 +310,50 @@ async fn shutdown_signal() {
 }
 
 /// Fallback handler for unmatched routes.
+/// Background task that prunes `audit_log` rows older than
+/// `AUDIT_RETENTION_DAYS` (default 30). Sleeps a configurable interval
+/// between passes — defaults to 24h. Errors are logged but never
+/// crash the task; the next tick will retry.
+fn spawn_audit_cleanup(pool: sqlx::PgPool) {
+    let retention_days: i64 = env::var("AUDIT_RETENTION_DAYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    let interval_secs: u64 = env::var("AUDIT_CLEANUP_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24 * 60 * 60);
+    // Avoid contending with worker_pool startup — first tick after
+    // 5 minutes lets the system settle.
+    const BOOT_DELAY_SECS: u64 = 5 * 60;
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(BOOT_DELAY_SECS)).await;
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        loop {
+            ticker.tick().await;
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days);
+            match persistence::repos::audit::delete_expired(&pool, cutoff).await {
+                Ok(n) if n > 0 => tracing::info!(
+                    target = "audit.cleanup",
+                    deleted = n,
+                    retention_days,
+                    "audit_log: pruned expired rows"
+                ),
+                Ok(_) => tracing::debug!(
+                    target = "audit.cleanup",
+                    retention_days,
+                    "audit_log: nothing to prune"
+                ),
+                Err(err) => tracing::warn!(
+                    target = "audit.cleanup",
+                    error = %err,
+                    "audit_log: cleanup query failed; will retry next tick"
+                ),
+            }
+        }
+    });
+}
+
 async fn handler_404() -> impl IntoResponse {
     println!("{}", "⚠️  404 Not Found request received".red());
     AppError::NotFound

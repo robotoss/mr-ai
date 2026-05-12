@@ -25,6 +25,7 @@ secrets = { workspace = true }
 persistence = { workspace = true }
 worker = { workspace = true }
 observability = { workspace = true }
+async-trait = { workspace = true }
 sqlx = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }

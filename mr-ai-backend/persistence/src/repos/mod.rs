@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod graph;
 pub mod index_state;
 pub mod jobs;
