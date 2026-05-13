@@ -32,6 +32,51 @@ There is **no global fallback** — deployments upgrading from
 the legacy `WEBHOOK_HMAC_SECRET` must set the per-provider keys
 for the providers they use.
 
+## Registering a webhook at the provider
+
+After setting the appropriate `*_WEBHOOK_SECRET` env var and declaring
+the repo in `projects.toml`, register the webhook in the provider UI.
+
+### GitLab
+
+1. Project → **Settings → Webhooks**.
+2. URL: `https://<your-api-host>/webhooks/gitlab`
+3. Secret token: the **exact** value of `GITLAB_WEBHOOK_SECRET`.
+4. Trigger events: ✅ `Push events`, ✅ `Merge request events`.
+   Leave the rest off (anything else is acknowledged but does no
+   work — see "Recognised events" below).
+5. ✅ Enable SSL verification.
+6. Click **Add webhook**, then **Test → Push events** — the API
+   should respond `202 Accepted` and a row should appear in
+   `webhook_events`.
+
+### GitHub
+
+1. Repo → **Settings → Webhooks → Add webhook**.
+2. Payload URL: `https://<your-api-host>/webhooks/github`
+3. Content type: `application/json` (required — form-encoded payloads
+   are rejected).
+4. Secret: the **exact** value of `GITHUB_WEBHOOK_SECRET`.
+5. Which events: select **Let me select individual events** →
+   ✅ `Pushes`, ✅ `Pull requests`. GitHub auto-pings on creation;
+   the API replies `200 OK` to `ping` events without enqueuing.
+6. ✅ Active. Click **Add webhook**.
+
+### Bitbucket Server
+
+1. Repo → **Repository settings → Webhooks → Create webhook**.
+2. URL: `https://<your-api-host>/webhooks/bitbucket`
+3. Secret: the value of `BITBUCKET_WEBHOOK_SECRET`.
+4. Events: ✅ `Repository - Push`, ✅ `Pull request - Opened`,
+   ✅ `Pull request - Source branch updated`.
+
+> **Bitbucket Cloud has no native HMAC signing.** Either accept
+> unsigned webhooks (NOT recommended — anyone with the URL can spoof
+> them), or front the API with a reverse proxy that derives
+> `X-Hub-Signature` from the request body + shared secret. The
+> verification path doesn't care where the header came from, as long
+> as it matches.
+
 ## Pipeline
 
 ```mermaid

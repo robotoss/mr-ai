@@ -246,6 +246,7 @@ impl ReindexHandler {
     pub(super) async fn upsert_chunks(
         &self,
         resolved: &RepoResolved,
+        parsed: &ReindexPayload,
         chunks: &[CodeChunk],
     ) -> WorkerResult<()> {
         // Embedding pipeline: diff content_sha256 against what already
@@ -261,6 +262,10 @@ impl ReindexHandler {
         let project_uuid: uuid::Uuid = resolved.project_id.into();
         let repo_id_str = repo_uuid.simple().to_string();
         let project_id_str = project_uuid.simple().to_string();
+        // Auto-split sub-jobs carry `path_prefix` so each pass only
+        // sweeps orphans inside its own subtree — otherwise sub-job A
+        // would delete the chunks sub-job B just upserted (and vice
+        // versa). `None` keeps legacy whole-repo behaviour.
         let report = rag_base::upsert_repo_chunks(
             &qdrant_client,
             &rag_cfg,
@@ -268,6 +273,7 @@ impl ReindexHandler {
             &repo_id_str,
             Some(&project_id_str),
             chunks,
+            parsed.path_prefix.as_deref(),
         )
         .await
         .map_err(|e| WorkerError::Handler(KIND_REINDEX.into(), Box::new(e)))?;

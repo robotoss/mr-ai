@@ -35,6 +35,13 @@ use crate::vector_db::{
 /// Diff the supplied chunks against the existing Qdrant state for `repo_id`,
 /// then run the keep/upsert/delete pipeline.
 ///
+/// `path_prefix` — when `Some`, the orphan-delete pass is scoped to
+/// chunks whose `file` starts with that prefix. This is how the
+/// auto-split path keeps concurrent sub-jobs from deleting each
+/// other's points: every sub-job indexes its own subtree, and only
+/// its own subtree is allowed to expire chunks during the same
+/// upsert pass. `None` keeps the legacy whole-repo orphan sweep.
+///
 /// On success returns an [`UpsertReport`] describing what the pipeline
 /// actually did so the worker can log it and the operator can spot
 /// runaway re-embeddings caused by content_sha drift.
@@ -45,6 +52,7 @@ pub async fn upsert_repo_chunks(
     repo_id: &str,
     project_id: Option<&str>,
     chunks: &[CodeChunk],
+    path_prefix: Option<&str>,
 ) -> Result<UpsertReport, RagBaseError> {
     let started = Instant::now();
 
@@ -53,7 +61,10 @@ pub async fn upsert_repo_chunks(
         repo_id: Some(repo_id),
     };
 
-    // 1) Snapshot existing points for this repo so we can diff.
+    // 1) Snapshot existing points for this repo so we can diff. When a
+    //    `path_prefix` is supplied we still scroll the whole repo (to
+    //    catch true cross-subtree dedup) but restrict orphan-delete to
+    //    points actually inside that subtree in step 3.
     let existing: Vec<ChunkMeta> =
         scroll_repo_chunk_metas(client, cfg, repo_id, 512).await?;
     let mut existing_index: std::collections::HashMap<String, ChunkMeta> =
@@ -101,11 +112,20 @@ pub async fn upsert_repo_chunks(
         }
     }
 
-    // 3) Anything present before but absent now is an orphan.
+    // 3) Anything present before but absent now is an orphan. With
+    //    `path_prefix` (auto-split sub-jobs), the sweep only fires for
+    //    points whose `file` is actually inside the same subtree —
+    //    otherwise sub-job A would delete sub-job B's chunks. Without
+    //    a prefix this is the legacy "whole repo" orphan pass.
     let to_delete: Vec<String> = existing_index
-        .keys()
-        .filter(|id| !desired_ids.contains(*id))
-        .cloned()
+        .values()
+        .filter(|meta| !desired_ids.contains(&meta.id))
+        .filter(|meta| {
+            path_prefix
+                .map(|p| meta.file.starts_with(p))
+                .unwrap_or(true)
+        })
+        .map(|meta| meta.id.clone())
         .collect();
 
     info!(

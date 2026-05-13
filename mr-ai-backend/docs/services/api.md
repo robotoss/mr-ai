@@ -151,7 +151,8 @@ flowchart LR
 | `API_ADDRESS` | Bind address, e.g. `0.0.0.0:8080`. |
 | `GIT_API_BASE`, `GIT_TOKEN` | Git provider credentials. Host-scoped overrides documented in [Configuration → Per-host overrides](../guides/configuration.md). |
 | `TRIGGER_SECRET` | Shared secret matched against `X-Admin-Token` for every operator route (`/admin/*`, `/retrieve`, `/search_vector_base`, `/trigger_git_mr`). |
-| `PROJECTS_CONFIG` | Path to `projects.toml`; **must declare exactly one `[[project]]`** (S5 single-project invariant). |
+| `PROJECTS_CONFIG` | Path to `projects.toml`; declares one or more `[[project]]` groups (multi-tenant since 🅲 C4). |
+| `GITLAB_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` / `BITBUCKET_WEBHOOK_SECRET` | Per-provider HMAC secrets (M1, breaking change — the legacy global `WEBHOOK_HMAC_SECRET` is removed). |
 
 Plus all `LLM_*`, `RAG_*`, `QDRANT_*` vars consumed by the layers below.
 See [Configuration](../guides/configuration.md).

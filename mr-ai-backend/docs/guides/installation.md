@@ -46,7 +46,7 @@ docker compose ps
 Optional pgAdmin (read-only DB inspector on port `5050`):
 
 ```bash
-docker compose --profile dev up -d pgadmen
+docker compose --profile dev up -d pgadmin
 # default creds: admin@local / admin (override via PGADMIN_*)
 ```
 

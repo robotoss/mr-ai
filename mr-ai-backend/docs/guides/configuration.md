@@ -157,24 +157,24 @@ sidecar binaries land in S4C.
 ## API server
 
 Loaded by [`AppConfig::from_env_partial`](../../api/src/core/app_state.rs).
-The project identity (`project_slug` + `default_project_id`) is **not**
-read from the environment — it is captured at boot from `projects.toml`
-under the [single-project invariant](#single-project-invariant-s5).
+Project identity is **not** read from the environment — `projects.toml`
+declares one or more `[[project]]` groups, and every operator-side
+route resolves the active tenant from the `X-Project-Slug` request
+header (see [multi-tenant](../services/multi-tenant.md)).
 
 | Var | Required | Purpose |
 | --- | --- | --- |
 | `API_ADDRESS` | yes | Bind address (e.g. `0.0.0.0:8080`). |
-| `GIT_API_BASE` | yes | Git provider base URL (must be `http(s)`). |
-| `GIT_TOKEN` | yes | Git provider token. |
-| `TRIGGER_SECRET` | yes | Shared secret guarding `/trigger_git_mr`. |
+| `GIT_API_BASE` | optional | Legacy fallback used when the worker can't derive `base_api` per repo from the remote_url host. M1 onward the worker prefers `secrets::base_api_for(host, provider)`. |
+| `GIT_TOKEN` | optional | Legacy fallback when no host-scoped `GIT_TOKEN_<HOST_SLUG>` exists. |
+| `TRIGGER_SECRET` | yes | Doubles as the `X-Admin-Token` for every operator route (`/admin/*`, `/retrieve`, `/search_vector_base`, `/trigger_git_mr`). Constant-time compare. |
 
-### Single-project invariant (S5)
+### Tenant routing (🅲 C4)
 
-`projects.toml` must declare exactly one `[[project]]` entry. The API
-fails to boot with `ConfigError::ExpectedExactlyOneProject` otherwise.
-The cached slug + UUID power both `/admin/reindex_repo` and
-`/admin/reindex_all`. Multiple-project deployments are not supported in
-this release.
+Every operator-side call carries `X-Project-Slug: <slug>`. Middleware
+resolves the slug into an `AuthorizedScope` Extension that downstream
+handlers consume. Webhooks bypass this header — the inbound
+`remote_url` is matched against `project_repos` to recover the tenant.
 
 ## Git cloning
 
@@ -230,14 +230,21 @@ and migration workflow.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
-| `PROJECTS_CONFIG` | `projects.toml` | Path to the declarative project-group config. **Required as of S5** — the API fails to boot if the file is missing. |
+| `PROJECTS_CONFIG` | `projects.toml` | Path to the declarative project-group config. Required — the API fails to boot if the file is missing or unparseable. |
 
-The file is parsed at boot. It must declare exactly one `[[project]]` (see
-the [single-project invariant](#single-project-invariant-s5)). When
-`DATABASE_URL` is set, the same parse is also replicated into the
-`projects` / `project_repos` / `project_dependencies` tables. Re-running
-the binary with an updated file is idempotent: project IDs are looked up by
-slug and repo IDs by `(project_id, remote_url)`.
+The file is parsed at boot. It may declare one or more `[[project]]`
+groups (the C4 multi-tenant lift removed the single-project
+invariant). When `DATABASE_URL` is set, the parse is also replicated
+into `projects` / `project_repos` / `project_dependencies`. Re-running
+the binary with an updated file is idempotent: project IDs are looked
+up by slug and repo IDs by `(project_id, remote_url)`. Re-parse is
+**boot-only** — there is no hot-reload signal or admin endpoint;
+restart the API after editing.
+
+For the cross-repo MR review feature you must also declare
+`[[project.dependency]]` edges between repos; see
+[`projects.toml.example`](../../projects.toml.example) and
+[multi-repo-review](../services/multi-repo-review.md).
 
 ## Secrets
 
@@ -254,9 +261,34 @@ Loaded by [`secrets`](../../secrets/src/lib.rs). See the dedicated
 Loaded by [`secrets::webhook`](../../secrets/src/webhook.rs) and the
 webhook routes in `api`. See [Webhooks](webhooks.md) for the full pipeline.
 
-| Var | Default | Purpose |
+**Breaking change in sprint M1 of cross-repo MR review:** the legacy
+global `WEBHOOK_HMAC_SECRET` is removed. Each provider has its own
+secret so two providers can coexist on the same instance without
+sharing keys. Missing variables return `503 WEBHOOK_SECRET_UNSET`.
+
+| Var | Required when | Purpose |
 | --- | --- | --- |
-| `WEBHOOK_HMAC_SECRET` | (required for webhooks) | Shared secret. GitLab compares plain text against `X-Gitlab-Token`; GitHub/Bitbucket compute HMAC-SHA256 of the body. |
+| `GITLAB_WEBHOOK_SECRET` | receiving GitLab webhooks | Plain-text compared against `X-Gitlab-Token` header. |
+| `GITHUB_WEBHOOK_SECRET` | receiving GitHub webhooks | HMAC-SHA256 of the body, header `X-Hub-Signature-256`. |
+| `BITBUCKET_WEBHOOK_SECRET` | receiving Bitbucket webhooks | HMAC-SHA256 of the body, header `X-Hub-Signature`. Bitbucket Cloud has no native HMAC — front it with a reverse proxy injecting the header. |
+
+Under the file backend the layout is
+`<SECRETS_DIR>/_global/webhook_hmac_<provider>` (one file per
+provider, mode 0600 recommended).
+
+### Per-host API base override (M1)
+
+Self-hosted provider instances need a per-host API base URL. The
+worker derives `base_api` per repo via
+`secrets::base_api_for(host, ProviderKind)`. Operator overrides:
+
+| Slug pattern | Example |
+| --- | --- |
+| `GIT_API_BASE_<HOST_SLUG>` | `GIT_API_BASE_GITLAB_ACME_IO=https://gitlab.acme.io/api/v4` |
+| `GIT_API_BASE_GITHUB_ACME_IO` | `https://github.acme.io/api/v3` (GHE) |
+
+Public clouds (`gitlab.com`, `github.com`, `bitbucket.org`) resolve
+automatically — no override required.
 
 ## Worker pool
 

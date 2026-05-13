@@ -270,6 +270,7 @@ async fn upsert_repo_chunks_dedup_pipeline() {
         &repo_id,
         Some(&project_id),
         &[chunk_a_v1.clone(), chunk_b.clone()],
+        None,
     )
     .await
     .expect("upsert_repo_chunks v1");
@@ -290,6 +291,7 @@ async fn upsert_repo_chunks_dedup_pipeline() {
         &repo_id,
         Some(&project_id),
         &[chunk_a_v1.clone(), chunk_b.clone()],
+        None,
     )
     .await
     .expect("upsert_repo_chunks v2");
@@ -308,6 +310,7 @@ async fn upsert_repo_chunks_dedup_pipeline() {
         &repo_id,
         Some(&project_id),
         &[chunk_a_v2.clone(), chunk_b.clone()],
+        None,
     )
     .await
     .expect("upsert_repo_chunks v3");
@@ -331,6 +334,7 @@ async fn upsert_repo_chunks_dedup_pipeline() {
         &repo_id,
         Some(&project_id),
         &[chunk_b.clone()],
+        None,
     )
     .await
     .expect("upsert_repo_chunks v4");

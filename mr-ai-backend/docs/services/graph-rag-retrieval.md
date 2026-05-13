@@ -138,9 +138,11 @@ sequenceDiagram
 `POST /retrieve` is the canonical entry point. The handler is mechanical
 — no LLM rerank, no answer generation. Steps:
 
-1. Resolve `project_id` from the cached single-project invariant
-   ([`AppConfig`](../../api/src/core/app_state.rs)) or from the
-   request override (must match).
+1. Resolve `project_id` from the `AuthorizedScope` Extension that the
+   `extract_tenant` middleware derived from the `X-Project-Slug`
+   header. The route signature pins this with
+   `Extension<AuthorizedScope>` so a missing scope is a 4xx, never an
+   unscoped query.
 2. Embed the query via `LlmGateway::embed_batch`.
 3. Run filtered Qdrant search via
    `rag_base::vector_db::search_top_k_with_filter` with a

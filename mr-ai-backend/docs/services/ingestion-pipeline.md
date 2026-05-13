@@ -1,6 +1,6 @@
 # Ingestion Pipeline — Master Flow
 
-> **Status:** ACTIVE (S2 — Dart only · embedding pipeline wired)
+> **Status:** ACTIVE — full pipeline. Tree-sitter analyzers ship for **Dart, Rust, TypeScript/TSX, JavaScript/JSX** with graph-edge extraction; **Kotlin, Swift, Java, Python, Go, C#, C/C++, Ruby, PHP, Scala, Objective-C** parse via the `GenericTextAst` fallback (chunks + Qdrant indexing, no analyzer-derived graph edges). Config files (`*.yaml/json/toml/xml/proto/md/sql/...`) emit as plain-text chunks.
 > **Source of truth:** `worker::handlers::ReindexHandler` ·
 > `rag_base::upsert_repo_chunks`
 

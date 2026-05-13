@@ -40,10 +40,13 @@ Enqueue a Reindex job for a single repo.
 }
 ```
 
-`remote_url` is matched against `project_repos.remote_url` via the lenient
-matcher (`.git` suffix, trailing slash). The repo must belong to the
-single project declared in `projects.toml` — `default_project_id` is
-checked as a safety net against config drift.
+`remote_url` is matched against `project_repos.remote_url` via the
+lenient matcher (`.git` suffix, trailing slash). The repo must belong
+to the project resolved from `X-Project-Slug` — the middleware writes
+an `AuthorizedScope` Extension that the handler verifies against
+`(repo.project_id == scope.project_id())`. A mismatch (e.g. the
+header points at project A but the URL is registered under project B)
+returns `409 PROJECT_MISMATCH`.
 
 ### Responses
 
@@ -53,7 +56,7 @@ checked as a safety net against config drift.
 | `400 BAD_REQUEST` | `{ "error": "BAD_REQUEST", "message": "remote_url required" }` | Empty / missing field. |
 | `401 UNAUTHORIZED` | `{ "error": "UNAUTHORIZED", "message": "X-Admin-Token header required" }` | Missing / wrong header. |
 | `404 UNKNOWN_REPO` | `{ "error": "UNKNOWN_REPO", "message": "..." }` | Remote URL not declared in `projects.toml`. |
-| `409 PROJECT_MISMATCH` | `{ "error": "PROJECT_MISMATCH", "message": "..." }` | The repo is registered under a different project than the cached default. Indicates `projects.toml` diverged from `AppConfig::default_project_id`; restart the API. |
+| `409 PROJECT_MISMATCH` | `{ "error": "PROJECT_MISMATCH", "message": "..." }` | The repo is registered under a different project than the `X-Project-Slug` header pointed at. |
 | `500 PERSISTENCE_ERROR` / `ENQUEUE_FAILED` | error envelope | Postgres lookup or insert failed. |
 | `503 PERSISTENCE_DISABLED` | error envelope | `DATABASE_URL` is unset and `DATABASE_OPTIONAL=true`. |
 
@@ -63,18 +66,21 @@ checked as a safety net against config drift.
 curl -sS -X POST http://localhost:8080/admin/reindex_repo \
     -H 'content-type: application/json' \
     -H "X-Admin-Token: $TRIGGER_SECRET" \
+    -H "X-Project-Slug: flutter-monorepo" \
     -d '{"remote_url": "git@gitlab.com:org/app.git"}' | jq
 ```
 
 ## `POST /admin/reindex_all`
 
-Fan out one Reindex job per repo declared under the default project.
+Fan out one Reindex job per repo declared under the tenant resolved
+from `X-Project-Slug`.
 
 ### Request
 
-Body is an empty object (`{}`) or absent. The handler reads
-`AppState::config.default_project_id` and walks
-`project_repos` filtered by that project.
+Body is an empty object (`{}`) or absent. Headers carry the tenant:
+`X-Admin-Token` (matches `TRIGGER_SECRET`) and `X-Project-Slug`
+(names the `[[project]]`). The handler walks `project_repos`
+filtered by `scope.project_id()`.
 
 ### Responses
 
@@ -91,25 +97,25 @@ Body is an empty object (`{}`) or absent. The handler reads
 ```bash
 curl -sS -X POST http://localhost:8080/admin/reindex_all \
     -H "X-Admin-Token: $TRIGGER_SECRET" \
+    -H "X-Project-Slug: flutter-monorepo" \
     -d '{}' | jq
 ```
 
-## Single-project invariant
+## Multi-tenant scoping (🅲 C4)
 
-Both endpoints assume the deployment serves exactly one project. The
-API boot path enforces this:
+Both endpoints derive the active tenant from the `X-Project-Slug`
+header. The `extract_tenant` middleware:
 
-- Reads `projects.toml` (path from `PROJECTS_CONFIG`, default
-  `projects.toml`).
-- Fails with `ConfigError::ExpectedExactlyOneProject` if the file lists
-  zero or more than one `[[project]]` entry.
-- Caches the project's slug + UUID on
-  [`AppConfig`](../../api/src/core/app_state.rs) so handlers never
-  re-read the file.
+- Looks up the slug in `projects` and returns `404 UNKNOWN_PROJECT`
+  if it doesn't exist.
+- Builds an `AuthorizedScope` value and attaches it as a request
+  Extension.
+- Handlers consume `Extension<AuthorizedScope>` directly — there is
+  no way to call these routes with an unscoped pool.
 
-To migrate a deployment to multiple projects, a future sprint will
-re-introduce explicit project scoping on these endpoints; until then a
-single-project deployment is the only supported shape.
+Webhooks intentionally **bypass** this header — inbound payloads
+carry the `remote_url` directly, and the worker resolves the tenant
+via `find_repo_by_remote_url_lenient` instead.
 
 ## Related docs
 

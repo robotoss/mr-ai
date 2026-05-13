@@ -25,6 +25,42 @@ pub async fn connect(cfg: &RagConfig) -> Result<Qdrant, RagBaseError> {
         .map_err(|e| RagBaseError::Qdrant(format!("client build: {e}")))
 }
 
+/// Idempotent collection bootstrap. Use this on app/worker start —
+/// it creates the collection + payload indexes only when the
+/// collection doesn't exist yet. Existing collections are left
+/// untouched (no DELETE → no data loss). Safe to call repeatedly.
+///
+/// This is what most operators want at boot; [`reset_collection`]
+/// is destructive and meant for tests / explicit operator action.
+pub async fn ensure_collection(client: &Qdrant, cfg: &RagConfig) -> Result<(), RagBaseError> {
+    match client.collection_exists(&cfg.qdrant.collection).await {
+        Ok(true) => {
+            debug!(
+                target: "rag_base::vector_db",
+                collection = %cfg.qdrant.collection,
+                "ensure_collection: already exists; leaving untouched"
+            );
+            return Ok(());
+        }
+        Ok(false) => {
+            info!(
+                target: "rag_base::vector_db",
+                collection = %cfg.qdrant.collection,
+                dim = cfg.embedding.dim,
+                "ensure_collection: collection missing; provisioning"
+            );
+        }
+        Err(e) => {
+            return Err(RagBaseError::Qdrant(format!(
+                "collection_exists probe failed: {e}"
+            )));
+        }
+    }
+    // The provisioning sequence (create + indexes) is the same as
+    // reset_collection minus the destructive `delete_collection` step.
+    create_collection_with_indexes(client, cfg).await
+}
+
 /// Drop the collection (if present), create a fresh one, and create payload indexes.
 pub async fn reset_collection(client: &Qdrant, cfg: &RagConfig) -> Result<(), RagBaseError> {
     info!(
@@ -35,7 +71,23 @@ pub async fn reset_collection(client: &Qdrant, cfg: &RagConfig) -> Result<(), Ra
 
     // Best-effort delete: ignore errors like "not found".
     let _ = client.delete_collection(&cfg.qdrant.collection).await;
+    create_collection_with_indexes(client, cfg).await?;
+    info!(
+        target: "rag_base::vector_db",
+        collection = %cfg.qdrant.collection,
+        "reset_collection: finished"
+    );
+    Ok(())
+}
 
+/// Shared provisioning step used by both [`ensure_collection`] (the
+/// idempotent boot helper) and [`reset_collection`] (the destructive
+/// recreate). Assumes the collection does NOT exist — callers handle
+/// the drop / probe.
+async fn create_collection_with_indexes(
+    client: &Qdrant,
+    cfg: &RagConfig,
+) -> Result<(), RagBaseError> {
     let distance = match cfg.qdrant.distance {
         DistanceMetric::Cosine => Distance::Cosine,
         DistanceMetric::Dot => Distance::Dot,
@@ -47,7 +99,7 @@ pub async fn reset_collection(client: &Qdrant, cfg: &RagConfig) -> Result<(), Ra
         collection = %cfg.qdrant.collection,
         dim = cfg.embedding.dim,
         ?distance,
-        "reset_collection: creating collection"
+        "create_collection_with_indexes: creating collection"
     );
 
     client
@@ -73,20 +125,13 @@ pub async fn reset_collection(client: &Qdrant, cfg: &RagConfig) -> Result<(), Ra
     // Tenant / scope identity (S1) — required for /retrieve filtering.
     create_keyword_index(client, &cfg.qdrant.collection, "project_id").await?;
     create_keyword_index(client, &cfg.qdrant.collection, "repo_id").await?;
-    // Hierarchical chunking (S3) — emission lands later; index now so
-    // reset_collection doesn't need a second pass.
+    // Hierarchical chunking (S3).
     create_keyword_index(client, &cfg.qdrant.collection, "chunk_kind").await?;
     create_keyword_index(client, &cfg.qdrant.collection, "parent_symbol_id").await?;
 
     // Text indexes for full-text style lexical search.
     create_text_index(client, &cfg.qdrant.collection, "search_blob").await?;
     create_text_index(client, &cfg.qdrant.collection, "search_terms").await?;
-
-    info!(
-        target: "rag_base::vector_db",
-        collection = %cfg.qdrant.collection,
-        "reset_collection: finished"
-    );
 
     Ok(())
 }

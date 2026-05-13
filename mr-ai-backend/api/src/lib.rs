@@ -145,6 +145,26 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
             })?,
     );
 
+    // Idempotent collection bootstrap. Without this the first reindex
+    // hits `scroll_repo_chunk_metas` / `upsert_batch` against a
+    // non-existent collection and fails — operators previously had to
+    // manually run `reset_collection`. `ensure_collection` is a no-op
+    // when the collection already exists, so this is safe on every
+    // boot.
+    if let Err(err) = rag_base::vector_db::ensure_collection(&qdrant_client, &rag_cfg).await {
+        eprintln!(
+            "{}",
+            format!("⚠️  Qdrant ensure_collection failed: {err} \
+                     (worker will fail on first reindex)")
+                .yellow()
+        );
+    } else {
+        println!(
+            "{}",
+            format!("✅ Qdrant collection '{}' ready", rag_cfg.qdrant.collection).green()
+        );
+    }
+
     // Prometheus recorder — install once at boot. Failure to install
     // (e.g. recorder already set in test harness) degrades to `None`
     // so `/metrics` returns an empty body instead of poisoning startup.

@@ -73,7 +73,9 @@ Full table: [Configuration](guides/configuration.md).
 
 ## 5. Pre-flight checklist
 
-- [ ] `projects.toml` declares exactly one `[[project]]`.
+- [ ] `projects.toml` declares one or more `[[project]]` groups (the
+      C4 multi-tenant lift removed the single-project invariant); each
+      operator-side call carries an `X-Project-Slug` header.
 - [ ] Postgres reachable; migrations applied (`run_migrations` is idempotent).
 - [ ] Qdrant collection exists or boot creates it via `reset_collection`.
 - [ ] At least one `LLM_<tier>_PROVIDER` is reachable (smoke via `/health/detailed`).
@@ -130,7 +132,7 @@ shape and tuning knobs.
 
 | Symptom | Where |
 | --- | --- |
-| API won't boot | stderr — `ConfigError::ExpectedExactlyOneProject` if `projects.toml` is wrong. |
+| API won't boot | stderr — `projects.toml` parse errors surface as `ProjectsConfigError` (unknown provider, dangling dependency `remote_url`, malformed TOML). |
 | Reindex hangs | `REINDEX_JOB_TIMEOUT_MIN` will kick in; check `index_state.last_error` + the job row. |
 | Reindex retries forever | Inspect `jobs.last_error`; the SKIP-LOCKED queue moves the job to `dead` after `max_attempts`. |
 | Retrieval returns no hits | Confirm `EMBEDDING_DIM` matches the gateway's model; inspect Qdrant payload count for the repo. |

@@ -42,7 +42,8 @@ GIT_TOKEN=fake-for-smoke-only
 TRIGGER_SECRET=secret123
 ```
 
-`projects.toml` must declare exactly one `[[project]]`:
+`projects.toml` declares one or more `[[project]]` groups (multi-tenant
+since 🅲 C4). The simplest single-repo case:
 
 ```toml
 [[project]]
@@ -54,6 +55,11 @@ provider = "gitlab"
 remote_url = "git@github.com:org/repo.git"
 is_primary = true
 ```
+
+For a multi-repo monorepo (the cross-repo MR review flow), see
+[`projects.toml.example`](../../projects.toml.example) — it covers
+single-provider, multi-provider, and three-repo star setups, and
+explains when `[[project.dependency]]` edges are required.
 
 Full list of variables: [Configuration](configuration.md).
 
@@ -94,19 +100,25 @@ A daily-rotated JSON log file appears at `logs/mr-ai.YYYY-MM-DD`.
 
 ### Indexing
 
-Operator routes require the `X-Admin-Token` header — it matches your
-`TRIGGER_SECRET` env value (constant-time compare).
+Operator routes require two headers (both shipped since 🅲 C4):
+1. `X-Admin-Token` — matches your `TRIGGER_SECRET` env value
+   (constant-time compare).
+2. `X-Project-Slug` — names the `[[project]]` to operate on; the
+   middleware resolves it into a typed `AuthorizedScope` so every
+   downstream DB query is tenant-bounded.
 
 ```bash
 # Enqueue a Reindex job for every repo declared in projects.toml.
 curl -X POST http://localhost:8080/admin/reindex_all \
   -H "X-Admin-Token: $TRIGGER_SECRET" \
+  -H "X-Project-Slug: demo" \
   -d '{}'
 
 # Or target a single repo.
 curl -X POST http://localhost:8080/admin/reindex_repo \
   -H 'content-type: application/json' \
   -H "X-Admin-Token: $TRIGGER_SECRET" \
+  -H "X-Project-Slug: demo" \
   -d '{"remote_url":"git@github.com:org/repo.git"}'
 ```
 
@@ -121,6 +133,7 @@ the `Reindex: vector upsert finished` line.
 curl -X POST http://localhost:8080/retrieve \
   -H 'content-type: application/json' \
   -H "X-Admin-Token: $TRIGGER_SECRET" \
+  -H "X-Project-Slug: demo" \
   -d '{"query":"user authentication middleware","top_k":8}' | jq
 ```
 
@@ -133,6 +146,8 @@ fields (`via`, `chunk_kind`, `overlay_meta`).
 ```bash
 curl -X POST http://localhost:8080/search_vector_base \
   -H 'content-type: application/json' \
+  -H "X-Admin-Token: $TRIGGER_SECRET" \
+  -H "X-Project-Slug: demo" \
   -d '{"query":"user authentication middleware","k":10}'
 ```
 

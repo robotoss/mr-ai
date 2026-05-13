@@ -139,7 +139,7 @@ impl ReindexHandler {
             .analyze_workspace(&workspace_ready, &parsed, &resolved)
             .await?;
         self.persist_graph(&resolved, analysis.outcome).await?;
-        self.upsert_chunks(&resolved, &analysis.chunks).await?;
+        self.upsert_chunks(&resolved, &parsed, &analysis.chunks).await?;
         self.mark_indexed(&resolved, &parsed).await?;
 
         // worktree drops here → cleanup
