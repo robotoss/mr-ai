@@ -49,6 +49,11 @@ pub struct IngestMrHandler {
     pub(super) qdrant: Arc<Qdrant>,
     pub(super) rag_cfg: Arc<RagConfig>,
     pub(super) git_api_base: String,
+    /// Sprint M2 of cross-repo MR review. Used by `build_review` to
+    /// build a per-MR `OverlayGraph` of sibling repos so the LLM
+    /// sees cross-repo context. `GitService` is cheap to clone
+    /// (inner `Arc<GitServiceConfig>`).
+    pub(super) git: project_code_store::GitService,
 }
 
 impl IngestMrHandler {
@@ -58,6 +63,7 @@ impl IngestMrHandler {
         qdrant: Arc<Qdrant>,
         rag_cfg: Arc<RagConfig>,
         git_api_base: String,
+        git: project_code_store::GitService,
     ) -> Self {
         Self {
             pool,
@@ -65,6 +71,7 @@ impl IngestMrHandler {
             qdrant,
             rag_cfg,
             git_api_base,
+            git,
         }
     }
 }
@@ -100,7 +107,7 @@ impl JobHandler for IngestMrHandler {
             "IngestMr: review row opened"
         );
 
-        let mut request = match self.build_review(&provider_ctx, &resolved).await {
+        let mut request = match self.build_review(&provider_ctx, &resolved, &parsed).await {
             Ok(request) => request,
             Err(err) => {
                 let msg = err.to_string();

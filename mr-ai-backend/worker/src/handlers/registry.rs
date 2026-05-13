@@ -49,6 +49,12 @@ pub fn default_registry(cfg: DefaultRegistryConfig) -> WorkerResult<crate::Regis
     } = cfg;
     let git_service = GitService::new(GitServiceConfig::from_env())
         .map_err(|e| WorkerError::Handler("git_service_init".into(), Box::new(e)))?;
+    // Sprint M2 of cross-repo MR review: `IngestMrHandler` takes the
+    // concrete `GitService` directly so it can drive `build_for_mr`
+    // for the overlay. `ReindexHandler` keeps the `GitWorkspace`
+    // port abstraction it already uses; same underlying instance,
+    // different facade.
+    let mr_git = git_service.clone();
     let git: Arc<dyn GitWorkspace> = Arc::new(RealGitWorkspace::new(git_service));
     let gateway_port: Arc<dyn LlmGatewayPort> = Arc::new(RealLlmGatewayPort::new(gateway));
     let indexer: Arc<dyn WorkspaceIndexer> = Arc::new(RealWorkspaceIndexer::new());
@@ -61,6 +67,7 @@ pub fn default_registry(cfg: DefaultRegistryConfig) -> WorkerResult<crate::Regis
             qdrant,
             rag_cfg,
             git_api_base,
+            mr_git,
         ))
         .register(ReindexHandler::new(pool, git, gateway_port, indexer))
         .build())

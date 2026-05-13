@@ -12,8 +12,10 @@
 //! before the LLM rerank step. The overlay is dropped after the review.
 
 pub mod build;
+pub mod merge;
 
 pub use build::{build_for_mr, plan_walk, OverlayBuildReport, OverlayCaps, WalkPlan};
+pub use merge::OverlayEmbedCache;
 
 use std::collections::{BTreeMap, BTreeSet};
 

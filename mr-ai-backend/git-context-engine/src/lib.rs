@@ -80,6 +80,11 @@ pub async fn build_two_phase_review(
     id: ChangeRequestId,
     gateway: Arc<LlmGateway>,
     save_logs: bool,
+    // Sprint M2 of cross-repo MR review: cached embeddings of the
+    // MR's `OverlayGraph` (worker-built before calling). `Some` →
+    // sibling-repo chunks merge into per-target RAG context.
+    // `None` → legacy single-repo behaviour.
+    overlay: Option<&crate::context::overlay::OverlayEmbedCache>,
 ) -> GitContextEngineResult<LlmReviewRequest> {
     info!(
         provider = ?cfg.kind,
@@ -111,7 +116,7 @@ pub async fn build_two_phase_review(
 
     let rules = default_rule_set();
 
-    // 1) short RAG for preview
+    // 1) short RAG for preview (overlay-augmented when present)
     let prereview_rag = build_rag_contexts_for_targets(
         gateway.clone(),
         &qdrant,
@@ -120,6 +125,7 @@ pub async fn build_two_phase_review(
         Some(primary_repo_id),
         &targets,
         Some(2),
+        overlay,
     )
     .await;
 
@@ -135,7 +141,7 @@ pub async fn build_two_phase_review(
     )
     .await?;
 
-    // 3) Enriched RAG, with plan
+    // 3) Enriched RAG, with plan + same overlay merge.
     let enriched_rag = crate::context::rag::build_enriched_rag_contexts(
         gateway.clone(),
         &qdrant,
@@ -146,6 +152,7 @@ pub async fn build_two_phase_review(
         &prereview_plan,
         Some(5), // base_k
         Some(3), // focus_k
+        overlay,
     )
     .await;
 

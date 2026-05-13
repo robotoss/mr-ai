@@ -19,11 +19,17 @@ use rag_base::structs::rag_base_config::RagConfig;
 use rag_base::structs::rag_store::SearchHit;
 use tracing::{debug, warn};
 
+use crate::context::overlay::OverlayEmbedCache;
 use crate::diff::ReviewTarget;
 use crate::review::pre_review::{
     PreReviewHypothesis, PreReviewPlan, PreReviewTargetPlan, RequiredContextHint,
 };
 use crate::review::retrieval::{retrieve_core, RetrieveCoreInput};
+
+/// How many overlay-derived hits to merge in per target. Small budget
+/// so the LLM context doesn't get flooded by sibling-repo code; the
+/// caller's regular top-k still dominates.
+const OVERLAY_PER_TARGET_K: usize = 3;
 
 /// Rag results are kept un-thresholded inside the review pipeline so a
 /// dim/sparse query still produces *some* context. The HTTP `/retrieve`
@@ -81,6 +87,7 @@ pub async fn build_rag_contexts_for_targets(
     repo_id: Option<RepoId>,
     targets: &[ReviewTarget],
     k: Option<usize>,
+    overlay: Option<&OverlayEmbedCache>,
 ) -> Vec<TargetRagContext> {
     let k = k.unwrap_or(8);
     let mut out = Vec::with_capacity(targets.len());
@@ -91,13 +98,13 @@ pub async fn build_rag_contexts_for_targets(
 
         // 2) Query the canonical retrieve_core for semantically similar
         //    code, filtered by tenancy.
-        let results = match retrieve_core(RetrieveCoreInput {
+        let mut results = match retrieve_core(RetrieveCoreInput {
             gateway: gateway.clone(),
             qdrant,
             rag_cfg,
             project_id,
             repo_id,
-            query,
+            query: query.clone(),
             top_k: k,
             min_score: REVIEW_MIN_SCORE,
             chunk_kinds: None,
@@ -116,6 +123,31 @@ pub async fn build_rag_contexts_for_targets(
                 Vec::new()
             }
         };
+
+        // 3) Overlay merge (sprint M2 of cross-repo review). When the
+        //    caller supplied an `OverlayEmbedCache` (worker built it
+        //    from the MR's `OverlayGraph`), append the top-N most
+        //    similar sibling-repo chunks per target so the LLM sees
+        //    cross-repo context.
+        if let Some(cache) = overlay {
+            let overlay_hits = cache
+                .top_k_for_query(
+                    gateway.clone(),
+                    &query,
+                    OVERLAY_PER_TARGET_K,
+                    REVIEW_MIN_SCORE,
+                )
+                .await;
+            if !overlay_hits.is_empty() {
+                debug!(
+                    file = %target.file_path,
+                    hunk = target.hunk_index,
+                    overlay_hits = overlay_hits.len(),
+                    "rag_layer: merged overlay chunks into target"
+                );
+                results.extend(overlay_hits);
+            }
+        }
 
         out.push(TargetRagContext {
             file_path: target.file_path.clone(),
@@ -151,6 +183,7 @@ fn build_query_from_review_target(target: &ReviewTarget) -> String {
 ///
 /// `base_k`  – max number of general results per hunk.
 /// `focus_k` – max number of focused results per required_context.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_enriched_rag_contexts(
     gateway: Arc<LlmGateway>,
     qdrant: &Qdrant,
@@ -161,11 +194,13 @@ pub async fn build_enriched_rag_contexts(
     prereview_plan: &PreReviewPlan,
     base_k: Option<usize>,
     focus_k: Option<usize>,
+    overlay: Option<&OverlayEmbedCache>,
 ) -> Vec<TargetRagContext> {
     let base_k = base_k.unwrap_or(8);
     let focus_k = focus_k.unwrap_or(3);
 
-    // 1) Build general RAG contexts first (same as before).
+    // 1) Build general RAG contexts first (same as before, now with
+    //    optional overlay merge for cross-repo coverage).
     let mut contexts = build_rag_contexts_for_targets(
         gateway.clone(),
         qdrant,
@@ -174,6 +209,7 @@ pub async fn build_enriched_rag_contexts(
         repo_id,
         targets,
         Some(base_k),
+        overlay,
     )
     .await;
 

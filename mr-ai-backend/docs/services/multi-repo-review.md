@@ -73,8 +73,8 @@ the migration checklist.
 
 | Sprint | What |
 |---|---|
-| **M1 ✅** (this commit) | `base_api_for` helper, per-provider webhook secrets, per-repo `ProviderConfig`. |
-| M2 | `build_two_phase_review` accepts an `OverlayGraph`. Worker builds the overlay before pre-review. Cases 1 + 2 light up. |
+| **M1 ✅** (5ce58c1) | `base_api_for` helper, per-provider webhook secrets, per-repo `ProviderConfig`. |
+| **M2 ✅** (this commit) | `build_two_phase_review` accepts `Option<&OverlayEmbedCache>`. Worker builds the overlay (`build_for_mr`) and the embed cache before invoking the review. RAG builders merge top-3 sibling-repo chunks per target via cosine similarity. Failure to build the overlay degrades to legacy single-repo review. Cases 1 + 2 live. |
 | M3 | `ProviderClient::list_open_mrs_by_branch` on GitLab + GitHub + Bitbucket. Wiremock tests per provider. |
 | M4 | Worker discovery step + `build_for_mr(..., head_overrides)`. Prompt embeds `LINKED_MR_DIFFS` block. Case 3 lights up. |
 | M5 | 2 testcontainer integration tests + docs polish. |

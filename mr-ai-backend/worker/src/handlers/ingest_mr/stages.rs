@@ -184,17 +184,82 @@ impl IngestMrHandler {
     ///
     /// `resolved` carries the `(project_id, repo_id)` pair that scopes
     /// RAG retrieval inside the context engine (S1 multi-tenant filter).
+    ///
+    /// Sprint M2 of cross-repo MR review: builds the per-MR
+    /// `OverlayGraph` against sibling repos (using `build_for_mr`)
+    /// and an `OverlayEmbedCache` over its chunks. Any failure here
+    /// degrades to no-overlay — the review still runs with only the
+    /// primary repo's RAG context. Skipped entirely when `head_sha`
+    /// is empty (e.g. legacy payloads from before webhook signature
+    /// upgrades).
     #[tracing::instrument(name = "ingest_mr.build_review", skip_all)]
     pub(super) async fn build_review(
         &self,
         ctx: &ProviderCtx,
         resolved: &RepoResolved,
+        parsed: &MrPayload,
     ) -> Result<LlmReviewRequest, String> {
         // build_two_phase_review's `project_name` param is logging-
         // only; the tenant filter is the typed `project_id`. C4 (🅲)
         // derives the log label from the UUID itself so we don't need
         // a separate field on the handler.
         let project_label = resolved.project_id.as_uuid().simple().to_string();
+
+        // M2: build overlay before the review. Empty head_sha means
+        // the webhook didn't surface a commit and we'd be guessing.
+        let overlay_cache = if parsed.head_sha.is_empty() {
+            tracing::debug!(
+                target = "overlay.build",
+                "skip overlay: payload.head_sha is empty"
+            );
+            None
+        } else {
+            let caps = git_context_engine::overlay::OverlayCaps::from_env();
+            let job_tag = format!("mr-{}", ctx.change_request_id.iid);
+            match git_context_engine::overlay::build_for_mr(
+                &self.pool,
+                &self.git,
+                resolved.project_id,
+                resolved.repo_id,
+                &parsed.head_sha,
+                &job_tag,
+                caps,
+            )
+            .await
+            {
+                Ok((graph, report)) => {
+                    tracing::info!(
+                        target = "overlay.build",
+                        visited_repos = report.visited_repos.len(),
+                        chunks = graph.chunk_count(),
+                        failed_repos = report.failed_repos.len(),
+                        repos_truncated = report.repos_truncated,
+                        chunks_truncated = report.chunks_truncated,
+                        "overlay built for MR review"
+                    );
+                    let cache = git_context_engine::overlay::OverlayEmbedCache::build(
+                        &graph,
+                        self.gateway.concrete(),
+                        self.rag_cfg.as_ref(),
+                    )
+                    .await;
+                    if cache.is_empty() {
+                        None
+                    } else {
+                        Some(cache)
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target = "overlay.build",
+                        error = %err,
+                        "overlay build failed; review will run without cross-repo context"
+                    );
+                    None
+                }
+            }
+        };
+
         git_context_engine::build_two_phase_review(
             &project_label,
             resolved.project_id,
@@ -205,6 +270,7 @@ impl IngestMrHandler {
             ctx.change_request_id.clone(),
             self.gateway.concrete(),
             false,
+            overlay_cache.as_ref(),
         )
         .await
         .map_err(|e| e.to_string())

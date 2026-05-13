@@ -138,6 +138,10 @@ pub async fn trigger_mr_route(
     };
 
     let project_label = scope.project_id().as_uuid().simple().to_string();
+    // M2 (cross-repo): manual /trigger_git_mr doesn't build an
+    // overlay — the route doesn't carry an MR head_sha. The
+    // webhook-driven worker path is the canonical entry that
+    // exercises overlay.
     let result = build_two_phase_review(
         &project_label,
         scope.project_id(),
@@ -148,6 +152,7 @@ pub async fn trigger_mr_route(
         id,
         state.gateway.clone(),
         false,
+        None,
     )
     .await;
     // ApiResponse::success(TriggerMrResponse {
