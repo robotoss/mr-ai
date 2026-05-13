@@ -75,7 +75,7 @@ the migration checklist.
 |---|---|
 | **M1 ✅** (5ce58c1) | `base_api_for` helper, per-provider webhook secrets, per-repo `ProviderConfig`. |
 | **M2 ✅** (cf4b9e6) | `build_two_phase_review` accepts `Option<&OverlayEmbedCache>`. Worker builds the overlay (`build_for_mr`) and the embed cache before invoking the review. RAG builders merge top-3 sibling-repo chunks per target via cosine similarity. Failure to build the overlay degrades to legacy single-repo review. Cases 1 + 2 live. |
-| **M3 ✅** (3f0864e) | `ProviderClient::list_open_mrs_by_branch(project, source_branch) -> Vec<MrSummary>` on all three providers (GitLab `/merge_requests?source_branch=...`, GitHub `/pulls?head=<owner>:<branch>`, Bitbucket BBQL `q=source.branch.name=...`). 6 wiremock tests in `tests/discovery_api.rs` exercise empty results, fork-prefix passthrough, provider dispatch. |
+| **M3 ✅** (1992158) | `ProviderClient::list_open_mrs_by_branch(project, source_branch) -> Vec<MrSummary>` on all three providers (GitLab `/merge_requests?source_branch=...`, GitHub `/pulls?head=<owner>:<branch>`, Bitbucket BBQL `q=source.branch.name=...`). 6 wiremock tests in `tests/discovery_api.rs` exercise empty results, fork-prefix passthrough, provider dispatch. |
 | M4 | Worker discovery step + `build_for_mr(..., head_overrides)`. Prompt embeds `LINKED_MR_DIFFS` block. Case 3 lights up. |
 | M5 | 2 testcontainer integration tests + docs polish. |
 
