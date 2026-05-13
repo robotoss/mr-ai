@@ -31,12 +31,13 @@ use crate::{
     name = "trigger_mr",
     skip_all,
     fields(
-        project = %state.config.project_slug,
+        project_id = %scope.project_id().as_uuid().simple(),
         mr_iid = body.mr_iid,
     ),
 )]
 pub async fn trigger_mr_route(
     State(state): State<Arc<AppState>>,
+    axum::Extension(scope): axum::Extension<domain::AuthorizedScope>,
     headers: HeaderMap,
     Json(body): Json<TriggerMrRequest>,
 ) -> Response {
@@ -107,7 +108,7 @@ pub async fn trigger_mr_route(
     };
     let repos = match persistence::repos::projects::list_repos_for_project(
         pool,
-        state.config.default_project_id,
+        scope.project_id(),
     )
     .await
     {
@@ -136,9 +137,10 @@ pub async fn trigger_mr_route(
         }
     };
 
+    let project_label = scope.project_id().as_uuid().simple().to_string();
     let result = build_two_phase_review(
-        &state.config.project_slug,
-        state.config.default_project_id,
+        &project_label,
+        scope.project_id(),
         primary_repo.id,
         qdrant_client,
         state.rag_cfg.clone(),

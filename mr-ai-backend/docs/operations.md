@@ -6,15 +6,25 @@ This page collects the moving parts an operator needs to verify before
 flipping a deployment into production. Detail lives in the linked docs;
 this is the index.
 
-## 1. Single-project invariant
+## 1. Multi-tenant (🅲)
 
-The API loads `projects.toml` at boot and **fails fast** if the file
-declares anything other than exactly one `[[project]]`. The cached
-`AppConfig::project_slug` + `default_project_id` power both
-`/admin/reindex_*` and `/retrieve` so the rest of the stack never has
-to re-read the file.
+`projects.toml` may declare any number of `[[project]]` entries.
+Every admin-router request (`/admin/*`, `/retrieve`, `/trigger_git_mr`)
+must carry `X-Project-Slug: <slug>` — middleware resolves slug →
+`ProjectId` → `AuthorizedScope` and stamps it onto the request.
 
-- [Configuration → Single-project invariant](guides/configuration.md#single-project-invariant-s5)
+- Missing header → `400 MISSING_PROJECT_SLUG`.
+- Slug not in `projects.toml` → `400 UNKNOWN_PROJECT`.
+- Webhooks, `/health/*`, `/metrics`, `/usage` remain header-free
+  (tenant derived from payload + HMAC for webhooks).
+- Workers re-verify `payload.remote_url → project_id` at claim time;
+  mismatch force-kills the job to `dead` (`target=tenant.mismatch`).
+
+Postgres RLS protects against direct SQL leaks:
+`SELECT * FROM mr_reviews` without `SET LOCAL app.current_tenant`
+returns zero rows. See [multi-tenant service page](services/multi-tenant.md).
+
+- [Multi-tenant overview](services/multi-tenant.md)
 - [Reference → Admin API](reference/admin-api.md)
 
 ## 2. Env checklist

@@ -35,7 +35,10 @@ pub struct ReindexAllResponse {
     pub enqueued: Vec<EnqueuedJob>,
 }
 
-pub async fn reindex_all_route(State(state): State<Arc<AppState>>) -> Response {
+pub async fn reindex_all_route(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(scope): axum::Extension<domain::AuthorizedScope>,
+) -> Response {
     let Some(pool) = state.db.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -47,7 +50,7 @@ pub async fn reindex_all_route(State(state): State<Arc<AppState>>) -> Response {
             .into_response();
     };
 
-    let project_id = state.config.default_project_id;
+    let project_id = scope.project_id();
     let repos = match projects::list_repos_for_project(pool, project_id).await {
         Ok(rs) => rs,
         Err(err) => {
@@ -109,7 +112,10 @@ pub async fn reindex_all_route(State(state): State<Arc<AppState>>) -> Response {
         StatusCode::ACCEPTED,
         Json(ReindexAllResponse {
             kind: worker::handlers::KIND_REINDEX,
-            project_slug: state.config.project_slug.clone(),
+            // C4 (🅲): no cached slug; the project_id (simple-form
+            // UUID) goes back so clients can correlate. Slug→UUID
+            // mapping is already in `projects` table for ops to query.
+            project_slug: project_id.as_uuid().simple().to_string(),
             enqueued,
         }),
     )

@@ -39,6 +39,15 @@ pub enum WorkerError {
         String,
         #[source] Box<dyn std::error::Error + Send + Sync>,
     ),
+    /// Sprint C4 (🅲): the payload's advertised `project_id`
+    /// (from `EnqueueOptions.project_id`) doesn't match the
+    /// `project_id` resolved from `remote_url → project_repos` at
+    /// claim time. Treat as a spoofed payload — force-kill the job.
+    #[error("tenant mismatch: payload claimed project {payload}, remote_url resolves to {resolved}")]
+    TenantMismatch {
+        payload: String,
+        resolved: String,
+    },
 }
 
 pub type WorkerResult<T> = std::result::Result<T, WorkerError>;
@@ -233,6 +242,78 @@ async fn process_one(
     observability::set_parent_from_payload(&job.payload);
     debug!("dispatch");
 
+    // Sprint C4 (🅲): tenant re-verification. The webhook/admin path
+    // stamped `EnqueueOptions.project_id` based on a `remote_url →
+    // project_id` lookup; we re-do that lookup at claim time and
+    // refuse to dispatch if it disagrees. Catches spoofed payloads
+    // and stale jobs that survived a `projects.toml` re-shuffle.
+    //
+    // Payload shape: every live job kind (`IngestPush`, `IngestMr`,
+    // `Reindex`) carries `remote_url` at the top level. Missing
+    // field = nothing to verify, log + continue.
+    if let Some(remote_url) = job
+        .payload
+        .get("remote_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        match persistence::repos::projects::find_repo_by_remote_url_lenient(pool, remote_url)
+            .await
+        {
+            Ok(Some((resolved_project_id, _))) => {
+                let payload_project_id = job.project_id;
+                if payload_project_id != Some(resolved_project_id) {
+                    error!(
+                        target = "tenant.mismatch",
+                        kind = %job.kind,
+                        job_id = %job.id,
+                        payload_project = ?payload_project_id,
+                        resolved_project = %resolved_project_id,
+                        remote_url,
+                        "force-killing job: payload project_id does not match remote_url"
+                    );
+                    let dead = ClaimedJob {
+                        attempt: job.max_attempts,
+                        ..job.clone()
+                    };
+                    let _ = jobs::fail(
+                        pool,
+                        &dead,
+                        &format!(
+                            "tenant_mismatch: payload {:?} != resolved {}",
+                            payload_project_id, resolved_project_id
+                        ),
+                        cfg.max_backoff,
+                    )
+                    .await;
+                    observability::counter!(
+                        observability::metrics::JOBS_DONE_TOTAL,
+                        "kind" => job.kind.clone(),
+                        "outcome" => "dead",
+                        "project_id" => job
+                            .project_id
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "_system".to_owned()),
+                    )
+                    .increment(1);
+                    return;
+                }
+            }
+            Ok(None) => {
+                // Repo isn't in projects.toml. Defer to handler so
+                // it can emit its kind-specific BadPayload error;
+                // RLS will still block downstream writes.
+            }
+            Err(err) => {
+                warn!(
+                    target = "tenant.mismatch",
+                    error = %err,
+                    "tenant re-verify lookup failed; dispatching anyway (RLS protects DB)"
+                );
+            }
+        }
+    }
+
     let Some(handler) = registry.get(&job.kind) else {
         warn!("no handler registered; escalating job to dead");
         // Force-kill by spoofing attempt = max so `fail()` transitions to
@@ -252,6 +333,10 @@ async fn process_one(
             observability::metrics::JOBS_DONE_TOTAL,
             "kind" => job.kind.clone(),
             "outcome" => "dead",
+            "project_id" => job
+                .project_id
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "_system".to_owned()),
         )
         .increment(1);
         return;
@@ -267,6 +352,15 @@ async fn process_one(
     )
     .record(elapsed_secs);
 
+    // Sprint C4: per-tenant label for cost / billing dashboards.
+    // Slug lookup per-job is wasteful; we emit the UUID simple form
+    // and let Prometheus join on a slug→uuid mapping table in the
+    // collector. Low cardinality (one series per tenant).
+    let tenant_label = job
+        .project_id
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "_system".to_owned());
+
     match outcome {
         Ok(()) => {
             if let Err(err) = jobs::complete(pool, job.id).await {
@@ -278,26 +372,53 @@ async fn process_one(
                 observability::metrics::JOBS_DONE_TOTAL,
                 "kind" => job.kind.clone(),
                 "outcome" => "ok",
+                "project_id" => tenant_label.clone(),
             )
             .increment(1);
         }
         Err(err) => {
             let backoff = compute_backoff(cfg, job.attempt);
-            warn!(error = %err, retry_in_ms = backoff.num_milliseconds(), "handler failed");
+            // Sprint C4 (🅲): tenant mismatch is treated as a
+            // poisoned payload — force-kill immediately to `dead`
+            // rather than retry. The alert log target lets ops set
+            // a one-shot rule on `target=tenant.mismatch`.
+            let force_dead = matches!(err, WorkerError::TenantMismatch { .. });
+            if force_dead {
+                tracing::error!(
+                    target = "tenant.mismatch",
+                    error = %err,
+                    kind = %job.kind,
+                    job_id = %job.id,
+                    "force-killing job: payload project_id does not match remote_url"
+                );
+            } else {
+                warn!(error = %err, retry_in_ms = backoff.num_milliseconds(), "handler failed");
+            }
             // `attempt` is 1-indexed and `claim_next` already incremented it,
             // so `attempt >= max_attempts` means this was the final retry.
-            let outcome_label = if job.attempt >= job.max_attempts {
+            let outcome_label = if force_dead || job.attempt >= job.max_attempts {
                 "dead"
             } else {
                 "fail"
             };
-            if let Err(err) = jobs::fail(pool, &job, &err.to_string(), backoff).await {
+            // For tenant mismatch we spoof attempt=max so `fail()`
+            // transitions straight to dead.
+            let job_for_fail = if force_dead {
+                ClaimedJob {
+                    attempt: job.max_attempts,
+                    ..job.clone()
+                }
+            } else {
+                job.clone()
+            };
+            if let Err(err) = jobs::fail(pool, &job_for_fail, &err.to_string(), backoff).await {
                 error!(error = %err, "fail() failed");
             }
             observability::counter!(
                 observability::metrics::JOBS_DONE_TOTAL,
                 "kind" => job.kind.clone(),
                 "outcome" => outcome_label,
+                "project_id" => tenant_label.clone(),
             )
             .increment(1);
         }

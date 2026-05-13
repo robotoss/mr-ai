@@ -79,8 +79,6 @@ fn build_state(
     secrets_root: &std::path::Path,
 ) -> Arc<api::core::app_state::AppState> {
     let config = Arc::new(api::core::app_state::AppConfig {
-        project_slug: "smoke".into(),
-        default_project_id: domain::ProjectId::new(),
         git_api_base: "https://gitlab.example/api/v4".into(),
         git_token: "stub-token".into(),
         trigger_secret: "stub".into(),

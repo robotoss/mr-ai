@@ -87,7 +87,7 @@ isolation will land as an enterprise-tier opt-in flag in
 | **C1** (this commit) | `AuthorizedScope` newtype + `with_tenant` helper + docs skeleton. No existing callsites are migrated yet; the infrastructure exists and compiles. |
 | C2 | RLS migrations: 5 direct + 4 transitive policies + `rerank_cache.project_id` column. Integration test asserting cross-tenant SELECT returns 0 rows when `SET LOCAL` is missing. |
 | C3 | `extract_tenant` middleware on the admin router. Extracts `X-Project-Slug`, validates against `projects` table, places `AuthorizedScope` in request extensions. |
-| C4 | Routes pull `Extension<AuthorizedScope>`; worker `resolve_repo` re-verifies `remote_url ↔ project_id` and force-kills mismatches. Remove `ConfigError::ExpectedExactlyOneProject` and `AppConfig::default_project_id`. Per-tenant metric labels (`project_slug`) on `jobs_done_total`, `mr_reviews_total`, `llm_cost_micro_usd_total`. |
+| C4 ✅ | Routes pull `Extension<AuthorizedScope>`. Worker `process_one` re-verifies `remote_url ↔ project_id` at claim time; mismatch force-kills the job to `dead` and logs `target=tenant.mismatch`. `ConfigError::ExpectedExactlyOneProject` removed; `AppConfig::default_project_id`/`project_slug` gone. Per-tenant `project_id` label on `jobs_done_total` and `mr_reviews_total`. `audit_log.project_id` becomes NOT NULL. |
 | C5 | `ALTER TABLE ... FORCE ROW LEVEL SECURITY` to enforce RLS even for the app's table owner role. Testcontainers tests for cross-tenant retrieve isolation and worker spoofed-payload kill path. |
 
 ## Acceptance summary

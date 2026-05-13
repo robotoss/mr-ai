@@ -19,9 +19,10 @@ use crate::ports::{
 };
 use crate::{WorkerError, WorkerResult};
 
-/// Wiring inputs for [`default_registry`]. Replaces the previous four-
-/// positional argument list — fewer ways to swap `git_api_base` and
-/// `project_name_legacy` at the call site by accident.
+/// Wiring inputs for [`default_registry`]. Sprint C4 of 🅲 dropped
+/// `project_name_legacy` — the worker now derives every per-job
+/// tenant identity from `EnqueueOptions.project_id` and verifies it
+/// against `remote_url` before any DB write.
 ///
 /// `qdrant` and `rag_cfg` are shared with the API layer (both stored on
 /// `AppState`) so per-request RAG retrieval doesn't reconnect.
@@ -32,7 +33,6 @@ pub struct DefaultRegistryConfig {
     pub qdrant: Arc<Qdrant>,
     pub rag_cfg: Arc<RagConfig>,
     pub git_api_base: String,
-    pub project_name_legacy: String,
 }
 
 /// Build the default registry for production. Wires every handler against
@@ -46,7 +46,6 @@ pub fn default_registry(cfg: DefaultRegistryConfig) -> WorkerResult<crate::Regis
         qdrant,
         rag_cfg,
         git_api_base,
-        project_name_legacy,
     } = cfg;
     let git_service = GitService::new(GitServiceConfig::from_env())
         .map_err(|e| WorkerError::Handler("git_service_init".into(), Box::new(e)))?;
@@ -62,7 +61,6 @@ pub fn default_registry(cfg: DefaultRegistryConfig) -> WorkerResult<crate::Regis
             qdrant,
             rag_cfg,
             git_api_base,
-            project_name_legacy,
         ))
         .register(ReindexHandler::new(pool, git, gateway_port, indexer))
         .build())

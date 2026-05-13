@@ -44,33 +44,24 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     let host_url = env::var("API_ADDRESS").map_err(|_| AppError::MissingEnv("API_ADDRESS"))?;
     println!("{}", format!("✅ Loaded API_ADDRESS: {host_url}").green());
 
-    // Strict env-side config (no defaults).
-    let env_cfg = AppConfig::from_env_partial()?;
+    // Strict env-side config (no defaults). C4 (🅲) removed the
+    // single-project invariant — tenant identity is now per-request
+    // via `X-Project-Slug` header → AuthorizedScope in extensions.
+    let config = Arc::new(AppConfig::from_env()?);
+    println!("{}", "✅ AppConfig loaded (multi-tenant)".green());
 
-    // Single-project invariant (S5): `projects.toml` must declare
-    // exactly one [[project]]. Its slug + UUID are cached on `AppConfig`
-    // so handlers can scope Qdrant / Postgres without re-reading the
-    // file on every call.
+    // projects.toml is still parsed at boot for the replication path,
+    // but we no longer pin a "default" project. The file may declare
+    // any number of [[project]] entries.
     let projects_cfg_path =
         env::var("PROJECTS_CONFIG").unwrap_or_else(|_| "projects.toml".into());
     let project_groups = persistence::projects_config::parse_file(&projects_cfg_path)
         .map_err(|e| AppError::ProjectsConfig(e.to_string()))?;
-    if project_groups.len() != 1 {
-        return Err(AppError::Config(
-            crate::core::app_state::ConfigError::ExpectedExactlyOneProject {
-                found: project_groups.len(),
-            },
-        ));
-    }
-    let only_group = &project_groups[0];
-    let project_slug = only_group.slug.clone();
-    let default_project_id = only_group.id;
-    let config = Arc::new(AppConfig::with_project(env_cfg, project_slug, default_project_id));
     println!(
         "{}",
         format!(
-            "✅ AppConfig loaded (project_slug = \"{}\")",
-            config.project_slug
+            "✅ projects.toml parsed ({} project group(s))",
+            project_groups.len()
         )
         .green()
     );
@@ -129,9 +120,11 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
     println!("{}", "✅ LLM health monitor warmed up".green());
 
     // RAG / Qdrant config — captured once at boot so `/retrieve`
-    // doesn't re-read ~14 env vars on every request.
+    // doesn't re-read ~14 env vars on every request. No project_name
+    // override under multi-tenant; the collection name is global and
+    // payload filters do the per-tenant scoping.
     let rag_cfg = Arc::new(
-        rag_base::structs::rag_base_config::RagConfig::from_env(Some(&config.project_slug))
+        rag_base::structs::rag_base_config::RagConfig::from_env(None)
             .map_err(|e| AppError::Config(
                 crate::core::app_state::ConfigError::InvalidValue {
                     name: "RAG_CONFIG",
@@ -215,7 +208,6 @@ pub async fn start(gateway: Arc<LlmGateway>) -> AppResult<()> {
                 qdrant: qdrant_client.clone(),
                 rag_cfg: rag_cfg.clone(),
                 git_api_base: config.git_api_base.clone(),
-                project_name_legacy: config.project_slug.clone(),
             },
         )
         .map_err(|e| AppError::Http {

@@ -38,10 +38,11 @@ use crate::routes::retrieve::response::{OverlayMeta, RetrieveResponse, Retrieved
 
 pub async fn retrieve_route(
     State(state): State<Arc<AppState>>,
+    scope: axum::Extension<domain::AuthorizedScope>,
     Json(req): Json<RetrieveRequest>,
 ) -> Response {
     let started = std::time::Instant::now();
-    let response = retrieve_route_inner(State(state), Json(req)).await;
+    let response = retrieve_route_inner(State(state), scope, Json(req)).await;
     observability::histogram!(observability::metrics::RETRIEVE_LATENCY_SECONDS)
         .record(started.elapsed().as_secs_f64());
     response
@@ -58,27 +59,17 @@ pub async fn retrieve_route(
 )]
 async fn retrieve_route_inner(
     State(state): State<Arc<AppState>>,
+    axum::Extension(scope): axum::Extension<domain::AuthorizedScope>,
     Json(req): Json<RetrieveRequest>,
 ) -> Response {
     if req.query.trim().is_empty() {
         return bad_request("query required");
     }
 
-    // 1) Project resolution. Single-project invariant: the slug must
-    //    match the cached default, or be omitted.
-    if let Some(slug) = req.project_slug.as_deref() {
-        if slug != state.config.project_slug {
-            return error_envelope(
-                StatusCode::BAD_REQUEST,
-                "UNKNOWN_PROJECT",
-                format!(
-                    "project_slug '{slug}' does not match the configured default '{}'",
-                    state.config.project_slug
-                ),
-            );
-        }
-    }
-    let project_id = state.config.default_project_id;
+    // 1) Project identity is now per-request via X-Project-Slug →
+    //    AuthorizedScope (sprint C3/C4 of 🅲). The body's
+    //    `project_slug` field is deprecated — accept but ignore.
+    let project_id = scope.project_id();
     let project_id_str = Uuid::from(project_id).simple().to_string();
 
     let Some(pool) = state.db.as_ref() else {

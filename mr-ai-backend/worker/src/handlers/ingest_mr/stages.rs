@@ -179,8 +179,13 @@ impl IngestMrHandler {
         ctx: &ProviderCtx,
         resolved: &RepoResolved,
     ) -> Result<LlmReviewRequest, String> {
+        // build_two_phase_review's `project_name` param is logging-
+        // only; the tenant filter is the typed `project_id`. C4 (🅲)
+        // derives the log label from the UUID itself so we don't need
+        // a separate field on the handler.
+        let project_label = resolved.project_id.as_uuid().simple().to_string();
         git_context_engine::build_two_phase_review(
-            &self.project_name_legacy,
+            &project_label,
             resolved.project_id,
             resolved.repo_id,
             self.qdrant.clone(),
@@ -410,6 +415,7 @@ impl IngestMrHandler {
     pub(super) async fn finalize(
         &self,
         review_id: uuid::Uuid,
+        project_id: domain::ProjectId,
         snapshot: &Value,
         target_count: usize,
     ) -> WorkerResult<()> {
@@ -419,6 +425,7 @@ impl IngestMrHandler {
         observability::counter!(
             observability::metrics::MR_REVIEWS_TOTAL,
             "status" => "published",
+            "project_id" => project_id.to_string(),
         )
         .increment(1);
         info!(

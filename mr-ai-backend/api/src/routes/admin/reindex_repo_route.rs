@@ -42,6 +42,7 @@ pub struct ReindexRepoResponse {
 )]
 pub async fn reindex_repo_route(
     State(state): State<Arc<AppState>>,
+    axum::Extension(scope): axum::Extension<domain::AuthorizedScope>,
     Json(req): Json<ReindexRepoRequest>,
 ) -> Response {
     let trimmed = req.remote_url.trim();
@@ -88,15 +89,17 @@ pub async fn reindex_repo_route(
             .into_response();
     };
 
-    if project_id != state.config.default_project_id {
-        // The single-project invariant means this should never happen,
-        // but it's worth a clear error if `projects.toml` ever diverges
-        // from cached state.
+    if project_id != scope.project_id() {
+        // C4 (🅲): the remote_url resolved to a project that doesn't
+        // match the X-Project-Slug header. Could be a misconfigured
+        // client targeting the wrong tenant or a typo in
+        // projects.toml. Either way, refusing to enqueue is the
+        // safer default.
         return (
-            StatusCode::CONFLICT,
+            StatusCode::FORBIDDEN,
             Json(json!({
                 "error": "PROJECT_MISMATCH",
-                "message": "resolved repo belongs to a different project than the configured default",
+                "message": "remote_url belongs to a different project than the requesting tenant",
             })),
         )
             .into_response();

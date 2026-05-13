@@ -69,8 +69,6 @@ mod tests {
 
     fn state(secret: &str) -> Arc<AppState> {
         let config = Arc::new(crate::core::app_state::AppConfig {
-            project_slug: "test".into(),
-            default_project_id: domain::ProjectId::new(),
             git_api_base: "https://gitlab.example/api/v4".into(),
             git_token: "x".into(),
             trigger_secret: secret.into(),

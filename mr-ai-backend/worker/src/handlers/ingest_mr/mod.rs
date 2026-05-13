@@ -49,7 +49,6 @@ pub struct IngestMrHandler {
     pub(super) qdrant: Arc<Qdrant>,
     pub(super) rag_cfg: Arc<RagConfig>,
     pub(super) git_api_base: String,
-    pub(super) project_name_legacy: String,
 }
 
 impl IngestMrHandler {
@@ -59,7 +58,6 @@ impl IngestMrHandler {
         qdrant: Arc<Qdrant>,
         rag_cfg: Arc<RagConfig>,
         git_api_base: String,
-        project_name_legacy: String,
     ) -> Self {
         Self {
             pool,
@@ -67,7 +65,6 @@ impl IngestMrHandler {
             qdrant,
             rag_cfg,
             git_api_base,
-            project_name_legacy,
         }
     }
 }
@@ -149,6 +146,7 @@ impl JobHandler for IngestMrHandler {
             "review_v2": review_v2,
             "publish": publish,
         });
-        self.finalize(row.review_id, &snapshot, target_count).await
+        self.finalize(row.review_id, resolved.project_id, &snapshot, target_count)
+            .await
     }
 }

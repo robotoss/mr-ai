@@ -1,23 +1,18 @@
 use std::{env, fmt, sync::Arc};
 
 use ai_llm_service::LlmGateway;
-use domain::ProjectId;
 use rag_base::structs::rag_base_config::RagConfig;
 use secrets::SecretProvider;
 use services::llm_health::LlmHealthMonitor;
 use sqlx::PgPool;
 
-/// Application configuration loaded from environment variables plus the
-/// single-project invariant captured from `projects.toml` at boot.
+/// Application configuration. Sprint C4 (🅲 multi-tenant) removed the
+/// single-project invariant — `project_slug` and `default_project_id`
+/// no longer live here; tenant identity is resolved per-request from
+/// the `X-Project-Slug` header via
+/// [`crate::middleware_layer::tenant::extract_tenant`].
 #[derive(Clone, Debug)]
 pub struct AppConfig {
-    /// Slug of the one logical project this deployment serves. Sourced
-    /// from `projects.toml` at boot (no env override); enforces the
-    /// single-project invariant introduced in S5.
-    pub project_slug: String,
-    /// UUID of that project, cached so handlers can scope Qdrant
-    /// filters and Postgres lookups without re-reading the config file.
-    pub default_project_id: ProjectId,
     /// Base URL for the Git service API (e.g. GitLab/GitHub/Gitea).
     pub git_api_base: String,
     /// Access token for the Git service API.
@@ -33,9 +28,6 @@ pub enum ConfigError {
     MissingVar { name: &'static str },
     /// Variable is present but contains an invalid value.
     InvalidValue { name: &'static str, reason: String },
-    /// `projects.toml` declared zero or more-than-one projects, violating
-    /// the single-project invariant introduced in S5.
-    ExpectedExactlyOneProject { found: usize },
 }
 
 impl fmt::Display for ConfigError {
@@ -47,10 +39,6 @@ impl fmt::Display for ConfigError {
             ConfigError::InvalidValue { name, reason } => {
                 write!(f, "invalid value for {}: {}", name, reason)
             }
-            ConfigError::ExpectedExactlyOneProject { found } => write!(
-                f,
-                "projects.toml must declare exactly one [[project]]; found {found}"
-            ),
         }
     }
 }
@@ -58,11 +46,9 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl AppConfig {
-    /// Read the env-driven half of the config. The project identity
-    /// half (`project_slug` + `default_project_id`) is filled in by
-    /// [`AppConfig::with_project`] at boot, after `projects.toml` has
-    /// been parsed.
-    pub fn from_env_partial() -> Result<EnvAppConfig, ConfigError> {
+    /// Read configuration from env. Pure env now that the project
+    /// identity is per-request (sprint C4 of 🅲).
+    pub fn from_env() -> Result<Self, ConfigError> {
         fn must_var(name: &'static str) -> Result<String, ConfigError> {
             let v = env::var(name).map_err(|_| ConfigError::MissingVar { name })?;
             if v.trim().is_empty() {
@@ -82,33 +68,12 @@ impl AppConfig {
             });
         }
 
-        Ok(EnvAppConfig {
+        Ok(Self {
             git_api_base,
             git_token,
             trigger_secret,
         })
     }
-
-    /// Combine the env-derived parts with the project identity captured
-    /// from `projects.toml` to produce the final [`AppConfig`].
-    pub fn with_project(env: EnvAppConfig, project_slug: String, project_id: ProjectId) -> Self {
-        Self {
-            project_slug,
-            default_project_id: project_id,
-            git_api_base: env.git_api_base,
-            git_token: env.git_token,
-            trigger_secret: env.trigger_secret,
-        }
-    }
-}
-
-/// Env-only portion of [`AppConfig`]. Held briefly during boot before
-/// the project identity is stitched in.
-#[derive(Clone, Debug)]
-pub struct EnvAppConfig {
-    pub git_api_base: String,
-    pub git_token: String,
-    pub trigger_secret: String,
 }
 
 /// Shared application state for all HTTP handlers.
