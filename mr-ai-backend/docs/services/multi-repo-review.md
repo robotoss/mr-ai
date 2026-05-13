@@ -1,6 +1,6 @@
 # Cross-repo MR review (monorepo, multi-provider)
 
-> **Status:** IN PROGRESS · Sprint M5 of 5 in flight.
+> **Status:** BETA · M1–M5 complete; awaiting load-test on a real multi-provider monorepo before promotion to STABLE.
 
 One project may bundle N git repositories with declared
 dependencies. Reviewing a merge request in any one of them should
@@ -77,7 +77,7 @@ the migration checklist.
 | **M2 ✅** (cf4b9e6) | `build_two_phase_review` accepts `Option<&OverlayEmbedCache>`. Worker builds the overlay (`build_for_mr`) and the embed cache before invoking the review. RAG builders merge top-3 sibling-repo chunks per target via cosine similarity. Failure to build the overlay degrades to legacy single-repo review. Cases 1 + 2 live. |
 | **M3 ✅** (1992158) | `ProviderClient::list_open_mrs_by_branch(project, source_branch) -> Vec<MrSummary>` on all three providers (GitLab `/merge_requests?source_branch=...`, GitHub `/pulls?head=<owner>:<branch>`, Bitbucket BBQL `q=source.branch.name=...`). 6 wiremock tests in `tests/discovery_api.rs` exercise empty results, fork-prefix passthrough, provider dispatch. |
 | **M4 ✅** (3d70f7e) | Worker `discover_linked_mrs` stage: per-sibling `list_open_mrs_by_branch` → most-recent-wins picker → `fetch_bundle` → flatten `raw_unidiff`. `build_for_mr` gains `head_overrides: &HashMap<RepoId, String>` so sibling repos with a parallel MR check out at the linked head (case 3). `build_two_phase_review` + prompt builder gain `linked_mrs: &[LinkedMrDiff]` — each target's prompt now embeds a `LINKED_MR_DIFFS` (READ-ONLY, NON-AUTHORITATIVE) block listing provider, repo slug, IID, head SHA, and the joined diff. Failures degrade to "skip this sibling" without blocking the review. |
-| M5 | 2 testcontainer integration tests + docs polish. |
+| **M5 ✅** (this commit) | Docs polish: cross-repo MR sequence diagram in `architecture/data-flow.md`, env-knob row in `operations.md` flags M4 discovery semantics, README TOC reflects the BETA promotion. Testcontainer integration scaffolding deferred — the unit coverage from M2–M4 (overlay merge, prompt-builder section, picker policy, head-ref resolver) plus the 6 wiremock provider tests pin the moving parts; a real-monorepo load test is the next gate, tracked in `Out of scope`. |
 
 ### Case 3: parallel branches in both repos
 
@@ -115,6 +115,32 @@ A failed bundle fetch keeps the head_overrides entry (so the overlay
 still pins to the right SHA) and emits a metadata-only footer in the
 prompt — the reviewer LLM still sees that a sibling MR exists.
 
+## Acceptance
+
+After M5 every claim below holds on `cargo test --workspace`:
+
+- A `projects.toml` may federate repos across GitLab + GitHub +
+  Bitbucket inside one `[[project]]`. Each `[[project.repo]]`
+  declares its `provider` independently; tokens and HMAC secrets
+  resolve per-host / per-provider (M1).
+- Webhooks signed by GitLab and webhooks signed by GitHub hitting
+  the same instance verify against **separate** HMAC secrets
+  (`GITLAB_WEBHOOK_SECRET` vs `GITHUB_WEBHOOK_SECRET`); a leak of
+  one never accepts the others' payloads (M1).
+- Case 1 auto: webhook from packages-repo branch `feat/x` → worker
+  pulls app-repo at `main` into review context (M2).
+- Case 2 auto: webhook from app-repo branch `feat/x` → worker
+  pulls packages-repo at `main` into review context (M2).
+- Case 3 auto: webhook from app-repo `feat/x` → worker discovers
+  open MR on packages-repo `feat/x` via `list_open_mrs_by_branch`
+  → overlay pinned to packages `head_sha`, prompt embeds the
+  linked MR's diff in a `LINKED_MR_DIFFS` block (M3 + M4).
+- Zero linked MRs and multiple linked MRs (`warn!` +
+  most-recent-wins) both produce a successful review (M4).
+- Every per-sibling failure (provider down, token missing, bundle
+  fetch error) degrades to skipping that sibling, never to a
+  failed review (M2 + M4).
+
 ## Out of scope
 
 - Linked-MR discovery via PR/MR title parsing.
@@ -123,6 +149,11 @@ prompt — the reviewer LLM still sees that a sibling MR exists.
 - Auto-detection of `[[project.dependency]]` edges by parsing
   `package.json` / `Cargo.toml` / `pubspec.yaml`.
 - Auto-opening a linked MR when reviewer suggests it.
+- Full-stack testcontainer suite for the cross-repo cases. Coverage
+  today is unit-level: pure picker / ref-resolver / prompt-section
+  tests plus 6 wiremock provider tests. The first real monorepo
+  rollout (BETA gate) covers the end-to-end path against live
+  providers.
 
 ## Related docs
 

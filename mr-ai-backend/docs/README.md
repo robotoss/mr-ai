@@ -46,7 +46,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | `persistence` | Postgres — pool, migrations, transactions, queue mechanics, per-service responsibility. | [persistence](services/persistence.md) |
 | `observability` | Telemetry init + Prometheus metrics + (later) OTLP tracing + audit middleware. | [observability](services/observability.md) |
 | (cross-cutting) | Multi-tenant isolation — type-system perimeter + Postgres RLS + (deferred) physical isolation. | [multi-tenant](services/multi-tenant.md) |
-| (cross-cutting) | Cross-repo MR review — monorepo flow across N repos and multiple providers (GitLab/GitHub/Bitbucket). | [multi-repo-review](services/multi-repo-review.md) |
+| (cross-cutting) | Cross-repo MR review — monorepo flow across N repos and multiple providers (GitLab/GitHub/Bitbucket); BETA after M1–M5. | [multi-repo-review](services/multi-repo-review.md) |
 | `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
 | `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
 

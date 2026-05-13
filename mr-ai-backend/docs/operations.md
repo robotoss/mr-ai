@@ -45,7 +45,7 @@ returns zero rows. See [multi-tenant service page](services/multi-tenant.md).
 | `SECRET_PROVIDER` (+ `SECRETS_DIR` when `file`) | recommended | Secret backend selector. |
 | `REINDEX_JOB_TIMEOUT_MIN` (default `30`) | optional | Hard timeout for a single Reindex job. |
 | `REINDEX_SPLIT_FILES` (default `5000`) | optional | Auto-split threshold. |
-| `MR_FANOUT_MAX_*` | optional | Overlay walker caps. |
+| `MR_FANOUT_MAX_HOPS` / `MR_FANOUT_MAX_REPOS` / `MR_FANOUT_MAX_CHUNKS` | optional | Overlay walker caps (defaults `5` / `20` / `5000`). Caps apply to the cross-repo BFS in `overlay::build_for_mr` — once `max_repos` is hit, additional sibling repos are skipped (`OverlayBuildReport.repos_truncated = true`). M4 cross-MR discovery itself is uncapped (one `list_open_mrs_by_branch` call per sibling, regardless of these). |
 | `SUB_CHUNK_MIN_BYTES`, `SUB_CHUNK_OVERLAP_BYTES` | optional | Hierarchical chunk slicing. |
 
 Full table: [Configuration](guides/configuration.md).
@@ -66,7 +66,7 @@ Full table: [Configuration](guides/configuration.md).
 | Trigger | Job kind | Stages | Doc |
 | --- | --- | --- | --- |
 | Push webhook | `IngestPush` → `Reindex` | refresh bare clone → enqueue Reindex | [services/review-pipeline](services/review-pipeline.md) |
-| MR webhook | `IngestMr` | resolve provider, build review bundle, optional comment publish | [services/review-pipeline](services/review-pipeline.md) |
+| MR webhook | `IngestMr` | resolve provider, **discover sibling MRs by branch name** (M4), build overlay + review bundle, optional comment publish | [services/review-pipeline](services/review-pipeline.md), [services/multi-repo-review](services/multi-repo-review.md) |
 | `POST /admin/reindex_repo` | `Reindex` | identical to push-driven Reindex | [reference/admin-api](reference/admin-api.md) |
 | `POST /admin/reindex_all` | N×`Reindex` | one job per declared repo | [reference/admin-api](reference/admin-api.md) |
 | `POST /retrieve` | n/a (synchronous) | embed → filter Qdrant → graph expand → MR overlay | [reference/retrieve-api](reference/retrieve-api.md) |

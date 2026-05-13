@@ -127,6 +127,66 @@ sequenceDiagram
 - Per-hunk review: [`ai-review-engine/src/lib.rs:87`](../../ai-review-engine/src/lib.rs#L87)
 - Comment publishing: [`ai-review-engine/src/publish/`](../../ai-review-engine/src/publish/)
 
+## Flow 2b — Cross-repo MR review (M4)
+
+When a project federates N repositories (`[[project.repo]]` entries in
+`projects.toml`), the worker enriches the canonical Flow 2 with sibling
+context. The MR's `source_branch` drives discovery; the overlay walker
++ prompt builder consume the results.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Hook as Provider webhook
+    participant W as IngestMrHandler
+    participant Disc as discover_linked_mrs
+    participant SibProv as Sibling provider client
+    participant OV as overlay::build_for_mr
+    participant GCE as build_two_phase_review
+    participant GW as LlmGateway
+
+    Hook->>W: { remote_url, source_branch, head_sha, ... }
+    W->>Disc: per sibling repo
+    Disc->>SibProv: list_open_mrs_by_branch(slug, source_branch)
+    SibProv-->>Disc: Vec<MrSummary>
+    Note over Disc: pick_linked_mr — none / single / most-recent
+    Disc->>SibProv: fetch_bundle(linked.id) (best-effort)
+    SibProv-->>Disc: CrBundle
+    Disc-->>W: head_overrides + Vec<LinkedMrDiff>
+
+    W->>OV: build_for_mr(primary_head_sha, head_overrides, caps)
+    Note over OV: sibling with linked MR → checkout at linked head_sha<br/>sibling without → checkout at default_branch
+    OV-->>W: (OverlayGraph, OverlayBuildReport)
+
+    W->>GCE: build_two_phase_review(..., overlay, linked_mrs)
+    GCE->>GW: prereview RAG (overlay-merged)
+    GCE->>GW: enriched RAG (overlay-merged)
+    Note over GCE: prompt embeds LINKED_MR_DIFFS<br/>(read-only, non-authoritative)
+    GCE-->>W: LlmReviewRequest
+```
+
+**Case fan-out:**
+
+- Sibling repo has no open MR on the branch → no `head_overrides`
+  entry, no `LinkedMrDiff`, sibling pulled at `default_branch`
+  (cases 1 + 2).
+- Sibling has exactly one → pinned head SHA + diff embedded (case 3).
+- Sibling has multiple → most-recently-updated wins, others ignored,
+  `warn!(target="cross_repo.ambiguous")` flags the operator-side
+  branch-hygiene problem.
+
+**Failure modes (all best-effort):**
+
+| Failure | Fallback |
+|---|---|
+| Sibling token missing | Skip sibling, no override / no linked diff. |
+| `list_open_mrs_by_branch` HTTP error | Skip sibling. |
+| `fetch_bundle` fails after a pick | Keep head_override (overlay still pinned), prompt gets metadata-only footer. |
+| Entire overlay build fails | Review still runs against primary repo only (M2 behaviour). |
+
+See [services/multi-repo-review](../services/multi-repo-review.md) for
+the full plan.
+
 ## Cross-cutting concerns
 
 ### Distributed trace context (sprint 2)
