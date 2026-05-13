@@ -42,6 +42,32 @@ pub struct MrSummary {
     pub updated_at: String,
 }
 
+/// A sibling MR whose branch matches the primary MR's `source_branch`
+/// (sprint M4 of cross-repo MR review). Carries the discovery
+/// [`MrSummary`] plus the diff body the worker already fetched, so
+/// the prompt builder can embed it in a `LINKED_MR_DIFFS` block
+/// without re-hitting the provider.
+///
+/// The bundle is intentionally collapsed to a single `diff_text`
+/// string here — the prompt only needs the textual diff. Keeping the
+/// raw `CrBundle` would force the prompt module to depend on provider
+/// types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkedMrDiff {
+    pub summary: MrSummary,
+    /// Which provider this linked MR lives on (the sibling repo may be
+    /// on a different provider than the primary repo).
+    pub provider: ProviderKind,
+    /// Provider-side project identifier (e.g. `acme/packages`). Echoed
+    /// into the prompt fragment for human-readable attribution.
+    pub repo_slug: String,
+    /// Concatenated raw unified diff across the linked MR's changed
+    /// files. May be empty (e.g. provider returned no `raw_unidiff`
+    /// per file) — in that case the prompt block degrades to a
+    /// metadata-only footer.
+    pub diff_text: String,
+}
+
 /// Triple of SHAs used to bind inline comments reliably.
 ///
 /// GitLab exposes `base/start/head`; other providers might expose only

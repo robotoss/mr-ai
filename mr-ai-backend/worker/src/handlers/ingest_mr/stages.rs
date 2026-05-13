@@ -3,12 +3,14 @@
 //! threading them through arguments; outputs are small structs that
 //! make the linear pipeline in `mod.rs` legible.
 
+use std::collections::HashMap;
+
 use ai_review_engine::publish::ProviderConfig as PublisherConfig;
 use ai_review_engine::review_merge_request;
-use domain::{MrId, ProjectId, ProviderKind, RepoId, RetrievalConfig};
+use domain::{MrId, ProjectId, ProjectRepo, ProviderKind, RepoId, RetrievalConfig};
 use git_context_engine::git_providers::{
-    types::{ChangeRequestId, ProviderKind as ContextProviderKind},
-    ProviderConfig,
+    types::{ChangeRequestId, LinkedMrDiff, MrSummary, ProviderKind as ContextProviderKind},
+    ProviderClient, ProviderConfig,
 };
 use git_context_engine::prompt::LlmReviewRequest;
 use git_context_engine::retrieval::rerank_review_request;
@@ -205,6 +207,15 @@ impl IngestMrHandler {
         // a separate field on the handler.
         let project_label = resolved.project_id.as_uuid().simple().to_string();
 
+        // M4: cross-MR discovery. For each sibling repo we look for an
+        // open MR on the same `source_branch` as the primary. Sibling
+        // matches pin the overlay walker to that MR's head SHA and feed
+        // a `LINKED_MR_DIFFS` block into each target's prompt. Best-
+        // effort: discovery failures degrade to no linked MRs and the
+        // overlay defaults each sibling to its main branch (cases 1/2).
+        let (head_overrides, linked_mrs) =
+            self.discover_linked_mrs(ctx, resolved, parsed).await;
+
         // M2: build overlay before the review. Empty head_sha means
         // the webhook didn't surface a commit and we'd be guessing.
         let overlay_cache = if parsed.head_sha.is_empty() {
@@ -222,6 +233,7 @@ impl IngestMrHandler {
                 resolved.project_id,
                 resolved.repo_id,
                 &parsed.head_sha,
+                &head_overrides,
                 &job_tag,
                 caps,
             )
@@ -271,9 +283,182 @@ impl IngestMrHandler {
             self.gateway.concrete(),
             false,
             overlay_cache.as_ref(),
+            &linked_mrs,
         )
         .await
         .map_err(|e| e.to_string())
+    }
+
+    /// Sprint M4 of cross-repo MR review: for each non-primary repo in
+    /// the project, ask the provider whether a parallel MR exists on
+    /// the same `source_branch`. Returns:
+    /// - `head_overrides`: `RepoId -> head SHA` for sibling repos
+    ///   carrying a parallel MR — fed into `overlay::build_for_mr` so
+    ///   the walker checks those repos out at the linked MR's head.
+    /// - `linked_mrs`: full diff bundles (when fetchable) for the
+    ///   prompt builder to embed as a `LINKED_MR_DIFFS` block.
+    ///
+    /// Best-effort throughout: per-sibling errors degrade to "no entry"
+    /// rather than failing the whole review. Empty `source_branch` →
+    /// skip discovery entirely (worker has nothing to match against).
+    #[tracing::instrument(
+        name = "ingest_mr.discover_linked_mrs",
+        skip_all,
+        fields(
+            project_id = %resolved.project_id,
+            primary_repo_id = ?resolved.repo_id,
+            source_branch = %parsed.source_branch,
+        ),
+    )]
+    pub(super) async fn discover_linked_mrs(
+        &self,
+        ctx: &ProviderCtx,
+        resolved: &RepoResolved,
+        parsed: &MrPayload,
+    ) -> (HashMap<RepoId, String>, Vec<LinkedMrDiff>) {
+        let mut head_overrides: HashMap<RepoId, String> = HashMap::new();
+        let mut linked_mrs: Vec<LinkedMrDiff> = Vec::new();
+
+        if parsed.source_branch.is_empty() {
+            tracing::debug!(
+                target = "cross_repo.discover",
+                "skip discovery: payload.source_branch is empty"
+            );
+            return (head_overrides, linked_mrs);
+        }
+
+        let repos = match projects::list_repos_for_project(&self.pool, resolved.project_id).await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                warn!(
+                    target = "cross_repo.discover",
+                    error = %err,
+                    "list_repos_for_project failed; discovery skipped"
+                );
+                return (head_overrides, linked_mrs);
+            }
+        };
+
+        for sibling in repos
+            .into_iter()
+            .filter(|r| r.id != resolved.repo_id)
+        {
+            match self
+                .discover_linked_mr_for_sibling(&sibling, &parsed.source_branch, ctx)
+                .await
+            {
+                Some(linked) => {
+                    head_overrides.insert(sibling.id, linked.summary.head_sha.clone());
+                    linked_mrs.push(linked);
+                }
+                None => continue,
+            }
+        }
+
+        info!(
+            target = "cross_repo.discover",
+            siblings_with_parallel_mr = head_overrides.len(),
+            linked_with_diff = linked_mrs
+                .iter()
+                .filter(|l| !l.diff_text.is_empty())
+                .count(),
+            "discovery complete"
+        );
+        (head_overrides, linked_mrs)
+    }
+
+    /// One sibling's slice of [`discover_linked_mrs`]: build a provider
+    /// client per host (M1 plumbing), list open MRs on the branch,
+    /// pick the most-recent match if any, then fetch the bundle and
+    /// flatten its diffs into a `LinkedMrDiff`. Each failure path
+    /// returns `None` after a `warn!` — the caller continues to the
+    /// next sibling.
+    async fn discover_linked_mr_for_sibling(
+        &self,
+        sibling: &ProjectRepo,
+        source_branch: &str,
+        primary_ctx: &ProviderCtx,
+    ) -> Option<LinkedMrDiff> {
+        let host = secrets::host_from_remote_url(&sibling.remote_url);
+        let token = secrets::sync::resolve_with_host(
+            None,
+            host.as_deref(),
+            &secrets::SecretKey::GitToken,
+        )?;
+        let base_api = match host.as_deref() {
+            Some(h) => secrets::base_api_for(h, sibling.provider),
+            None => primary_ctx.cfg.base_api.clone(),
+        };
+        let cfg = ProviderConfig {
+            kind: map_provider_to_context(sibling.provider),
+            base_api,
+            token,
+        };
+        let client = match ProviderClient::from_config(cfg) {
+            Ok(c) => c,
+            Err(err) => {
+                warn!(
+                    target = "cross_repo.discover",
+                    repo_id = ?sibling.id,
+                    remote = %sibling.remote_url,
+                    error = %err,
+                    "sibling provider client build failed; skipping"
+                );
+                return None;
+            }
+        };
+        let slug = super::provider::provider_project_slug(&sibling.remote_url)?;
+
+        let candidates = match client.list_open_mrs_by_branch(&slug, source_branch).await {
+            Ok(v) => v,
+            Err(err) => {
+                warn!(
+                    target = "cross_repo.discover",
+                    repo_id = ?sibling.id,
+                    slug = %slug,
+                    error = %err,
+                    "list_open_mrs_by_branch failed; skipping sibling"
+                );
+                return None;
+            }
+        };
+        let chosen = pick_linked_mr(candidates, sibling.id, &slug)?;
+
+        // Fetch the diff bundle. Failure here still gives us
+        // head_overrides metadata, so we return a `LinkedMrDiff` with
+        // an empty `diff_text` — the prompt will render a metadata-
+        // only footer.
+        let bundle = match client.fetch_bundle(&chosen.id).await {
+            Ok(b) => Some(b),
+            Err(err) => {
+                warn!(
+                    target = "cross_repo.discover",
+                    repo_id = ?sibling.id,
+                    slug = %slug,
+                    iid = chosen.id.iid,
+                    error = %err,
+                    "linked MR bundle fetch failed; emitting metadata-only entry"
+                );
+                None
+            }
+        };
+        let diff_text = bundle
+            .map(|b| {
+                b.changes
+                    .files
+                    .iter()
+                    .filter_map(|f| f.raw_unidiff.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        Some(LinkedMrDiff {
+            summary: chosen,
+            provider: map_provider_to_context(sibling.provider),
+            repo_slug: slug,
+            diff_text,
+        })
     }
 
     /// Optional rerank stage. Returns:
@@ -518,6 +703,34 @@ impl IngestMrHandler {
     }
 }
 
+/// Pick at most one linked MR from a discovery API result. Empty input
+/// returns `None` (case 1/2: no sibling MR exists). Multiple candidates
+/// pick the most recently updated and emit a `warn!` so operators can
+/// see when branch-name ambiguity hits — convention is one MR per
+/// branch per repo. Pure, so the worker unit tests can pin the policy
+/// without spinning up a provider.
+pub(super) fn pick_linked_mr(
+    candidates: Vec<MrSummary>,
+    sibling_repo_id: RepoId,
+    sibling_slug: &str,
+) -> Option<MrSummary> {
+    if candidates.is_empty() {
+        return None;
+    }
+    if candidates.len() > 1 {
+        warn!(
+            target = "cross_repo.ambiguous",
+            repo_id = ?sibling_repo_id,
+            slug = %sibling_slug,
+            count = candidates.len(),
+            "multiple open MRs share the same source_branch; picking most recent"
+        );
+    }
+    candidates
+        .into_iter()
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+}
+
 /// Shim used inside `build_provider_ctx`. Mirrors
 /// `provider::map_provider` so we don't reach across the module boundary
 /// for what is essentially a 3-arm match.
@@ -597,7 +810,23 @@ mod tests {
     use serde_json::Value;
 
     use crate::handlers::ingest_mr::IngestMrHandler;
-    use crate::handlers::ingest_mr::stages::{classify_outcome, priority_to_code};
+    use crate::handlers::ingest_mr::stages::{classify_outcome, pick_linked_mr, priority_to_code};
+    use domain::RepoId;
+    use git_context_engine::git_providers::types::{ChangeRequestId, MrSummary};
+
+    fn mr_summary(iid: u64, updated_at: &str) -> MrSummary {
+        MrSummary {
+            id: ChangeRequestId {
+                project: "acme/packages".into(),
+                iid,
+            },
+            head_sha: format!("sha{iid}"),
+            source_branch: "feat/x".into(),
+            target_branch: "main".into(),
+            web_url: format!("https://example/p{iid}"),
+            updated_at: updated_at.into(),
+        }
+    }
 
     fn target(file_path: &str, hunk_index: usize) -> LlmReviewTarget {
         LlmReviewTarget {
@@ -775,6 +1004,45 @@ mod tests {
     // certain feature combinations.
     #[allow(dead_code)]
     fn _value_marker(_: Value) {}
+
+    #[test]
+    fn pick_linked_mr_returns_none_when_zero_candidates() {
+        // Sprint M4 of cross-repo MR review: when the sibling repo has
+        // no open MR on the branch (case 1/2), the worker falls back
+        // to pulling main for that repo. `None` is the signal.
+        let chosen = pick_linked_mr(vec![], RepoId::new(), "acme/packages");
+        assert!(chosen.is_none());
+    }
+
+    #[test]
+    fn pick_linked_mr_returns_single_when_exactly_one() {
+        let only = mr_summary(7, "2026-05-13T10:00:00Z");
+        let chosen = pick_linked_mr(
+            vec![only.clone()],
+            RepoId::new(),
+            "acme/packages",
+        )
+        .expect("single candidate is picked");
+        assert_eq!(chosen.id.iid, 7);
+    }
+
+    #[test]
+    fn pick_linked_mr_picks_most_recent_when_multiple_candidates() {
+        // Branch-name ambiguity: two MRs on the same source_branch.
+        // Pick wins on `updated_at`. Convention says don't do this;
+        // the worker still has to produce a deterministic answer.
+        let older = mr_summary(5, "2026-05-10T00:00:00Z");
+        let newer = mr_summary(8, "2026-05-13T18:00:00Z");
+        let in_middle = mr_summary(6, "2026-05-12T12:00:00Z");
+        let chosen = pick_linked_mr(
+            vec![older, in_middle, newer.clone()],
+            RepoId::new(),
+            "acme/packages",
+        )
+        .expect("non-empty candidates yield a pick");
+        assert_eq!(chosen.id.iid, 8, "expected the most-recent MR");
+        assert_eq!(chosen.updated_at, newer.updated_at);
+    }
 
     #[test]
     fn reorder_targets_by_rerank_leaves_unranked_at_tail() {

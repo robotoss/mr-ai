@@ -14,7 +14,9 @@
 pub mod build;
 pub mod merge;
 
-pub use build::{build_for_mr, plan_walk, OverlayBuildReport, OverlayCaps, WalkPlan};
+pub use build::{
+    build_for_mr, plan_walk, resolve_visit_git_ref, OverlayBuildReport, OverlayCaps, WalkPlan,
+};
 pub use merge::OverlayEmbedCache;
 
 use std::collections::{BTreeMap, BTreeSet};

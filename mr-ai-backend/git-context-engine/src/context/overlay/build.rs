@@ -126,11 +126,39 @@ pub fn plan_walk(
     WalkPlan { visits, truncated }
 }
 
+/// Decide which git ref a sibling repo should be checked out at when
+/// building the overlay. Pure helper — exists primarily so the
+/// case-3 head-override behaviour (sprint M4) can be unit-tested
+/// without spinning up Postgres + libgit2.
+///
+/// Resolution order, first-wins:
+/// 1. `repo_id == primary_repo_id` → `primary_head_sha` (the MR's head).
+/// 2. `head_overrides[repo_id]` present → use that SHA (case 3:
+///    sibling repo carries a parallel MR on the same branch name).
+/// 3. fallback → `default_branch` (case 1/2: sibling repos that
+///    have no parallel MR are pulled at main).
+pub fn resolve_visit_git_ref(
+    repo_id: RepoId,
+    primary_repo_id: RepoId,
+    primary_head_sha: &str,
+    head_overrides: &HashMap<RepoId, String>,
+    default_branch: &str,
+) -> String {
+    if repo_id == primary_repo_id {
+        return primary_head_sha.to_owned();
+    }
+    if let Some(sha) = head_overrides.get(&repo_id) {
+        return sha.clone();
+    }
+    default_branch.to_owned()
+}
+
 /// Build an in-memory overlay for the MR opened against `primary_repo_id`.
 ///
 /// The walker visits every repo within `caps.max_hops` of the primary,
 /// builds a worktree at the appropriate ref (primary uses `primary_head_sha`,
-/// transitive repos use their `default_branch`), runs `index_workspace`,
+/// repos in `head_overrides` use their mapped SHA — sprint M4 case 3 —
+/// otherwise the repo's `default_branch`), runs `index_workspace`,
 /// and folds the resulting chunks into a shared overlay.
 ///
 /// Returns the overlay even when caps trigger truncation — partial coverage
@@ -142,6 +170,7 @@ pub async fn build_for_mr(
     project_id: ProjectId,
     primary_repo_id: RepoId,
     primary_head_sha: &str,
+    head_overrides: &HashMap<RepoId, String>,
     job_tag: &str,
     caps: OverlayCaps,
 ) -> GitContextEngineResult<(OverlayGraph, OverlayBuildReport)> {
@@ -204,11 +233,13 @@ pub async fn build_for_mr(
 
     'outer: for (repo_id, hop) in plan.visits.iter().copied() {
         let repo = &by_id[&repo_id];
-        let git_ref = if repo_id == primary_repo_id {
-            primary_head_sha.to_owned()
-        } else {
-            repo.default_branch.clone()
-        };
+        let git_ref = resolve_visit_git_ref(
+            repo_id,
+            primary_repo_id,
+            primary_head_sha,
+            head_overrides,
+            &repo.default_branch,
+        );
         let tag = format!(
             "{job_tag}-{}",
             uuid::Uuid::from(repo_id).simple()
@@ -468,6 +499,37 @@ mod tests {
         let plan = plan_walk(a, caps, inb, out);
         assert_eq!(plan.visits.len(), 2);
         assert!(plan.truncated);
+    }
+
+    #[test]
+    fn resolve_visit_git_ref_uses_head_overrides_for_non_primary_repos() {
+        // Three repos: primary, sibling-with-parallel-MR, sibling-without.
+        let primary = RepoId::new();
+        let sibling_linked = RepoId::new();
+        let sibling_main = RepoId::new();
+        let primary_head = "deadbeef";
+
+        let mut overrides = HashMap::new();
+        overrides.insert(sibling_linked, "feed0007".to_owned());
+
+        // Primary repo: always the MR head SHA — overrides MUST NOT
+        // bleed into the primary (defensive against caller mistake).
+        let r1 = resolve_visit_git_ref(primary, primary, primary_head, &overrides, "main");
+        assert_eq!(r1, primary_head);
+
+        // Sibling with parallel MR (case 3): pinned to discovered SHA.
+        let r2 =
+            resolve_visit_git_ref(sibling_linked, primary, primary_head, &overrides, "main");
+        assert_eq!(r2, "feed0007");
+
+        // Sibling without parallel MR (case 1/2): fall back to main.
+        let r3 = resolve_visit_git_ref(sibling_main, primary, primary_head, &overrides, "main");
+        assert_eq!(r3, "main");
+
+        // Empty overrides → every non-primary repo gets default_branch.
+        let empty: HashMap<RepoId, String> = HashMap::new();
+        let r4 = resolve_visit_git_ref(sibling_linked, primary, primary_head, &empty, "develop");
+        assert_eq!(r4, "develop");
     }
 
     #[test]

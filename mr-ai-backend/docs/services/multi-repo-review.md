@@ -1,6 +1,6 @@
 # Cross-repo MR review (monorepo, multi-provider)
 
-> **Status:** IN PROGRESS · Sprint M4 of 5 in flight.
+> **Status:** IN PROGRESS · Sprint M5 of 5 in flight.
 
 One project may bundle N git repositories with declared
 dependencies. Reviewing a merge request in any one of them should
@@ -76,8 +76,44 @@ the migration checklist.
 | **M1 ✅** (5ce58c1) | `base_api_for` helper, per-provider webhook secrets, per-repo `ProviderConfig`. |
 | **M2 ✅** (cf4b9e6) | `build_two_phase_review` accepts `Option<&OverlayEmbedCache>`. Worker builds the overlay (`build_for_mr`) and the embed cache before invoking the review. RAG builders merge top-3 sibling-repo chunks per target via cosine similarity. Failure to build the overlay degrades to legacy single-repo review. Cases 1 + 2 live. |
 | **M3 ✅** (1992158) | `ProviderClient::list_open_mrs_by_branch(project, source_branch) -> Vec<MrSummary>` on all three providers (GitLab `/merge_requests?source_branch=...`, GitHub `/pulls?head=<owner>:<branch>`, Bitbucket BBQL `q=source.branch.name=...`). 6 wiremock tests in `tests/discovery_api.rs` exercise empty results, fork-prefix passthrough, provider dispatch. |
-| M4 | Worker discovery step + `build_for_mr(..., head_overrides)`. Prompt embeds `LINKED_MR_DIFFS` block. Case 3 lights up. |
+| **M4 ✅** (this commit) | Worker `discover_linked_mrs` stage: per-sibling `list_open_mrs_by_branch` → most-recent-wins picker → `fetch_bundle` → flatten `raw_unidiff`. `build_for_mr` gains `head_overrides: &HashMap<RepoId, String>` so sibling repos with a parallel MR check out at the linked head (case 3). `build_two_phase_review` + prompt builder gain `linked_mrs: &[LinkedMrDiff]` — each target's prompt now embeds a `LINKED_MR_DIFFS` (READ-ONLY, NON-AUTHORITATIVE) block listing provider, repo slug, IID, head SHA, and the joined diff. Failures degrade to "skip this sibling" without blocking the review. |
 | M5 | 2 testcontainer integration tests + docs polish. |
+
+### Case 3: parallel branches in both repos
+
+When the webhook arrives for a branch like `feat/x`, the worker runs
+[`discover_linked_mrs`](../../worker/src/handlers/ingest_mr/stages.rs) once:
+
+1. List every sibling repo under the same project (`projects::list_repos_for_project`).
+2. For each, build a per-host `ProviderClient` (using M1's `base_api_for`
+   helper so a sibling on a different provider works transparently)
+   and call `list_open_mrs_by_branch(slug, "feat/x")`.
+3. Empty → skip that sibling. Multiple → pick the one with the
+   newest `updated_at` and emit `warn!(target="cross_repo.ambiguous")`.
+4. Fetch the chosen MR's bundle, flatten `FileChange.raw_unidiff` into
+   a single string.
+
+The output feeds both the overlay (`head_overrides` pins the sibling
+checkout to the linked head SHA) and the prompt:
+
+```text
+=== LINKED_MR_DIFFS (READ-ONLY, NON-AUTHORITATIVE) ===
+The following diffs come from sibling repositories whose
+branch name matches this MR. Use them only to understand
+how the change interacts with the rest of the project.
+You MUST NOT raise issues against lines from these diffs.
+
+--- linked from GitHub:acme/packages#7 (branch feat/x)
+URL: https://github.com/acme/packages/pull/7
+HEAD_SHA: deadbeef
+
+<joined raw_unidiff body>
+---
+```
+
+A failed bundle fetch keeps the head_overrides entry (so the overlay
+still pins to the right SHA) and emits a metadata-only footer in the
+prompt — the reviewer LLM still sees that a sibling MR exists.
 
 ## Out of scope
 

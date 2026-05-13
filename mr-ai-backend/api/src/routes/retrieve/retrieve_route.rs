@@ -408,12 +408,18 @@ async fn build_overlay_hits(
         .map_err(|e| format!("git_service_init: {e}"))?;
     let job_tag = format!("retrieve-mr-{mr_iid}");
     let caps = git_context_engine::overlay::OverlayCaps::from_env();
+    // M4: /retrieve does not perform cross-MR discovery (it's the
+    // synchronous query path, not the worker). Pass empty
+    // `head_overrides` — every non-primary repo gets checked out at
+    // its `default_branch`, matching pre-M4 semantics for this route.
+    let head_overrides: std::collections::HashMap<RepoId, String> = Default::default();
     let (overlay, report) = git_context_engine::overlay::build_for_mr(
         pool,
         &git,
         project_id,
         primary_repo_id,
         head_sha,
+        &head_overrides,
         &job_tag,
         caps,
     )

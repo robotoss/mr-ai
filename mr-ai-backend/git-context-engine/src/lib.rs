@@ -46,7 +46,7 @@ use crate::context::rag::build_rag_contexts_for_targets;
 use crate::context::rules::builtin::default_rule_set;
 use crate::diff::build_review_targets;
 pub use crate::errors::{GitContextEngineError, GitContextEngineResult};
-use crate::providers::git_providers::types::{ChangeRequestId, CrBundle};
+use crate::providers::git_providers::types::{ChangeRequestId, CrBundle, LinkedMrDiff};
 use crate::providers::git_providers::{ProviderClient, ProviderConfig};
 use crate::review::prompt::LlmReviewRequest;
 
@@ -85,6 +85,12 @@ pub async fn build_two_phase_review(
     // sibling-repo chunks merge into per-target RAG context.
     // `None` → legacy single-repo behaviour.
     overlay: Option<&crate::context::overlay::OverlayEmbedCache>,
+    // Sprint M4 of cross-repo MR review: sibling MRs that share the
+    // primary MR's `source_branch`. Non-empty → each target's prompt
+    // gains a `LINKED_MR_DIFFS` block listing those MRs and their
+    // diffs. The worker built this list via
+    // `ProviderClient::list_open_mrs_by_branch` + `fetch_bundle`.
+    linked_mrs: &[LinkedMrDiff],
 ) -> GitContextEngineResult<LlmReviewRequest> {
     info!(
         provider = ?cfg.kind,
@@ -166,6 +172,7 @@ pub async fn build_two_phase_review(
         &rules,
         &enriched_rag,
         Some(&prereview_plan),
+        linked_mrs,
     )?;
 
     if save_logs {

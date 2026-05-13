@@ -153,6 +153,7 @@ pub async fn trigger_mr_route(
         state.gateway.clone(),
         false,
         None,
+        &[],
     )
     .await;
     // ApiResponse::success(TriggerMrResponse {

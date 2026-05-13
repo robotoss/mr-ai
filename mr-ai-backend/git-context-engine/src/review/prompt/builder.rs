@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 use crate::context::ast::{AstContext, AstContextProvider};
 use crate::diff::ReviewTarget;
 use crate::errors::GitContextEngineResult;
-use crate::providers::git_providers::types::CrBundle;
+use crate::providers::git_providers::types::{CrBundle, LinkedMrDiff};
 use crate::review::pre_review::utils::build_planned_anchors_for_target;
 use crate::review::pre_review::{PreReviewHypothesis, PreReviewPlan};
 use crate::review::prompt::{LlmPlannedAnchor, LlmReviewRequest, LlmReviewTarget};
@@ -37,6 +37,11 @@ pub fn build_llm_review_request(
     rules: &RuleSet,
     rag_contexts: &[TargetRagContext],
     prereview_plan: Option<&PreReviewPlan>,
+    // Sprint M4 of cross-repo MR review: sibling MRs that share the
+    // primary MR's `source_branch`. Each target's prompt gains a
+    // `LINKED_MR_DIFFS` section enumerating these. Empty slice → no
+    // change to the prompt (case 1/2 + single-repo MRs).
+    linked_mrs: &[LinkedMrDiff],
 ) -> GitContextEngineResult<LlmReviewRequest> {
     let mut out_targets = Vec::<LlmReviewTarget>::new();
 
@@ -100,6 +105,7 @@ pub fn build_llm_review_request(
                     rules,
                     rag_ctx,
                     &single_hyp_vec,
+                    linked_mrs,
                 )?;
 
                 debug!(
@@ -142,8 +148,9 @@ pub fn build_llm_review_request(
 
             let empty_hyps: &[PreReviewHypothesis] = &[];
 
-            let prompt_text =
-                render_prompt_for_target(bundle, target, &ast_ctx, rules, rag_ctx, empty_hyps)?;
+            let prompt_text = render_prompt_for_target(
+                bundle, target, &ast_ctx, rules, rag_ctx, empty_hyps, linked_mrs,
+            )?;
 
             debug!(
                 file = %target.file_path,
@@ -191,6 +198,7 @@ fn render_prompt_for_target(
     rules: &RuleSet,
     rag_ctx: Option<&TargetRagContext>,
     hypotheses: &[PreReviewHypothesis],
+    linked_mrs: &[LinkedMrDiff],
 ) -> GitContextEngineResult<String> {
     let mut buf = String::new();
 
@@ -448,6 +456,46 @@ fn render_prompt_for_target(
         }
     }
 
+    // Sprint M4 of cross-repo MR review: when sibling MRs are paired
+    // by branch-name discovery, embed their diffs as additional
+    // CONTEXT here. The block is non-authoritative — same status as
+    // AST / RAG — so the reviewer LLM does NOT raise issues against
+    // these diffs directly, but can use them to reason about
+    // intent / cross-repo dependencies on the PRIMARY DIFF.
+    if !linked_mrs.is_empty() {
+        buf.push_str(
+            "=== LINKED_MR_DIFFS (READ-ONLY, NON-AUTHORITATIVE) ===\n\
+             The following diffs come from sibling repositories whose\n\
+             branch name matches this MR. Use them only to understand\n\
+             how the change interacts with the rest of the project.\n\
+             You MUST NOT raise issues against lines from these diffs.\n\n",
+        );
+        for linked in linked_mrs {
+            let _ = writeln!(
+                &mut buf,
+                "--- linked from {:?}:{}#{} (branch {})",
+                linked.provider,
+                linked.repo_slug,
+                linked.summary.id.iid,
+                linked.summary.source_branch
+            );
+            if !linked.summary.web_url.is_empty() {
+                let _ = writeln!(&mut buf, "URL: {}", linked.summary.web_url);
+            }
+            if !linked.summary.head_sha.is_empty() {
+                let _ = writeln!(&mut buf, "HEAD_SHA: {}", linked.summary.head_sha);
+            }
+            buf.push('\n');
+            if linked.diff_text.trim().is_empty() {
+                buf.push_str("(no diff body fetched — metadata only)\n");
+            } else {
+                buf.push_str(linked.diff_text.trim_end());
+                buf.push('\n');
+            }
+            buf.push_str("---\n\n");
+        }
+    }
+
     let rules_text = compose_rules_for_file(&target.file_path, rules);
 
     if !rules_text.trim().is_empty() {
@@ -560,6 +608,174 @@ HARD CONSTRAINTS
     );
 
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::ast::NoopAstContextProvider;
+    use crate::context::rules::builtin::default_rule_set;
+    use crate::diff::build_review_targets;
+    use crate::providers::git_providers::types::{
+        AuthorInfo, ChangeRequest, ChangeRequestId, ChangeSet, CrBundle, DiffHunk, DiffLine,
+        DiffRefs, FileChange, LinkedMrDiff, MrSummary, ProviderKind,
+    };
+    use chrono::Utc;
+
+    fn dummy_bundle() -> CrBundle {
+        let hunk = DiffHunk {
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            lines: vec![DiffLine::Added {
+                new_line: 1,
+                content: "println!(\"hello\");".into(),
+            }],
+        };
+        let file = FileChange {
+            old_path: Some("src/main.rs".into()),
+            new_path: Some("src/main.rs".into()),
+            is_new: false,
+            is_deleted: false,
+            is_renamed: false,
+            is_binary: false,
+            hunks: vec![hunk],
+            raw_unidiff: Some(
+                "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n+println!(\"hello\");"
+                    .into(),
+            ),
+        };
+        CrBundle {
+            meta: ChangeRequest {
+                provider: ProviderKind::GitLab,
+                id: ChangeRequestId {
+                    project: "acme/app".into(),
+                    iid: 1,
+                },
+                title: "t".into(),
+                description: Some("d".into()),
+                author: AuthorInfo {
+                    id: "u1".into(),
+                    username: Some("alice".into()),
+                    name: Some("Alice".into()),
+                    web_url: None,
+                    avatar_url: None,
+                },
+                state: "opened".into(),
+                web_url: "https://example/mr".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                source_branch: Some("feat/x".into()),
+                target_branch: Some("main".into()),
+                diff_refs: DiffRefs {
+                    base_sha: "b".into(),
+                    start_sha: None,
+                    head_sha: "h".into(),
+                },
+            },
+            commits: vec![],
+            changes: ChangeSet {
+                files: vec![file],
+                is_truncated: false,
+            },
+        }
+    }
+
+    fn linked(diff_text: &str) -> LinkedMrDiff {
+        LinkedMrDiff {
+            summary: MrSummary {
+                id: ChangeRequestId {
+                    project: "acme/packages".into(),
+                    iid: 7,
+                },
+                head_sha: "deadbeef".into(),
+                source_branch: "feat/x".into(),
+                target_branch: "main".into(),
+                web_url: "https://example/p7".into(),
+                updated_at: "2026-05-13T00:00:00Z".into(),
+            },
+            provider: ProviderKind::GitHub,
+            repo_slug: "acme/packages".into(),
+            diff_text: diff_text.into(),
+        }
+    }
+
+    #[test]
+    fn build_llm_review_request_emits_linked_mr_diffs_block_when_present() {
+        let bundle = dummy_bundle();
+        let targets = build_review_targets(&bundle.changes);
+        assert!(!targets.is_empty(), "diff has at least one hunk");
+
+        let req = build_llm_review_request(
+            &bundle,
+            &targets,
+            &NoopAstContextProvider,
+            &default_rule_set(),
+            &[],
+            None,
+            &[linked("+++ packages-side diff line +++")],
+        )
+        .expect("prompt builder succeeds");
+
+        let prompt = &req.targets[0].prompt_text;
+        assert!(
+            prompt.contains("LINKED_MR_DIFFS"),
+            "linked MR section header missing from prompt"
+        );
+        assert!(
+            prompt.contains("acme/packages#7"),
+            "linked MR identifier missing from prompt"
+        );
+        assert!(
+            prompt.contains("HEAD_SHA: deadbeef"),
+            "linked MR head SHA missing from prompt"
+        );
+        assert!(
+            prompt.contains("+++ packages-side diff line +++"),
+            "linked MR diff body missing from prompt"
+        );
+    }
+
+    #[test]
+    fn build_llm_review_request_omits_linked_mr_section_when_empty() {
+        let bundle = dummy_bundle();
+        let targets = build_review_targets(&bundle.changes);
+        let req = build_llm_review_request(
+            &bundle,
+            &targets,
+            &NoopAstContextProvider,
+            &default_rule_set(),
+            &[],
+            None,
+            &[],
+        )
+        .expect("prompt builder succeeds");
+        let prompt = &req.targets[0].prompt_text;
+        assert!(
+            !prompt.contains("LINKED_MR_DIFFS"),
+            "linked MR section should be absent when no siblings discovered"
+        );
+    }
+
+    #[test]
+    fn build_llm_review_request_linked_mr_without_diff_body_emits_metadata_footer() {
+        let bundle = dummy_bundle();
+        let targets = build_review_targets(&bundle.changes);
+        let req = build_llm_review_request(
+            &bundle,
+            &targets,
+            &NoopAstContextProvider,
+            &default_rule_set(),
+            &[],
+            None,
+            &[linked("")], // worker couldn't fetch raw_unidiff
+        )
+        .expect("prompt builder succeeds");
+        let prompt = &req.targets[0].prompt_text;
+        assert!(prompt.contains("LINKED_MR_DIFFS"));
+        assert!(prompt.contains("(no diff body fetched — metadata only)"));
+    }
 }
 
 fn guess_code_fence_lang(file_path: &str) -> &'static str {
