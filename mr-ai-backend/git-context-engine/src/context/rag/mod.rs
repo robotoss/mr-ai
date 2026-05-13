@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use ai_llm_service::LlmGateway;
+use ai_llm_service::{EmbeddingRequest, EmbeddingTier, LlmGateway};
 use domain::{ProjectId, RepoId};
 use qdrant_client::Qdrant;
 use rag_base::structs::rag_base_config::RagConfig;
@@ -92,7 +92,47 @@ pub async fn build_rag_contexts_for_targets(
     let k = k.unwrap_or(8);
     let mut out = Vec::with_capacity(targets.len());
 
-    for target in targets {
+    // Sprint M5 #7: when overlay is present, embed all per-target
+    // queries in ONE batched gateway call instead of doing one round-
+    // trip per target. Cuts overlay-side latency from N×RTT to ~1×RTT.
+    // `None` means either no overlay was provided or the batch embed
+    // failed — both paths degrade to no-overlay enrichment.
+    let overlay_query_vectors: Option<Vec<Option<Vec<f32>>>> = match overlay {
+        Some(_) if !targets.is_empty() => {
+            let queries: Vec<String> = targets
+                .iter()
+                .map(build_query_from_review_target)
+                .collect();
+            match gateway
+                .embed_batch(EmbeddingTier::Default, EmbeddingRequest::new(queries))
+                .await
+            {
+                Ok(resp) if resp.vectors.len() == targets.len() => Some(
+                    resp.vectors.into_iter().map(Some).collect(),
+                ),
+                Ok(resp) => {
+                    warn!(
+                        target = "rag_layer.overlay",
+                        got = resp.vectors.len(),
+                        expected = targets.len(),
+                        "overlay-query batch embed size mismatch; skipping overlay merge"
+                    );
+                    None
+                }
+                Err(err) => {
+                    warn!(
+                        target = "rag_layer.overlay",
+                        error = %err,
+                        "overlay-query batch embed failed; skipping overlay merge"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
+    for (idx, target) in targets.iter().enumerate() {
         // 1) Build a text query from the diff hunk.
         let query = build_query_from_review_target(target);
 
@@ -125,27 +165,26 @@ pub async fn build_rag_contexts_for_targets(
         };
 
         // 3) Overlay merge (sprint M2 of cross-repo review). When the
-        //    caller supplied an `OverlayEmbedCache` (worker built it
-        //    from the MR's `OverlayGraph`), append the top-N most
-        //    similar sibling-repo chunks per target so the LLM sees
-        //    cross-repo context.
-        if let Some(cache) = overlay {
-            let overlay_hits = cache
-                .top_k_for_query(
-                    gateway.clone(),
-                    &query,
+        //    caller supplied an `OverlayEmbedCache` *and* the batched
+        //    query-embed succeeded, append the top-N most similar
+        //    sibling-repo chunks per target so the LLM sees cross-repo
+        //    context.
+        if let (Some(cache), Some(vectors)) = (overlay, overlay_query_vectors.as_ref()) {
+            if let Some(Some(qv)) = vectors.get(idx) {
+                let overlay_hits = cache.top_k_with_vector(
+                    qv,
                     OVERLAY_PER_TARGET_K,
                     REVIEW_MIN_SCORE,
-                )
-                .await;
-            if !overlay_hits.is_empty() {
-                debug!(
-                    file = %target.file_path,
-                    hunk = target.hunk_index,
-                    overlay_hits = overlay_hits.len(),
-                    "rag_layer: merged overlay chunks into target"
                 );
-                results.extend(overlay_hits);
+                if !overlay_hits.is_empty() {
+                    debug!(
+                        file = %target.file_path,
+                        hunk = target.hunk_index,
+                        overlay_hits = overlay_hits.len(),
+                        "rag_layer: merged overlay chunks into target"
+                    );
+                    results.extend(overlay_hits);
+                }
             }
         }
 

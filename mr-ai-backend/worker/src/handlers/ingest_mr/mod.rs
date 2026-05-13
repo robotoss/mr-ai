@@ -54,6 +54,19 @@ pub struct IngestMrHandler {
     /// sees cross-repo context. `GitService` is cheap to clone
     /// (inner `Arc<GitServiceConfig>`).
     pub(super) git: project_code_store::GitService,
+    /// Sprint M4 sibling-discovery client cache. Each entry holds a
+    /// `ProviderClient` keyed by `(host, provider_kind)` so repeated
+    /// discovery against the same sibling host reuses the underlying
+    /// `reqwest::Client` (connection pool + DNS cache + TLS session).
+    /// Cloning a cached `ProviderClient` is `Arc`-cheap.
+    pub(super) provider_clients: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<
+                (String, domain::ProviderKind),
+                git_context_engine::git_providers::ProviderClient,
+            >,
+        >,
+    >,
 }
 
 impl IngestMrHandler {
@@ -72,6 +85,9 @@ impl IngestMrHandler {
             rag_cfg,
             git_api_base,
             git,
+            provider_clients: Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 }
@@ -107,19 +123,23 @@ impl JobHandler for IngestMrHandler {
             "IngestMr: review row opened"
         );
 
-        let mut request = match self.build_review(&provider_ctx, &resolved, &parsed).await {
-            Ok(request) => request,
-            Err(err) => {
-                let msg = err.to_string();
-                let _ =
-                    persistence::repos::mr_reviews::mark_failed(&self.pool, row.review_id, &msg)
-                        .await;
-                return Err(WorkerError::Handler(
-                    KIND_INGEST_MR.into(),
-                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg)),
-                ));
-            }
-        };
+        let (mut request, cross_repo_audit) =
+            match self.build_review(&provider_ctx, &resolved, &parsed).await {
+                Ok(out) => out,
+                Err(err) => {
+                    let msg = err.to_string();
+                    let _ = persistence::repos::mr_reviews::mark_failed(
+                        &self.pool,
+                        row.review_id,
+                        &msg,
+                    )
+                    .await;
+                    return Err(WorkerError::Handler(
+                        KIND_INGEST_MR.into(),
+                        Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg)),
+                    ));
+                }
+            };
 
         let bundle_json = serde_json::to_value(&request).unwrap_or_else(|err| {
             json!({
@@ -152,6 +172,11 @@ impl JobHandler for IngestMrHandler {
             "rerank": rerank,
             "review_v2": review_v2,
             "publish": publish,
+            // Sprint M5 #11: cross-repo discovery audit (sibling MRs
+            // paired by branch name, head_overrides applied, diff
+            // sizes embedded). Stable shape — post-mortem tooling can
+            // rely on these keys.
+            "cross_repo_discovery": cross_repo_audit,
         });
         self.finalize(row.review_id, resolved.project_id, &snapshot, target_count)
             .await

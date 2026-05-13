@@ -4885,6 +4885,7 @@ dependencies = [
  "chrono",
  "code-indexer",
  "domain",
+ "futures",
  "git-context-engine",
  "observability",
  "persistence",

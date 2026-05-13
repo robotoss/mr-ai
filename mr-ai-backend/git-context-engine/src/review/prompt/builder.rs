@@ -462,7 +462,14 @@ fn render_prompt_for_target(
     // AST / RAG — so the reviewer LLM does NOT raise issues against
     // these diffs directly, but can use them to reason about
     // intent / cross-repo dependencies on the PRIMARY DIFF.
+    //
+    // Each linked diff is truncated per-target so a megabyte sibling
+    // MR cannot blow the LLM context window. The cap is byte-based
+    // (cheaper than tokenising) and tuned conservatively: roughly
+    // 1k tokens per linked MR. Operators can raise it via
+    // `LINKED_MR_DIFF_MAX_BYTES_PER_TARGET` for niche cases.
     if !linked_mrs.is_empty() {
+        let per_target_cap = linked_diff_byte_cap();
         buf.push_str(
             "=== LINKED_MR_DIFFS (READ-ONLY, NON-AUTHORITATIVE) ===\n\
              The following diffs come from sibling repositories whose\n\
@@ -489,7 +496,8 @@ fn render_prompt_for_target(
             if linked.diff_text.trim().is_empty() {
                 buf.push_str("(no diff body fetched — metadata only)\n");
             } else {
-                buf.push_str(linked.diff_text.trim_end());
+                let body = truncate_linked_diff(&linked.diff_text, per_target_cap);
+                buf.push_str(body.trim_end());
                 buf.push('\n');
             }
             buf.push_str("---\n\n");
@@ -759,6 +767,80 @@ mod tests {
     }
 
     #[test]
+    fn truncate_linked_diff_returns_input_when_under_limit() {
+        let diff = "--- a/x\n+++ b/x\n+small";
+        let out = truncate_linked_diff(diff, 4096);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), diff);
+    }
+
+    #[test]
+    fn truncate_linked_diff_cuts_at_newline_and_adds_footer() {
+        let diff = "line-one\nline-two\nline-three\nline-four\n";
+        // Pick a limit between line-two and line-three.
+        let limit = "line-one\nline-two\n".len() + 3;
+        let out = truncate_linked_diff(diff, limit);
+        let text = out.as_ref();
+        assert!(text.contains("line-one"));
+        assert!(text.contains("line-two"));
+        assert!(!text.contains("line-three"), "cut must drop tail lines");
+        assert!(text.contains("[linked diff truncated"));
+        assert!(text.contains(&diff.len().to_string()));
+    }
+
+    #[test]
+    fn truncate_linked_diff_disabled_when_limit_is_zero() {
+        let diff = "lots\nof\nlines\nhere\n";
+        let out = truncate_linked_diff(diff, 0);
+        assert_eq!(out.as_ref(), diff);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn truncate_linked_diff_handles_utf8_boundary() {
+        // Multi-byte UTF-8 char straddling the boundary.
+        let diff = format!("ascii\n{}\nmore\n", "Ω".repeat(50));
+        // Pick limit *inside* the multi-byte block.
+        let cut_in_middle = "ascii\n".len() + 7;
+        let out = truncate_linked_diff(&diff, cut_in_middle);
+        // Cut must land on a newline boundary, NOT split a Ω.
+        let text = out.as_ref();
+        assert!(text.contains("ascii"));
+        assert!(text.contains("[linked diff truncated"));
+        // Sanity: did not split UTF-8 (otherwise this would panic in
+        // truncate_linked_diff during slicing).
+        assert!(text.is_char_boundary(text.len()));
+    }
+
+    #[test]
+    fn build_llm_review_request_truncates_oversized_linked_diff() {
+        let bundle = dummy_bundle();
+        let targets = build_review_targets(&bundle.changes);
+        // 10x default cap → must be truncated.
+        let huge = "x".repeat(linked_diff_byte_cap() * 10);
+        let req = build_llm_review_request(
+            &bundle,
+            &targets,
+            &NoopAstContextProvider,
+            &default_rule_set(),
+            &[],
+            None,
+            &[linked(&huge)],
+        )
+        .expect("prompt builder succeeds");
+        let prompt = &req.targets[0].prompt_text;
+        assert!(prompt.contains("[linked diff truncated"));
+        // Hard upper bound: prompt grew by at most ~5 KB on top of the
+        // cap, NOT 10× the cap.
+        assert!(
+            prompt.len() < linked_diff_byte_cap() * 2 + 8_192,
+            "prompt should not embed the full {} bytes; got {} bytes",
+            huge.len(),
+            prompt.len()
+        );
+    }
+
+    #[test]
     fn build_llm_review_request_linked_mr_without_diff_body_emits_metadata_footer() {
         let bundle = dummy_bundle();
         let targets = build_review_targets(&bundle.changes);
@@ -776,6 +858,48 @@ mod tests {
         assert!(prompt.contains("LINKED_MR_DIFFS"));
         assert!(prompt.contains("(no diff body fetched — metadata only)"));
     }
+}
+
+/// Per-target byte budget for a single `LinkedMrDiff` body inside the
+/// prompt. Default keeps each linked diff under ~1k tokens so N
+/// linked siblings × M targets cannot pathologically blow the LLM
+/// context window or cost budget.
+///
+/// Override via `LINKED_MR_DIFF_MAX_BYTES_PER_TARGET` (positive integer).
+/// Set to `0` to disable truncation entirely (NOT recommended in
+/// production — bundle storage will balloon).
+fn linked_diff_byte_cap() -> usize {
+    std::env::var("LINKED_MR_DIFF_MAX_BYTES_PER_TARGET")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4_096)
+}
+
+/// Trim `diff` to at most `limit` bytes. The cut is moved back to the
+/// nearest preceding newline so a unidiff hunk header is never split
+/// mid-line. A `… [linked diff truncated …] …` footer makes the
+/// truncation visible to the reviewer LLM.
+///
+/// `limit == 0` returns the input unchanged (operator opted out of
+/// truncation entirely).
+fn truncate_linked_diff(diff: &str, limit: usize) -> std::borrow::Cow<'_, str> {
+    if limit == 0 || diff.len() <= limit {
+        return std::borrow::Cow::Borrowed(diff);
+    }
+    // Snap to UTF-8 char boundary first (str slicing panics otherwise),
+    // then to the last newline before the boundary so we don't tear a
+    // diff hunk apart mid-line.
+    let mut cut = limit.min(diff.len());
+    while cut > 0 && !diff.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    cut = diff[..cut].rfind('\n').map(|n| n + 1).unwrap_or(cut);
+    std::borrow::Cow::Owned(format!(
+        "{prefix}... [linked diff truncated: {cut} of {total} bytes shown] ...\n",
+        prefix = &diff[..cut],
+        cut = cut,
+        total = diff.len(),
+    ))
 }
 
 fn guess_code_fence_lang(file_path: &str) -> &'static str {

@@ -422,6 +422,15 @@ impl GitLabClient {
             .error_for_status()?
             .json()
             .await?;
+        if rows.len() == 100 {
+            warn!(
+                target = "cross_repo.discover",
+                project = %project,
+                source_branch = %source_branch,
+                "GitLab list_open_mrs_by_branch hit 100-row page cap; \
+                 additional sibling MRs may be invisible to discovery"
+            );
+        }
         Ok(rows
             .into_iter()
             .map(|r| MrSummary {

@@ -236,6 +236,87 @@ async fn provider_client_dispatches_to_correct_impl() {
     }
 }
 
+/// Sprint M5 #16: when a provider responds 401, the worker's discovery
+/// layer must propagate it as a typed error (not panic, not swallow).
+/// We rely on this so `discover_linked_mr_for_sibling` can decide to
+/// skip the sibling with a `warn!` rather than crash the whole review.
+#[tokio::test]
+async fn gitlab_list_mrs_by_branch_propagates_unauthorized_as_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/projects/acme%2Fapp/merge_requests"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let client = ProviderClient::from_config(ProviderConfig {
+        kind: ProviderKind::GitLab,
+        base_api: server.uri(),
+        token: "bad-token".into(),
+    })
+    .unwrap();
+    let err = client
+        .list_open_mrs_by_branch("acme/app", "feat/x")
+        .await
+        .expect_err("401 must surface as Err");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("unauthor") || msg.contains("401") || msg.contains("http"),
+        "expected unauthorized hint in error, got {err}",
+    );
+}
+
+#[tokio::test]
+async fn github_list_mrs_by_branch_propagates_server_error_as_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/packages/pulls"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let client = ProviderClient::from_config(ProviderConfig {
+        kind: ProviderKind::GitHub,
+        base_api: server.uri(),
+        token: "gh-token".into(),
+    })
+    .unwrap();
+    let err = client
+        .list_open_mrs_by_branch("acme/packages", "feat/x")
+        .await
+        .expect_err("5xx must surface as Err");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("server") || msg.contains("503") || msg.contains("http"),
+        "expected server-error hint in error, got {err}",
+    );
+}
+
+#[tokio::test]
+async fn bitbucket_list_mrs_by_branch_rejects_unsafe_branch_name() {
+    // Sprint M5 #1: branch names that would break BBQL interpolation
+    // are rejected up-front. The wiremock server is set up but should
+    // never be reached.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"values": []})))
+        .mount(&server)
+        .await;
+    let client = ProviderClient::from_config(ProviderConfig {
+        kind: ProviderKind::Bitbucket,
+        base_api: server.uri(),
+        token: "Bearer bb-token".into(),
+    })
+    .unwrap();
+    // A branch with an embedded quote tries to escape the BBQL string.
+    let err = client
+        .list_open_mrs_by_branch("acme/packages", r#"feat/x" OR state="MERGED"#)
+        .await
+        .expect_err("must reject branch names with unsafe BBQL chars");
+    assert!(
+        err.to_string().to_lowercase().contains("forbidden"),
+        "expected validation error, got {err}"
+    );
+}
+
 fn path_prefix(prefix: &str) -> wiremock::matchers::PathRegexMatcher {
     // Simple anchor: any path that *starts* with the supplied
     // prefix. Wiremock has no path-prefix matcher OOTB; the regex

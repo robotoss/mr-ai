@@ -50,6 +50,36 @@ use crate::providers::git_providers::types::{ChangeRequestId, CrBundle, LinkedMr
 use crate::providers::git_providers::{ProviderClient, ProviderConfig};
 use crate::review::prompt::LlmReviewRequest;
 
+/// Aggregated parameters for [`build_two_phase_review`]. Introduced
+/// in sprint M5 (#19) to keep the function ergonomic as the cross-repo
+/// review feature kept piling on optional inputs (`overlay`,
+/// `linked_mrs`, etc.). All fields are owned or borrowed with
+/// lifetimes scoped to the call — see field docs for direction.
+pub struct TwoPhaseReviewParams<'a> {
+    /// Free-form label used only for logging — tenant scoping comes
+    /// from `project_id`. Worker passes the project UUID's simple form.
+    pub project_name: &'a str,
+    pub project_id: ProjectId,
+    pub primary_repo_id: RepoId,
+    pub qdrant: Arc<Qdrant>,
+    pub rag_cfg: Arc<RagConfig>,
+    pub cfg: ProviderConfig,
+    pub id: ChangeRequestId,
+    pub gateway: Arc<LlmGateway>,
+    /// Dump the final LLM request to `./temp/` for debugging. Off in
+    /// production; flipping this on incurs disk + serde cost per MR.
+    pub save_logs: bool,
+    /// Sprint M2: cached embeddings of the MR's `OverlayGraph`
+    /// (worker-built before calling). `Some` → sibling-repo chunks
+    /// merge into per-target RAG context. `None` → legacy single-repo
+    /// behaviour.
+    pub overlay: Option<&'a crate::context::overlay::OverlayEmbedCache>,
+    /// Sprint M4: sibling MRs that share the primary MR's
+    /// `source_branch`. Non-empty → each target's prompt gains a
+    /// `LINKED_MR_DIFFS` block. Empty slice for single-repo MRs.
+    pub linked_mrs: &'a [LinkedMrDiff],
+}
+
 /// Builds a two-phase review:
 /// 1. Pre-review planning with narrow RAG.
 /// 2. Final review request with enriched RAG guided by the plan.
@@ -59,39 +89,34 @@ use crate::review::prompt::LlmReviewRequest;
 /// captured once at boot and shared across calls — no per-request env
 /// reads on this hot path.
 ///
-/// Returns `(pre_review_plan, final_llm_request)`.
-#[allow(clippy::too_many_arguments)]
+/// See [`TwoPhaseReviewParams`] for the parameter bundle — introduced
+/// in sprint M5 once the signature outgrew positional ergonomics.
 #[tracing::instrument(
     name = "review.two_phase",
     skip_all,
     fields(
-        provider = ?cfg.kind,
-        mr_iid = id.iid,
-        project = %id.project,
+        provider = ?p.cfg.kind,
+        mr_iid = p.id.iid,
+        project = %p.id.project,
     ),
 )]
 pub async fn build_two_phase_review(
-    project_name: &str,
-    project_id: ProjectId,
-    primary_repo_id: RepoId,
-    qdrant: Arc<Qdrant>,
-    rag_cfg: Arc<RagConfig>,
-    cfg: ProviderConfig,
-    id: ChangeRequestId,
-    gateway: Arc<LlmGateway>,
-    save_logs: bool,
-    // Sprint M2 of cross-repo MR review: cached embeddings of the
-    // MR's `OverlayGraph` (worker-built before calling). `Some` →
-    // sibling-repo chunks merge into per-target RAG context.
-    // `None` → legacy single-repo behaviour.
-    overlay: Option<&crate::context::overlay::OverlayEmbedCache>,
-    // Sprint M4 of cross-repo MR review: sibling MRs that share the
-    // primary MR's `source_branch`. Non-empty → each target's prompt
-    // gains a `LINKED_MR_DIFFS` block listing those MRs and their
-    // diffs. The worker built this list via
-    // `ProviderClient::list_open_mrs_by_branch` + `fetch_bundle`.
-    linked_mrs: &[LinkedMrDiff],
+    p: TwoPhaseReviewParams<'_>,
 ) -> GitContextEngineResult<LlmReviewRequest> {
+    let TwoPhaseReviewParams {
+        project_name,
+        project_id,
+        primary_repo_id,
+        qdrant,
+        rag_cfg,
+        cfg,
+        id,
+        gateway,
+        save_logs,
+        overlay,
+        linked_mrs,
+    } = p;
+
     info!(
         provider = ?cfg.kind,
         project = %id.project,

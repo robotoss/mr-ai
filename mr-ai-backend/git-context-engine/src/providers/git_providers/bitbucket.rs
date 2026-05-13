@@ -352,14 +352,17 @@ impl BitbucketClient {
         project: &str,
         source_branch: &str,
     ) -> GitContextEngineResult<Vec<MrSummary>> {
+        // Branch name is interpolated into a BBQL string literal below;
+        // rejecting unsafe characters upfront is the only sound defence
+        // against query-injection (escaping BBQL strings has no
+        // documented escape sequence as of 2025).
+        validate_branch_for_bbql(source_branch)?;
         let (workspace, repo) = split_workspace_repo(project)?;
-        // Bitbucket's `q` accepts a quoted string with no further
-        // URL escaping beyond the standard one — `urlencoding`
-        // handles the outer escape.
-        let query = format!(
-            "source.branch.name = \"{}\" AND state = \"OPEN\"",
-            source_branch.replace('"', "")
-        );
+        // Bitbucket's `q` accepts a double-quoted string; we already
+        // verified `source_branch` cannot contain `"` / `\` / control
+        // characters, so direct interpolation is safe here.
+        let query =
+            format!(r#"source.branch.name = "{source_branch}" AND state = "OPEN""#);
         let url = format!(
             "{}/repositories/{workspace}/{repo}/pullrequests?q={}&pagelen=100",
             self.base_api,
@@ -375,6 +378,15 @@ impl BitbucketClient {
             .error_for_status()?
             .json()
             .await?;
+        if page.values.len() == 100 {
+            warn!(
+                target = "cross_repo.discover",
+                project = %project,
+                source_branch = %source_branch,
+                "Bitbucket list_open_mrs_by_branch hit 100-row page cap; \
+                 additional sibling PRs may be invisible to discovery"
+            );
+        }
         Ok(page
             .values
             .into_iter()
@@ -390,10 +402,42 @@ impl BitbucketClient {
                     .links
                     .and_then(|l| l.html.map(|h| h.href))
                     .unwrap_or_default(),
-                updated_at: r.updated_on.map(|d| d.to_rfc3339()).unwrap_or_default(),
+                // RFC 3339 with `Z` for UTC so the worker's picker can
+                // string-compare timestamps consistently across all
+                // three providers (GitHub/GitLab return `…Z` natively).
+                updated_at: r
+                    .updated_on
+                    .map(|d| {
+                        d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    })
+                    .unwrap_or_default(),
             })
             .collect())
     }
+}
+
+/// Reject branch names that would break BBQL interpolation in
+/// [`BitbucketClient::list_open_mrs_by_branch`]. Mirrors the subset of
+/// `git check-ref-format` that's directly dangerous in a quoted BBQL
+/// string: `"` / `\` / NUL / ASCII control characters / newline / tab.
+/// Empty names and names over 255 bytes are also rejected (git's hard
+/// ref-name limit).
+fn validate_branch_for_bbql(name: &str) -> GitContextEngineResult<()> {
+    if name.is_empty() || name.len() > 255 {
+        return Err(GitContextEngineError::Validation(format!(
+            "Bitbucket source_branch must be 1..=255 bytes (got {})",
+            name.len()
+        )));
+    }
+    if let Some(bad) = name.chars().find(|c| {
+        matches!(*c, '"' | '\\' | '\0' | '\n' | '\r' | '\t') || c.is_control()
+    }) {
+        return Err(GitContextEngineError::Validation(format!(
+            "Bitbucket source_branch contains forbidden character {bad:?} \
+             (BBQL string literal interpolation would be unsafe)"
+        )));
+    }
+    Ok(())
 }
 
 /// Bitbucket PR list page (subset).

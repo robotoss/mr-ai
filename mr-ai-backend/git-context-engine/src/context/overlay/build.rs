@@ -317,6 +317,9 @@ pub async fn build_for_mr(
 
         // Truncation must happen *during* ingest, not after, so a single
         // pathological repo can't push the overlay past the cap.
+        // Sprint M5: ingest via `ingest_chunks_with_repo` so the
+        // retrieval layer can attribute each overlay hit back to its
+        // source repo.
         for chunk in chunks {
             if overlay.chunk_count() >= caps.max_chunks {
                 chunk_truncated = true;
@@ -330,7 +333,7 @@ pub async fn build_for_mr(
                 visited_repos.push((repo_id, hop));
                 break 'outer;
             }
-            overlay.ingest_chunks(std::iter::once(chunk));
+            overlay.ingest_chunks_with_repo(repo_id, std::iter::once(chunk));
         }
 
         worktrees.push(wt);

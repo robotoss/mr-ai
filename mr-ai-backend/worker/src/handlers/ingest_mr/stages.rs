@@ -38,6 +38,7 @@ pub(super) struct MrRowHandle {
 /// All provider-specific bits resolved once at the top of the pipeline:
 /// the typed provider kind, fully-built `ProviderConfig` for the context
 /// engine, and the `ChangeRequestId` + token reused by the publish stage.
+#[derive(Clone)]
 pub(super) struct ProviderCtx {
     pub provider: ProviderKind,
     pub cfg: ProviderConfig,
@@ -200,7 +201,7 @@ impl IngestMrHandler {
         ctx: &ProviderCtx,
         resolved: &RepoResolved,
         parsed: &MrPayload,
-    ) -> Result<LlmReviewRequest, String> {
+    ) -> Result<(LlmReviewRequest, Value), String> {
         // build_two_phase_review's `project_name` param is logging-
         // only; the tenant filter is the typed `project_id`. C4 (🅲)
         // derives the log label from the UUID itself so we don't need
@@ -215,6 +216,15 @@ impl IngestMrHandler {
         // overlay defaults each sibling to its main branch (cases 1/2).
         let (head_overrides, linked_mrs) =
             self.discover_linked_mrs(ctx, resolved, parsed).await;
+        // M5 #11: capture a compact audit trail of what discovery
+        // surfaced (and what it skipped) so operators can replay
+        // post-mortems from `mr_reviews.bundle` without re-running
+        // anything.
+        let cross_repo_audit = build_cross_repo_audit(
+            &parsed.source_branch,
+            &head_overrides,
+            &linked_mrs,
+        );
 
         // M2: build overlay before the review. Empty head_sha means
         // the webhook didn't surface a commit and we'd be guessing.
@@ -272,21 +282,24 @@ impl IngestMrHandler {
             }
         };
 
-        git_context_engine::build_two_phase_review(
-            &project_label,
-            resolved.project_id,
-            resolved.repo_id,
-            self.qdrant.clone(),
-            self.rag_cfg.clone(),
-            ctx.cfg.clone(),
-            ctx.change_request_id.clone(),
-            self.gateway.concrete(),
-            false,
-            overlay_cache.as_ref(),
-            &linked_mrs,
+        let request = git_context_engine::build_two_phase_review(
+            git_context_engine::TwoPhaseReviewParams {
+                project_name: &project_label,
+                project_id: resolved.project_id,
+                primary_repo_id: resolved.repo_id,
+                qdrant: self.qdrant.clone(),
+                rag_cfg: self.rag_cfg.clone(),
+                cfg: ctx.cfg.clone(),
+                id: ctx.change_request_id.clone(),
+                gateway: self.gateway.concrete(),
+                save_logs: false,
+                overlay: overlay_cache.as_ref(),
+                linked_mrs: &linked_mrs,
+            },
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        Ok((request, cross_repo_audit))
     }
 
     /// Sprint M4 of cross-repo MR review: for each non-primary repo in
@@ -340,24 +353,48 @@ impl IngestMrHandler {
             }
         };
 
-        for sibling in repos
+        // Fan out per-sibling discovery in parallel — each sibling is an
+        // independent provider round-trip (1-2 HTTP calls) and they
+        // share neither state nor mutable resources.
+        //
+        // Implementation note: we used to call `FuturesUnordered` /
+        // `join_all` over an iterator that borrowed `&self`, `&ctx`,
+        // `&parsed` and `&sibling`. The combination of those four
+        // borrows + the outer `#[tracing::instrument]`-wrapped handler
+        // produced an HRTB error ("Send is not general enough"). The
+        // fix below makes each future capture *owned* clones — the
+        // worker is shaped to keep these cheap (`Self: Clone` is
+        // `Arc`-backed, `ProviderCtx: Clone` is small) so the
+        // pattern is pragmatic.
+        let siblings: Vec<ProjectRepo> = repos
             .into_iter()
             .filter(|r| r.id != resolved.repo_id)
-        {
-            match self
-                .discover_linked_mr_for_sibling(&sibling, &parsed.source_branch, ctx)
-                .await
-            {
-                Some(linked) => {
-                    head_overrides.insert(sibling.id, linked.summary.head_sha.clone());
-                    linked_mrs.push(linked);
-                }
-                None => continue,
+            .collect();
+        let siblings_attempted = siblings.len();
+        let source_branch = parsed.source_branch.clone();
+        let mut futs = Vec::with_capacity(siblings.len());
+        for sibling in siblings {
+            let this = self.clone();
+            let branch = source_branch.clone();
+            let ctx_owned = ctx.clone();
+            futs.push(async move {
+                let id = sibling.id;
+                let linked = this
+                    .discover_linked_mr_for_sibling(&sibling, &branch, &ctx_owned)
+                    .await;
+                (id, linked)
+            });
+        }
+        for (repo_id, linked) in futures::future::join_all(futs).await {
+            if let Some(l) = linked {
+                head_overrides.insert(repo_id, l.summary.head_sha.clone());
+                linked_mrs.push(l);
             }
         }
 
         info!(
             target = "cross_repo.discover",
+            siblings_attempted,
             siblings_with_parallel_mr = head_overrides.len(),
             linked_with_diff = linked_mrs
                 .iter()
@@ -374,6 +411,16 @@ impl IngestMrHandler {
     /// flatten its diffs into a `LinkedMrDiff`. Each failure path
     /// returns `None` after a `warn!` — the caller continues to the
     /// next sibling.
+    #[tracing::instrument(
+        name = "ingest_mr.discover_sibling",
+        skip_all,
+        fields(
+            repo_id = ?sibling.id,
+            remote_url = %sibling.remote_url,
+            sibling_provider = ?sibling.provider,
+            source_branch = %source_branch,
+        ),
+    )]
     async fn discover_linked_mr_for_sibling(
         &self,
         sibling: &ProjectRepo,
@@ -381,11 +428,23 @@ impl IngestMrHandler {
         primary_ctx: &ProviderCtx,
     ) -> Option<LinkedMrDiff> {
         let host = secrets::host_from_remote_url(&sibling.remote_url);
-        let token = secrets::sync::resolve_with_host(
+        let token = match secrets::sync::resolve_with_host(
             None,
             host.as_deref(),
             &secrets::SecretKey::GitToken,
-        )?;
+        ) {
+            Some(t) => t,
+            None => {
+                warn!(
+                    target = "cross_repo.discover",
+                    repo_id = ?sibling.id,
+                    host = ?host,
+                    "GIT_TOKEN unset for sibling host; skipping discovery for this repo \
+                     (configure GIT_TOKEN_<HOST_SLUG> or the global GIT_TOKEN)"
+                );
+                return None;
+            }
+        };
         let base_api = match host.as_deref() {
             Some(h) => secrets::base_api_for(h, sibling.provider),
             None => primary_ctx.cfg.base_api.clone(),
@@ -395,7 +454,10 @@ impl IngestMrHandler {
             base_api,
             token,
         };
-        let client = match ProviderClient::from_config(cfg) {
+        let client = match self
+            .get_or_build_provider_client(&sibling.remote_url, sibling.provider, cfg)
+            .await
+        {
             Ok(c) => c,
             Err(err) => {
                 warn!(
@@ -408,7 +470,19 @@ impl IngestMrHandler {
                 return None;
             }
         };
-        let slug = super::provider::provider_project_slug(&sibling.remote_url)?;
+        let slug = match super::provider::provider_project_slug(&sibling.remote_url) {
+            Some(s) => s,
+            None => {
+                warn!(
+                    target = "cross_repo.discover",
+                    repo_id = ?sibling.id,
+                    remote = %sibling.remote_url,
+                    "cannot derive provider project slug from sibling remote_url; \
+                     skipping discovery for this repo"
+                );
+                return None;
+            }
+        };
 
         let candidates = match client.list_open_mrs_by_branch(&slug, source_branch).await {
             Ok(v) => v,
@@ -703,12 +777,89 @@ impl IngestMrHandler {
     }
 }
 
+/// Build a compact audit-trail object for the cross-repo discovery
+/// stage so operators can post-mortem from `mr_reviews.bundle` without
+/// re-running anything. Sprint M5 #11.
+///
+/// The shape is intentionally flat + provider-agnostic:
+/// ```json
+/// {
+///   "source_branch": "feat/x",
+///   "linked_mrs": [
+///     { "provider": "GitHub", "repo_slug": "acme/packages",
+///       "iid": 7, "head_sha": "deadbeef", "diff_bytes": 1234 }
+///   ],
+///   "head_overrides": 1
+/// }
+/// ```
+fn build_cross_repo_audit(
+    source_branch: &str,
+    head_overrides: &HashMap<RepoId, String>,
+    linked_mrs: &[LinkedMrDiff],
+) -> Value {
+    json!({
+        "source_branch": source_branch,
+        "head_overrides": head_overrides.len(),
+        "linked_mrs": linked_mrs.iter().map(|l| json!({
+            "provider": format!("{:?}", l.provider),
+            "repo_slug": l.repo_slug,
+            "iid": l.summary.id.iid,
+            "head_sha": l.summary.head_sha,
+            "source_branch": l.summary.source_branch,
+            "target_branch": l.summary.target_branch,
+            "web_url": l.summary.web_url,
+            "updated_at": l.summary.updated_at,
+            "diff_bytes": l.diff_text.len(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+impl IngestMrHandler {
+    /// Resolve a `ProviderClient` for `(host, kind)` from the per-handler
+    /// cache, building (and storing) one on the first miss. The cache
+    /// is process-local — keeps connection pools warm across many
+    /// webhooks against the same sibling host.
+    ///
+    /// `cfg` is consumed on the miss path; on a hit the cached client
+    /// is returned without rebuilding (the token + base_api inside
+    /// `cfg` are assumed identical to the cached entry's, which holds
+    /// as long as the operator hasn't rotated the host's secrets
+    /// mid-process — restart picks up the new ones).
+    pub(super) async fn get_or_build_provider_client(
+        &self,
+        remote_url: &str,
+        kind: domain::ProviderKind,
+        cfg: ProviderConfig,
+    ) -> Result<ProviderClient, git_context_engine::GitContextEngineError> {
+        let host = secrets::host_from_remote_url(remote_url).unwrap_or_default();
+        let key = (host, kind);
+        // Fast path: shared read lock.
+        if let Some(c) = self.provider_clients.read().await.get(&key) {
+            return Ok(c.clone());
+        }
+        // Slow path: build outside the lock to avoid holding a writer
+        // across the synchronous `reqwest::Client::builder().build()`.
+        let built = ProviderClient::from_config(cfg)?;
+        let mut guard = self.provider_clients.write().await;
+        // Another waker may have raced ahead — preserve their entry.
+        Ok(guard.entry(key).or_insert(built).clone())
+    }
+}
+
 /// Pick at most one linked MR from a discovery API result. Empty input
 /// returns `None` (case 1/2: no sibling MR exists). Multiple candidates
 /// pick the most recently updated and emit a `warn!` so operators can
 /// see when branch-name ambiguity hits — convention is one MR per
 /// branch per repo. Pure, so the worker unit tests can pin the policy
 /// without spinning up a provider.
+///
+/// `updated_at` is parsed as RFC 3339 (`DateTime<Utc>`) — provider
+/// strings may differ in zone suffix (`Z` vs `+00:00`) but represent
+/// the same instant, so lexicographic comparison is unsafe. Rows
+/// whose timestamp fails to parse are ordered **before** any parseable
+/// row — a parseable winner is always preferred when one exists.
+/// On the single-candidate happy path we emit a `debug!` line so
+/// operator tracing has per-sibling visibility.
 pub(super) fn pick_linked_mr(
     candidates: Vec<MrSummary>,
     sibling_repo_id: RepoId,
@@ -726,9 +877,33 @@ pub(super) fn pick_linked_mr(
             "multiple open MRs share the same source_branch; picking most recent"
         );
     }
-    candidates
-        .into_iter()
-        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+    let picked = candidates.into_iter().max_by(|a, b| {
+        parse_provider_timestamp(&a.updated_at)
+            .cmp(&parse_provider_timestamp(&b.updated_at))
+    });
+    if let Some(p) = &picked {
+        tracing::debug!(
+            target = "cross_repo.discover",
+            repo_id = ?sibling_repo_id,
+            slug = %sibling_slug,
+            iid = p.id.iid,
+            head_sha = %p.head_sha,
+            updated_at = %p.updated_at,
+            "linked MR picked"
+        );
+    }
+    picked
+}
+
+/// Parse the `updated_at` field from any of the three providers. We
+/// accept full RFC 3339 (`2026-05-13T11:00:00Z`,
+/// `2026-05-13T13:00:00+02:00`, etc.); anything that fails to parse
+/// is sorted *before* parseable rows so a real winner always beats a
+/// malformed one.
+fn parse_provider_timestamp(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|d| d.with_timezone(&chrono::Utc))
 }
 
 /// Shim used inside `build_provider_ctx`. Mirrors
@@ -1024,6 +1199,43 @@ mod tests {
         )
         .expect("single candidate is picked");
         assert_eq!(chosen.id.iid, 7);
+    }
+
+    #[test]
+    fn pick_linked_mr_compares_timestamps_across_timezones() {
+        // Same wall-clock instant expressed two ways: `Z` (UTC) and
+        // `+02:00` (Berlin summer). Lexicographic comparison would
+        // mis-order them; we need DateTime parsing.
+        let utc = mr_summary(1, "2026-05-13T10:00:00Z");
+        // Wall-clock 12:00 Berlin == 10:00 UTC — identical instant.
+        let same_instant_other_tz = mr_summary(2, "2026-05-13T12:00:00+02:00");
+        // And one that's actually newer in real time.
+        let actually_newer = mr_summary(3, "2026-05-13T11:00:00Z");
+        let chosen = pick_linked_mr(
+            vec![utc, same_instant_other_tz, actually_newer.clone()],
+            RepoId::new(),
+            "acme/packages",
+        )
+        .expect("non-empty");
+        assert_eq!(chosen.id.iid, 3, "newer instant must win regardless of TZ");
+    }
+
+    #[test]
+    fn pick_linked_mr_prefers_parseable_over_malformed_timestamp() {
+        // A malformed row should never beat a valid one. The old
+        // string-compare would have mis-ordered "not-a-date" before
+        // "2026-..." (lex order), which still happens to be the
+        // policy here — but we go further: malformed rows are
+        // ordered *before* parseable ones, so the parseable wins.
+        let bad = mr_summary(9, "not-a-date");
+        let good = mr_summary(2, "2026-05-13T11:00:00Z");
+        let chosen = pick_linked_mr(
+            vec![bad, good.clone()],
+            RepoId::new(),
+            "acme/packages",
+        )
+        .expect("non-empty");
+        assert_eq!(chosen.id.iid, 2, "parseable timestamp must win over garbage");
     }
 
     #[test]

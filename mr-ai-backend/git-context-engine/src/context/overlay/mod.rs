@@ -22,7 +22,7 @@ pub use merge::OverlayEmbedCache;
 use std::collections::{BTreeMap, BTreeSet};
 
 use code_indexer::CodeChunk;
-use domain::NodeId;
+use domain::{NodeId, RepoId};
 
 /// Per-MR transient view layered on top of the stable index.
 #[derive(Debug, Clone, Default)]
@@ -35,6 +35,12 @@ pub struct OverlayGraph {
     pub neighbour_nodes: BTreeSet<NodeId>,
     /// Repo-relative file paths that the overlay considers "touched".
     pub touched_files: BTreeSet<String>,
+    /// Per-chunk attribution: which sibling repo contributed this chunk
+    /// during BFS. Used by retrieval to populate `SearchHit.repo_id`
+    /// so downstream consumers (LLM, audit) can attribute each hint
+    /// back to its source repo. Empty for chunks ingested through the
+    /// legacy `ingest_chunks` path (no repo context known).
+    pub chunk_repos: BTreeMap<String, RepoId>,
 }
 
 impl OverlayGraph {
@@ -43,11 +49,34 @@ impl OverlayGraph {
     }
 
     /// Mark a file as touched and stage all chunks that came from it.
+    /// Use [`Self::ingest_chunks_with_repo`] when the originating
+    /// `RepoId` is known — preferred path for `build_for_mr`.
     pub fn ingest_chunks(&mut self, chunks: impl IntoIterator<Item = CodeChunk>) {
         for chunk in chunks {
             self.touched_files.insert(chunk.file.clone());
             self.new_chunks.insert(chunk.id.clone(), chunk);
         }
+    }
+
+    /// Like [`Self::ingest_chunks`] but records which repo each chunk
+    /// originated from. Sprint M5 of cross-repo MR review.
+    pub fn ingest_chunks_with_repo(
+        &mut self,
+        repo_id: RepoId,
+        chunks: impl IntoIterator<Item = CodeChunk>,
+    ) {
+        for chunk in chunks {
+            self.touched_files.insert(chunk.file.clone());
+            self.chunk_repos.insert(chunk.id.clone(), repo_id);
+            self.new_chunks.insert(chunk.id.clone(), chunk);
+        }
+    }
+
+    /// Look up the repo that contributed a given chunk during overlay
+    /// BFS. Returns `None` for chunks that were ingested without a
+    /// repo context.
+    pub fn repo_of_chunk(&self, chunk_id: &str) -> Option<RepoId> {
+        self.chunk_repos.get(chunk_id).copied()
     }
 
     /// Add a stable node id discovered during graph expansion.

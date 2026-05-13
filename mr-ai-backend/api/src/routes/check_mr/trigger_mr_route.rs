@@ -142,19 +142,19 @@ pub async fn trigger_mr_route(
     // overlay — the route doesn't carry an MR head_sha. The
     // webhook-driven worker path is the canonical entry that
     // exercises overlay.
-    let result = build_two_phase_review(
-        &project_label,
-        scope.project_id(),
-        primary_repo.id,
-        qdrant_client,
-        state.rag_cfg.clone(),
+    let result = build_two_phase_review(git_context_engine::TwoPhaseReviewParams {
+        project_name: &project_label,
+        project_id: scope.project_id(),
+        primary_repo_id: primary_repo.id,
+        qdrant: qdrant_client,
+        rag_cfg: state.rag_cfg.clone(),
         cfg,
         id,
-        state.gateway.clone(),
-        false,
-        None,
-        &[],
-    )
+        gateway: state.gateway.clone(),
+        save_logs: false,
+        overlay: None,
+        linked_mrs: &[],
+    })
     .await;
     // ApiResponse::success(TriggerMrResponse {
     //     message: " MR review completed successfully.".to_string(),
