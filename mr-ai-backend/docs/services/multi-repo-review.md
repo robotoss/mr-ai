@@ -19,6 +19,33 @@ Each repo can live on a different provider (GitLab + GitHub +
 Bitbucket coexist on the same instance), so M1 establishes the
 cross-provider primitives before any review-pipeline change.
 
+## Operator setup checklist
+
+Before the cross-repo flow lights up, three things have to be in place.
+Skipping any one of them is the most common reason "case 1/2 doesn't
+work" — the review will still run for the repo that received the
+webhook, just without sibling context.
+
+1. **`projects.toml` declares every repo under one `[[project]]`.**
+   Each repo entry needs `provider` + `remote_url` (+ optional
+   `default_branch` and `is_primary`). See `projects.toml.example`.
+
+2. **At least one `[[project.dependency]]` edge per repo pair.** The
+   overlay BFS walker reaches siblings by following these edges. It
+   walks **both directions**, so one edge `app → packages` is enough
+   to cover webhooks from either side. Without any edge, overlay sees
+   only the primary repo. _Case 3 (parallel branches) still works
+   without edges — discovery iterates every repo in the project — but
+   case 1+2 do not._
+
+3. **Per-provider HMAC secrets + per-host tokens.** Set
+   `GITLAB_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` /
+   `BITBUCKET_WEBHOOK_SECRET` for the providers you receive webhooks
+   from, and `GIT_TOKEN_<HOST_SLUG>` for every host whose API the
+   worker calls (primary + every sibling). Missing host tokens fail
+   silently per sibling with a `warn!(target="cross_repo.discover")`
+   line — check logs if discovery comes back empty unexpectedly.
+
 ## Foundation (sprint M1)
 
 ### Per-host API base URL
