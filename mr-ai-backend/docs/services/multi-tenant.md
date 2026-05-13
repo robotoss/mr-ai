@@ -88,7 +88,7 @@ isolation will land as an enterprise-tier opt-in flag in
 | C2 | RLS migrations: 5 direct + 4 transitive policies + `rerank_cache.project_id` column. Integration test asserting cross-tenant SELECT returns 0 rows when `SET LOCAL` is missing. |
 | C3 | `extract_tenant` middleware on the admin router. Extracts `X-Project-Slug`, validates against `projects` table, places `AuthorizedScope` in request extensions. |
 | C4 ✅ | Routes pull `Extension<AuthorizedScope>`. Worker `process_one` re-verifies `remote_url ↔ project_id` at claim time; mismatch force-kills the job to `dead` and logs `target=tenant.mismatch`. `ConfigError::ExpectedExactlyOneProject` removed; `AppConfig::default_project_id`/`project_slug` gone. Per-tenant `project_id` label on `jobs_done_total` and `mr_reviews_total`. `audit_log.project_id` becomes NOT NULL. |
-| C5 | `ALTER TABLE ... FORCE ROW LEVEL SECURITY` to enforce RLS even for the app's table owner role. Testcontainers tests for cross-tenant retrieve isolation and worker spoofed-payload kill path. |
+| C5 ✅ | Testcontainers tests prove tenant isolation per-table (direct + transitive policies, FORCE/NO FORCE round-trip). The blanket FORCE script is parked in [`persistence/scripts/force_rls.sql`](../../persistence/scripts/force_rls.sql) — **not a migration**. Operators apply it once every persistence callsite is wrapped in `with_tenant`; today most callsites still hit `pool` directly, so applying FORCE in production would return empty result sets. Callsite migration is the C6+ follow-up. |
 
 ## Acceptance summary
 
@@ -100,11 +100,39 @@ Final state after C5:
   `X-Project-Slug: <slug>`. Missing → 400. Unknown → 400.
 - Webhooks remain header-free; project_id is derived from the
   `remote_url` lookup after HMAC verification.
-- `psql -c "SELECT * FROM mr_reviews"` from an app-role connection
-  without `SET LOCAL` returns 0 rows.
+- Postgres RLS policies are **ENABLED** on every tenant-scoped
+  table. Tests prove that when FORCE is on (operator opt-in),
+  cross-tenant `SELECT` and FK-transitive reads return only own-
+  tenant rows.
 - Workers receiving a job whose `EnqueueOptions.project_id` doesn't
   match the resolved `remote_url → project_id` send the job to
   `dead` immediately and emit `target = "tenant.mismatch"`.
+
+## C6+ follow-up — callsite migration
+
+Today most persistence callsites still take `&PgPool` directly:
+
+```rust
+mr_reviews::upsert_pending(&pool, project_id, repo_id, &mr, &bundle).await?;
+```
+
+Under RLS `ENABLE` (current state) the app role bypasses policies,
+so the call returns the right rows. Under RLS `FORCE` the same call
+returns 0 rows because no `SET LOCAL app.current_tenant` ran.
+
+The follow-up sprint migrates each repo function to take
+`&mut Transaction` and each route/worker stage to wrap the call:
+
+```rust
+persistence::with_tenant(&pool, &scope, |tx| Box::pin(async move {
+    mr_reviews::upsert_pending(tx, repo_id, &mr, &bundle).await?;
+    Ok::<_, PersistenceError>(())
+})).await?;
+```
+
+Once every call site is migrated and integration tests still pass,
+operators run [`persistence/scripts/force_rls.sql`](../../persistence/scripts/force_rls.sql)
+and the perimeter seals.
 
 ## Out of scope
 

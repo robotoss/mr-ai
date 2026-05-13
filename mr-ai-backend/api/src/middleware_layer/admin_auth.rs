@@ -64,7 +64,6 @@ mod tests {
     use super::*;
     use axum::{routing::get, Router};
     use http_body_util::BodyExt as _;
-    use std::path::PathBuf;
     use tower::ServiceExt;
 
     fn state(secret: &str) -> Arc<AppState> {

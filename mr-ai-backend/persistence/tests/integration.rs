@@ -356,3 +356,208 @@ async fn mr_reviews_lifecycle() {
         .unwrap();
     assert_eq!(row.0, "published");
 }
+
+// =============================================================
+// Sprint C5 (🅲): tenant isolation tests against real Postgres.
+// =============================================================
+
+/// `with_tenant` scopes SELECT to the supplied tenant via SET LOCAL.
+/// We seed two tenants' MR reviews, run a query under tenant A's
+/// scope, and verify only A's rows are visible. RLS policies from
+/// migration 0015 do the filtering — without RLS this test would
+/// return both rows.
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn with_tenant_scopes_select_to_one_project() {
+    use persistence::repos::mr_reviews;
+    let (pool, _container) = boot_pool().await;
+
+    // Seed two tenants with one MR review each.
+    let group_a = sample_group();
+    let group_b = sample_group();
+    projects::upsert_group(&pool, &group_a).await.unwrap();
+    projects::upsert_group(&pool, &group_b).await.unwrap();
+    let repo_a = group_a.repos.iter().find(|r| r.is_primary).unwrap();
+    let repo_b = group_b.repos.iter().find(|r| r.is_primary).unwrap();
+    let mr_a = mr_reviews::upsert_pending(
+        &pool,
+        repo_a.project_id,
+        repo_a.id,
+        &domain::MrId::new("1"),
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mr_b = mr_reviews::upsert_pending(
+        &pool,
+        repo_b.project_id,
+        repo_b.id,
+        &domain::MrId::new("2"),
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+
+    // Pre-FORCE: the table owner bypasses RLS, so both reviews are
+    // visible from a raw query. This is the current production
+    // posture; FORCE will close the bypass once every callsite is
+    // on `with_tenant` (see `persistence/scripts/force_rls.sql`).
+    let all: Vec<(uuid::Uuid,)> = sqlx::query_as("SELECT id FROM mr_reviews ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+
+    // Temporarily FORCE RLS on `mr_reviews` to validate the policy.
+    sqlx::query("ALTER TABLE mr_reviews FORCE ROW LEVEL SECURITY")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Scoped read via with_tenant: only A's review.
+    let scope_a = domain::AuthorizedScope::from_project_id(repo_a.project_id);
+    let visible_a = persistence::with_tenant(&pool, &scope_a, |tx| {
+        Box::pin(async move {
+            let rows: Vec<(uuid::Uuid,)> =
+                sqlx::query_as("SELECT id FROM mr_reviews ORDER BY id")
+                    .fetch_all(&mut **tx)
+                    .await?;
+            Ok::<_, persistence::PersistenceError>(rows)
+        })
+    })
+    .await
+    .unwrap();
+    let visible_a_uuids: Vec<uuid::Uuid> = visible_a.iter().map(|(id,)| *id).collect();
+    assert!(visible_a_uuids.contains(&mr_a), "tenant A should see its own review");
+    assert!(
+        !visible_a_uuids.contains(&mr_b),
+        "tenant A must NOT see tenant B's review"
+    );
+
+    // Symmetry — B sees its own only.
+    let scope_b = domain::AuthorizedScope::from_project_id(repo_b.project_id);
+    let visible_b = persistence::with_tenant(&pool, &scope_b, |tx| {
+        Box::pin(async move {
+            let rows: Vec<(uuid::Uuid,)> =
+                sqlx::query_as("SELECT id FROM mr_reviews ORDER BY id")
+                    .fetch_all(&mut **tx)
+                    .await?;
+            Ok::<_, persistence::PersistenceError>(rows)
+        })
+    })
+    .await
+    .unwrap();
+    let visible_b_uuids: Vec<uuid::Uuid> = visible_b.iter().map(|(id,)| *id).collect();
+    assert!(visible_b_uuids.contains(&mr_b));
+    assert!(!visible_b_uuids.contains(&mr_a));
+
+    // Unscoped tx still sees zero rows under FORCE — the helper
+    // never calls SET LOCAL, so `current_setting(..., true)` is NULL.
+    let unscoped: Vec<(uuid::Uuid,)> =
+        persistence::with_unscoped_tx::<_, Vec<(uuid::Uuid,)>>(&pool, |tx| {
+            Box::pin(async move {
+                let rows: Vec<(uuid::Uuid,)> =
+                    sqlx::query_as("SELECT id FROM mr_reviews ORDER BY id")
+                        .fetch_all(&mut **tx)
+                        .await?;
+                Ok(rows)
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        unscoped.len(),
+        0,
+        "FORCE RLS + missing SET LOCAL must see zero rows"
+    );
+
+    // Restore the table's default ENABLE state so subsequent tests
+    // running in the same container aren't surprised.
+    sqlx::query("ALTER TABLE mr_reviews NO FORCE ROW LEVEL SECURITY")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// Transitive RLS via FK chain: `mr_review_hypotheses` policy reads
+/// the parent `mr_reviews.project_id`. Insert two hypotheses across
+/// tenants, FORCE the table, and verify each tenant only sees its
+/// own row through `with_tenant`.
+#[tokio::test]
+#[ignore = "requires Docker; run with --ignored"]
+async fn rls_transitive_policy_scopes_mr_review_hypotheses() {
+    use persistence::repos::{mr_review_hypotheses, mr_reviews};
+    let (pool, _container) = boot_pool().await;
+
+    let group_a = sample_group();
+    let group_b = sample_group();
+    projects::upsert_group(&pool, &group_a).await.unwrap();
+    projects::upsert_group(&pool, &group_b).await.unwrap();
+    let repo_a = group_a.repos.iter().find(|r| r.is_primary).unwrap();
+    let repo_b = group_b.repos.iter().find(|r| r.is_primary).unwrap();
+    let mr_a_id = mr_reviews::upsert_pending(
+        &pool,
+        repo_a.project_id,
+        repo_a.id,
+        &domain::MrId::new("1"),
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mr_b_id = mr_reviews::upsert_pending(
+        &pool,
+        repo_b.project_id,
+        repo_b.id,
+        &domain::MrId::new("2"),
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let row_a = mr_review_hypotheses::HypothesisRow {
+        review_id: mr_a_id,
+        hypothesis_id: "H1".into(),
+        priority: 0,
+        tier_used: "smart".into(),
+        status: "succeeded".into(),
+        llm_response: None,
+        latency_ms: Some(1),
+        cost_usd: Some(0.001),
+        created_at: chrono::Utc::now(),
+    };
+    let row_b = mr_review_hypotheses::HypothesisRow {
+        review_id: mr_b_id,
+        ..row_a.clone()
+    };
+    mr_review_hypotheses::insert(&pool, &row_a).await.unwrap();
+    mr_review_hypotheses::insert(&pool, &row_b).await.unwrap();
+
+    sqlx::query("ALTER TABLE mr_review_hypotheses FORCE ROW LEVEL SECURITY")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let scope_a = domain::AuthorizedScope::from_project_id(repo_a.project_id);
+    let visible_a = persistence::with_tenant(&pool, &scope_a, |tx| {
+        Box::pin(async move {
+            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+                "SELECT review_id FROM mr_review_hypotheses ORDER BY review_id",
+            )
+            .fetch_all(&mut **tx)
+            .await?;
+            Ok::<_, persistence::PersistenceError>(rows)
+        })
+    })
+    .await
+    .unwrap();
+    let ids: Vec<uuid::Uuid> = visible_a.iter().map(|(id,)| *id).collect();
+    assert!(ids.contains(&mr_a_id));
+    assert!(
+        !ids.contains(&mr_b_id),
+        "transitive RLS must not leak tenant B's hypothesis"
+    );
+
+    sqlx::query("ALTER TABLE mr_review_hypotheses NO FORCE ROW LEVEL SECURITY")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
