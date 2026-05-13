@@ -4,8 +4,8 @@ services:
     container_name: qdrant
     restart: unless-stopped
     ports:
-      - "${QDRANT_HTTP_PORT}:6333"
-      - "${QDRANT_GRPC_PORT}:6334"
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
@@ -19,6 +19,50 @@ services:
       interval: 10s
       timeout: 3s
       retries: 10
+    networks:
+      - app_net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: mr_ai_postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mr_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-mr_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - mr_ai_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-mr_ai} -d ${POSTGRES_DB:-mr_ai} >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - app_net
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: mr_ai_pgadmin
+    restart: unless-stopped
+    profiles:
+      - dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - mr_ai_pgadmin_data:/var/lib/pgadmin
     networks:
       - app_net
 
@@ -45,4 +89,6 @@ networks:
 
 volumes:
   qdrant_data:
+  mr_ai_postgres_data:
+  mr_ai_pgadmin_data:
   # ollama_data:

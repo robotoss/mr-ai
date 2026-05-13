@@ -1,9 +1,10 @@
 //! Public entrypoints for cross-platform code indexing with AST and optional LSP enrichment.
 
+pub mod analyzer;
 pub mod ast;
 pub mod diff_types;
 pub mod errors;
-mod lsp;
+pub mod lsp;
 pub mod types;
 mod util;
 
@@ -21,9 +22,7 @@ use std::path::{Path, PathBuf};
 /// Internal helper:
 /// Recursively scans `base_dir`, parses all supported files into `CodeChunk`s,
 /// and optionally enriches Dart code with LSP.
-///
-/// Not public API; used internally by the public entrypoints.
-pub(crate) fn index_project(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChunk>> {
+fn index_project(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChunk>> {
     let files = util::fs_scan::scan_project_files(base_dir);
     let mut chunks = Vec::<CodeChunk>::new();
 
@@ -39,65 +38,76 @@ pub(crate) fn index_project(base_dir: &Path, enable_lsp: bool) -> Result<Vec<Cod
     Ok(chunks)
 }
 
-/// Build canonical base directory: `code_data/{project_name}` (internal).
-fn project_base_dir(project_name: &str) -> PathBuf {
-    PathBuf::from(format!("code_data/{project_name}"))
+/// Cheap scan: return the list of supported source files under
+/// `base_dir`. Used by the S9 auto-split path in the worker — it needs
+/// to know the file count and top-level directory shape *without*
+/// paying for the full parse. Symlink-safe (same `walkdir` semantics
+/// as the full pass).
+pub fn list_workspace_files(base_dir: &Path) -> Vec<PathBuf> {
+    util::fs_scan::scan_project_files(base_dir)
 }
 
-/* -------------------------------------------------------------------------- */
-/*                          Public: code chunks only                           */
-/* -------------------------------------------------------------------------- */
+/// Index an arbitrary directory tree into `CodeChunk`s.
+///
+/// Public entry point used by the worker pool when reindexing a freshly-
+/// fetched bare repo via a per-job `git worktree`. Symlink-safe:
+/// `walkdir` does not follow them by default. The supplied paths in the
+/// resulting chunks are made relative to `base_dir` so downstream graph
+/// upserts get stable identifiers regardless of where the worktree
+/// happened to live on disk.
+pub fn index_workspace(base_dir: &Path, enable_lsp: bool) -> Result<Vec<CodeChunk>> {
+    index_workspace_filtered(base_dir, enable_lsp, None)
+}
 
-/// Index a project by name and export results into `out/{project_name}/code_chunks.jsonl`.
-///
-/// This is a public entrypoint for end-users. It:
-/// - Resolves the project root to `code_data/{project_name}` (creates if missing).
-/// - Recursively scans the project for supported files (Dart, Kotlin/Swift/JS/TS, YAML/JSON/XML/etc).
-/// - Builds language-agnostic [`CodeChunk`] items via AST providers (Dart via tree-sitter,
-///   others are safe fallbacks until dedicated parsers are added).
-/// - Optionally runs Dart LSP enrichment (document symbols/outline, etc.), keeping chunk identity stable.
-/// - Writes all chunks as JSONL (one JSON object per line) to `out/{project_name}/code_chunks.jsonl`.
-///
-/// # Arguments
-/// * `project_name` — Logical project identifier; used to resolve `code_data/{project_name}` and `out/{project_name}`.
-/// * `enable_lsp` — Set `true` to run the additional Dart LSP pass.
-///
-/// # Output
-/// On success returns the absolute path to the generated JSONL file.
-///
-/// # Errors
-/// Returns [`Error`] if scanning, parsing, LSP communication, or file I/O fails.
-///
-/// # Example
-/// ```no_run
-/// use mr_reviewer::index_project_to_jsonl;
-///
-/// fn main() -> mr_reviewer::Result<()> {
-///     // Will read from:  code_data/my_flutter_app
-///     // Will write into: out/my_flutter_app/code_chunks.jsonl
-///     let out_path = index_project_to_jsonl("my_flutter_app", true)?;
-///     println!("Wrote chunks to {}", out_path.display());
-///     Ok(())
-/// }
-/// ```
-pub fn index_project_to_jsonl(project_name: &str, enable_lsp: bool) -> Result<PathBuf> {
-    // Resolve input/output locations
-    let base_dir = project_base_dir(project_name);
-    util::ensure_dir(&base_dir)?;
+/// Sentinel `path_prefix` value the worker emits when fanning out
+/// sub-jobs for files that live directly at the workspace root (no
+/// top-level dir). When the filter sees this prefix it matches only
+/// chunks whose rebased file path has no `/` separator.
+pub const ROOT_BUCKET_PREFIX: &str = "_root/";
 
-    let out_dir = PathBuf::from(format!("code_data/out/{project_name}"));
-    util::ensure_dir(&out_dir)?;
-    let out_path = out_dir.join("code_chunks.jsonl");
-
-    // Build chunks and export
-    let chunks: Vec<CodeChunk> = index_project(&base_dir, enable_lsp)?;
-    let mut w = util::jsonl::JsonlWriter::open(&out_path)?;
-    for c in &chunks {
-        w.write_obj(c)?;
+/// Like [`index_workspace`] but restricts the parse to chunks whose
+/// repo-relative path starts with `path_prefix`. Used by the S9
+/// auto-split branch in the worker: when a worktree exceeds
+/// `REINDEX_SPLIT_FILES`, the parent job enqueues one sub-job per
+/// top-level directory and each sub-job invokes this filtered variant
+/// so it pays only for its slice of the tree.
+///
+/// Special prefix `"_root/"` matches chunks whose file path has no
+/// directory separator (i.e. files living directly at the workspace
+/// root). Passing `None` is identical to `index_workspace` — the
+/// filter is a no-op then.
+pub fn index_workspace_filtered(
+    base_dir: &Path,
+    enable_lsp: bool,
+    path_prefix: Option<&str>,
+) -> Result<Vec<CodeChunk>> {
+    let mut chunks = index_project(base_dir, enable_lsp)?;
+    let mut out: Vec<CodeChunk> = Vec::with_capacity(chunks.len());
+    for mut chunk in chunks.drain(..) {
+        let Ok(rel) = std::path::Path::new(&chunk.file).strip_prefix(base_dir) else {
+            continue;
+        };
+        let new_file = rel.to_string_lossy().into_owned();
+        if let Some(prefix) = path_prefix {
+            let matches = if prefix == ROOT_BUCKET_PREFIX {
+                !new_file.contains('/')
+            } else {
+                new_file.starts_with(prefix)
+            };
+            if !matches {
+                continue;
+            }
+        }
+        // Replace prefix references in `id` and `symbol_path` so every
+        // identity field stays consistent with the rebased `file`.
+        // Symbols whose IDs/paths happen not to embed the path are left
+        // untouched by `replacen` — safe.
+        let old_file = std::mem::replace(&mut chunk.file, new_file.clone());
+        chunk.id = chunk.id.replacen(&old_file, &new_file, 1);
+        chunk.symbol_path = chunk.symbol_path.replacen(&old_file, &new_file, 1);
+        out.push(chunk);
     }
-    w.finish()?;
-
-    Ok(out_path)
+    Ok(out)
 }
 
 /// Indexes only files affected by a diff/changeset into `CodeChunk`s.

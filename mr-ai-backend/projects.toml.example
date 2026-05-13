@@ -1,0 +1,122 @@
+# Declarative project group config.
+# Copy to `projects.toml` (next to Cargo.toml) and edit. The file is parsed
+# at boot and replicated into Postgres. Re-running with edits is idempotent
+# — project IDs are looked up by `slug` and repo IDs by (project, remote_url).
+#
+# Each [[project]] entry is a logical group that shares review context:
+# multiple repos that should all contribute diffs into a single review.
+#
+# ============================================================================
+# Cross-repo MR review (sprint M1–M5) — quick mental model:
+#
+# * `[[project.repo]]` declares one Git repo + its provider + default branch.
+#   Marking one repo `is_primary = true` matters for the manual
+#   `POST /trigger_git_mr` route; webhook-driven review picks the repo by
+#   matching the inbound `remote_url` regardless of `is_primary`.
+#
+# * `[[project.dependency]]` declares a directed edge `from → to`. The MR
+#   overlay walker uses these edges to discover sibling repos:
+#     - BFS goes in BOTH directions, so one edge `app → packages` is
+#       enough for the walker to reach `packages` from `app` AND to reach
+#       `app` from `packages`.
+#     - WITHOUT any edge, the overlay sees only the repo that received
+#       the webhook. Cross-repo RAG context will be empty.
+#
+# * Parallel-branch discovery (case 3 — same branch name in N repos) does
+#   NOT require dependency edges; the worker iterates every repo in the
+#   project. The dependency edges are only for the overlay/RAG walker.
+#
+# See docs/services/multi-repo-review.md for the full architecture.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Example A — Flutter monorepo on a single provider (GitLab).
+# Two repos with one dependency edge. Webhooks from either side will
+# enrich the review with the other repo's code at main (cases 1 + 2),
+# and a parallel-branch MR on the other side (case 3) is picked up
+# automatically via `list_open_mrs_by_branch`.
+# ---------------------------------------------------------------------------
+
+[[project]]
+slug = "flutter-monorepo"
+name = "Flutter Monorepo"
+
+  [[project.repo]]
+  provider = "gitlab"          # gitlab | github | bitbucket
+  remote_url = "git@gitlab.com:org/app.git"
+  default_branch = "main"
+  is_primary = true            # the canonical entry point — used by
+                               # /trigger_git_mr when no repo is pinned.
+
+  [[project.repo]]
+  provider = "gitlab"
+  remote_url = "git@gitlab.com:org/shared-package.git"
+  default_branch = "main"
+
+  # Directed dependency: `app` depends on `shared-package`. One edge is
+  # enough — the overlay walker is bi-directional. `kind` records the
+  # source of the declaration (`manual` for hand-written entries;
+  # future auto-detect feeds e.g. `pubspec` or `cargo` here).
+  [[project.dependency]]
+  from = "git@gitlab.com:org/app.git"
+  to   = "git@gitlab.com:org/shared-package.git"
+  kind = "manual"
+
+# ---------------------------------------------------------------------------
+# Example B — Multi-provider project (GitLab + GitHub on the same MR).
+# `app` on GitLab, `packages` on GitHub. The HMAC secrets for each
+# provider live in the matching env var (GITLAB_WEBHOOK_SECRET vs
+# GITHUB_WEBHOOK_SECRET). Tokens use the per-host pattern
+# (GIT_TOKEN_GITLAB_COM / GIT_TOKEN_GITHUB_COM).
+# ---------------------------------------------------------------------------
+#
+# [[project]]
+# slug = "polyglot-service"
+# name = "Polyglot Service"
+#
+#   [[project.repo]]
+#   provider = "gitlab"
+#   remote_url = "git@gitlab.com:acme/app.git"
+#   is_primary = true
+#
+#   [[project.repo]]
+#   provider = "github"
+#   remote_url = "https://github.com/acme/packages.git"
+#
+#   [[project.dependency]]
+#   from = "git@gitlab.com:acme/app.git"
+#   to   = "https://github.com/acme/packages.git"
+#   kind = "manual"
+
+# ---------------------------------------------------------------------------
+# Example C — Three repos, app at the centre.
+# `app` depends on both `core` and `ui`. One edge per pair covers the
+# overlay BFS in both directions.
+# ---------------------------------------------------------------------------
+#
+# [[project]]
+# slug = "service-x"
+# name = "Service X"
+#
+#   [[project.repo]]
+#   provider = "github"
+#   remote_url = "https://github.com/acme/app.git"
+#   is_primary = true
+#
+#   [[project.repo]]
+#   provider = "github"
+#   remote_url = "https://github.com/acme/core.git"
+#
+#   [[project.repo]]
+#   provider = "github"
+#   remote_url = "https://github.com/acme/ui.git"
+#
+#   [[project.dependency]]
+#   from = "https://github.com/acme/app.git"
+#   to   = "https://github.com/acme/core.git"
+#   kind = "manual"
+#
+#   [[project.dependency]]
+#   from = "https://github.com/acme/app.git"
+#   to   = "https://github.com/acme/ui.git"
+#   kind = "manual"

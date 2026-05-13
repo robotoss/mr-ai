@@ -1,0 +1,65 @@
+# Per-model pricing table for the LLM Gateway cost analytics.
+#
+# Costs are expressed in USD per 1 million tokens, separately for input
+# (prompt) and output (completion). Embedding models bill input tokens only;
+# set output_per_1m_usd = 0.0 for them.
+#
+# Rates below reflect public OpenAI pricing as of the initial Sprint 1
+# rollout — review and update as vendors change their tariffs.
+# Local Ollama models are billed at zero by default.
+
+[[entries]]
+provider = "openai"
+model = "gpt-4o-mini"
+input_per_1m_usd = 0.15
+output_per_1m_usd = 0.60
+
+[[entries]]
+provider = "openai"
+model = "gpt-4o"
+input_per_1m_usd = 2.50
+output_per_1m_usd = 10.00
+
+[[entries]]
+provider = "openai"
+model = "text-embedding-3-small"
+input_per_1m_usd = 0.02
+output_per_1m_usd = 0.0
+
+[[entries]]
+provider = "openai"
+model = "text-embedding-3-large"
+input_per_1m_usd = 0.13
+output_per_1m_usd = 0.0
+
+# Local models — running on user-owned hardware, billed at zero.
+[[entries]]
+provider = "ollama"
+model = "llama3"
+input_per_1m_usd = 0.0
+output_per_1m_usd = 0.0
+
+[[entries]]
+provider = "ollama"
+model = "bge-m3"
+input_per_1m_usd = 0.0
+output_per_1m_usd = 0.0
+
+# AWS Bedrock — region-independent rates as published by AWS.
+[[entries]]
+provider = "bedrock"
+model = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+input_per_1m_usd = 3.00
+output_per_1m_usd = 15.00
+
+[[entries]]
+provider = "bedrock"
+model = "anthropic.claude-3-5-haiku-20241022-v1:0"
+input_per_1m_usd = 0.80
+output_per_1m_usd = 4.00
+
+[[entries]]
+provider = "bedrock"
+model = "amazon.titan-embed-text-v2:0"
+input_per_1m_usd = 0.02
+output_per_1m_usd = 0.0

@@ -391,6 +391,17 @@ pub fn extract_chunks(
         emit_barrel_file_chunk(&mut out, code, file, &imports);
     }
 
+    // 5) Decorate with hierarchical metadata: tag every existing chunk
+    //    with `chunk_kind` + `parent_symbol_id`, slice long bodies into
+    //    Sub chunks, and prepend a synthetic File chunk.
+    crate::ast::hierarchy::decorate_hierarchy(
+        &mut out,
+        code,
+        file,
+        &imports,
+        LanguageKind::Dart,
+    );
+
     Ok(out)
 }
 
@@ -645,6 +656,8 @@ fn emit_symbol_chunk(
         hints: Some(hints),
         lsp: Some(lsp_enr),
         extras,
+        parent_symbol_id: None,
+        chunk_kind: None,
     });
 }
 
@@ -708,6 +721,8 @@ fn emit_varlist_chunks(
             hints: Some(hints),
             lsp: None,
             extras: None,
+            parent_symbol_id: None,
+            chunk_kind: None,
         });
     }
 }
@@ -748,6 +763,8 @@ fn emit_barrel_file_chunk(out: &mut Vec<CodeChunk>, code: &str, file: &str, impo
         hints: Some(hints),
         lsp: None,
         extras: None,
+        parent_symbol_id: None,
+        chunk_kind: None,
     });
 }
 

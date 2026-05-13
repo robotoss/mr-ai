@@ -1,14 +1,33 @@
+//! `git-context-engine`: the MR-review brain. Single-pass flow:
+//!
+//! ```text
+//!     providers  →  diff  →  context  →  review
+//!     fetch CR      hunks    AST/RAG/    pre-review +
+//!     bundle                 overlay/    prompt +
+//!                            rules       retrieve_core
+//! ```
+//!
+//! Each top-level module corresponds to one stage. Cross-module use is
+//! strictly downstream — earlier stages never depend on later ones.
+
 mod errors;
-pub mod git_providers;
 
-pub mod ast_context;
-pub mod diff_model;
-mod pre_review;
-pub mod prompt;
-mod rag_layer;
-pub mod rules;
+pub mod context;
+pub mod diff;
+pub mod providers;
+pub mod review;
 
-mod parser; // already used by git_providers; left as-is
+// Back-compat aliases for callers that still import the legacy flat
+// names. New code should prefer the layered paths above.
+pub use crate::context::ast as ast_context;
+pub use crate::context::overlay;
+pub use crate::context::rag as rag_layer;
+pub use crate::context::rules;
+pub use crate::diff as diff_model;
+pub use crate::providers::git_providers;
+pub use crate::review::pre_review;
+pub use crate::review::prompt;
+pub use crate::review::retrieval;
 
 use std::{
     fs,
@@ -16,110 +35,88 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ai_llm_service::service_profiles::LlmServiceProfiles;
+use ai_llm_service::LlmGateway;
+use domain::{ProjectId, RepoId};
+use qdrant_client::Qdrant;
+use rag_base::structs::rag_base_config::RagConfig;
 use tracing::{debug, info, warn};
 
-use crate::diff_model::build_review_targets;
-use crate::errors::GitContextEngineResult;
-use crate::git_providers::types::{ChangeRequestId, CrBundle};
-use crate::git_providers::{ProviderClient, ProviderConfig};
-use crate::prompt::LlmReviewRequest;
-use crate::prompt::builder::build_llm_review_request;
-use crate::rules::builtin::default_rule_set;
-use crate::{ast_context::NoopAstContextProvider, rag_layer::build_rag_contexts_for_targets};
+use crate::context::ast::NoopAstContextProvider;
+use crate::context::rag::build_rag_contexts_for_targets;
+use crate::context::rules::builtin::default_rule_set;
+use crate::diff::build_review_targets;
+pub use crate::errors::{GitContextEngineError, GitContextEngineResult};
+use crate::providers::git_providers::types::{ChangeRequestId, CrBundle, LinkedMrDiff};
+use crate::providers::git_providers::{ProviderClient, ProviderConfig};
+use crate::review::prompt::LlmReviewRequest;
 
-/// Builds AI request data for a single change request.
-///
-/// This function is invoked by the HTTP layer when (for example)
-/// `/trigger_gitlab_mr` is called. It is responsible for:
-///   * fetching MR/PR data from the Git provider
-///   * building review targets from the diff
-///   * computing AST/RAG context for each target
-///   * applying review rules
-///   * producing a structured `LlmReviewRequest` value
-///
-/// The returned value can be passed to any AI provider layer to
-/// actually run the model and turn model responses into comments.
-pub async fn get_ai_request_data(
-    project_name: &str,
-    cfg: ProviderConfig,
-    id: ChangeRequestId,
-) -> GitContextEngineResult<LlmReviewRequest> {
-    info!(
-        provider = ?cfg.kind,
-        project = %id.project,
-        iid = id.iid,
-        "get_ai_request_data: started"
-    );
-
-    let client = ProviderClient::from_config(cfg.clone())?;
-
-    let bundle: CrBundle = client.fetch_bundle(&id).await?;
-
-    debug!(
-        project = %bundle.meta.id.project,
-        iid = bundle.meta.id.iid,
-        files = bundle.changes.files.len(),
-        commits = bundle.commits.len(),
-        "get_ai_request_data: bundle fetched from provider"
-    );
-
-    let targets = build_review_targets(&bundle.changes);
-
-    if targets.is_empty() {
-        warn!(
-            project = %bundle.meta.id.project,
-            iid = bundle.meta.id.iid,
-            "get_ai_request_data: no diff hunks to review"
-        );
-    }
-
-    // Build RAG contexts for each diff hunk.
-    let rag_contexts = build_rag_contexts_for_targets(project_name, &targets, Some(5)).await;
-
-    // By default use a no-op AST context provider.
-    // The host application can later construct a real provider
-    // (for example backed by a vector index) and call the lower-level
-    // pieces directly if needed.
-    let ast_provider = NoopAstContextProvider;
-
-    let rules = default_rule_set();
-
-    // TODO: extend `build_llm_review_request` to accept `&rag_contexts`
-    // and include them into per-target prompts.
-    let request = build_llm_review_request(
-        &bundle,
-        &targets,
-        &ast_provider,
-        &rules,
-        &rag_contexts,
-        None,
-    )?;
-
-    dump_llm_request_to_temp(&request, &bundle.meta.id);
-
-    info!(
-        project = %bundle.meta.id.project,
-        iid = bundle.meta.id.iid,
-        target_count = request.targets.len(),
-        "get_ai_request_data: AI request data built"
-    );
-
-    Ok(request)
+/// Aggregated parameters for [`build_two_phase_review`]. Introduced
+/// in sprint M5 (#19) to keep the function ergonomic as the cross-repo
+/// review feature kept piling on optional inputs (`overlay`,
+/// `linked_mrs`, etc.). All fields are owned or borrowed with
+/// lifetimes scoped to the call — see field docs for direction.
+pub struct TwoPhaseReviewParams<'a> {
+    /// Free-form label used only for logging — tenant scoping comes
+    /// from `project_id`. Worker passes the project UUID's simple form.
+    pub project_name: &'a str,
+    pub project_id: ProjectId,
+    pub primary_repo_id: RepoId,
+    pub qdrant: Arc<Qdrant>,
+    pub rag_cfg: Arc<RagConfig>,
+    pub cfg: ProviderConfig,
+    pub id: ChangeRequestId,
+    pub gateway: Arc<LlmGateway>,
+    /// Dump the final LLM request to `./temp/` for debugging. Off in
+    /// production; flipping this on incurs disk + serde cost per MR.
+    pub save_logs: bool,
+    /// Sprint M2: cached embeddings of the MR's `OverlayGraph`
+    /// (worker-built before calling). `Some` → sibling-repo chunks
+    /// merge into per-target RAG context. `None` → legacy single-repo
+    /// behaviour.
+    pub overlay: Option<&'a crate::context::overlay::OverlayEmbedCache>,
+    /// Sprint M4: sibling MRs that share the primary MR's
+    /// `source_branch`. Non-empty → each target's prompt gains a
+    /// `LINKED_MR_DIFFS` block. Empty slice for single-repo MRs.
+    pub linked_mrs: &'a [LinkedMrDiff],
 }
 
 /// Builds a two-phase review:
 /// 1. Pre-review planning with narrow RAG.
 /// 2. Final review request with enriched RAG guided by the plan.
 ///
-/// Returns `(pre_review_plan, final_llm_request)`.
+/// `project_id` + `primary_repo_id` scope all RAG retrieval to the right
+/// Qdrant payload subset (S1 multi-tenant). `qdrant` + `rag_cfg` are
+/// captured once at boot and shared across calls — no per-request env
+/// reads on this hot path.
+///
+/// See [`TwoPhaseReviewParams`] for the parameter bundle — introduced
+/// in sprint M5 once the signature outgrew positional ergonomics.
+#[tracing::instrument(
+    name = "review.two_phase",
+    skip_all,
+    fields(
+        provider = ?p.cfg.kind,
+        mr_iid = p.id.iid,
+        project = %p.id.project,
+    ),
+)]
 pub async fn build_two_phase_review(
-    project_name: &str,
-    cfg: ProviderConfig,
-    id: ChangeRequestId,
-    llm_profiles: Arc<LlmServiceProfiles>,
-    save_logs: bool,
+    p: TwoPhaseReviewParams<'_>,
 ) -> GitContextEngineResult<LlmReviewRequest> {
+    let TwoPhaseReviewParams {
+        project_name,
+        project_id,
+        primary_repo_id,
+        qdrant,
+        rag_cfg,
+        cfg,
+        id,
+        gateway,
+        save_logs,
+        overlay,
+        linked_mrs,
+    } = p;
+
     info!(
         provider = ?cfg.kind,
         project = %id.project,
@@ -150,41 +147,57 @@ pub async fn build_two_phase_review(
 
     let rules = default_rule_set();
 
-    // 1) short RAG for preview
-    let prereview_rag = build_rag_contexts_for_targets(project_name, &targets, Some(2)).await;
+    // 1) short RAG for preview (overlay-augmented when present)
+    let prereview_rag = build_rag_contexts_for_targets(
+        gateway.clone(),
+        &qdrant,
+        &rag_cfg,
+        project_id,
+        Some(primary_repo_id),
+        &targets,
+        Some(2),
+        overlay,
+    )
+    .await;
 
     // 2) pre-review plan (and his dump temp/pre_review — inside module)
-    let prereview_plan = pre_review::run_pre_review_planning(
+    let prereview_plan = crate::review::pre_review::run_pre_review_planning(
         project_name,
         &bundle,
         &targets,
         &rules,
         &prereview_rag,
-        llm_profiles,
+        gateway.clone(),
         save_logs,
     )
     .await?;
 
-    // 3) Enriched RAG, with plan
-    let enriched_rag = crate::rag_layer::build_enriched_rag_contexts(
-        project_name,
+    // 3) Enriched RAG, with plan + same overlay merge.
+    let enriched_rag = crate::context::rag::build_enriched_rag_contexts(
+        gateway.clone(),
+        &qdrant,
+        &rag_cfg,
+        project_id,
+        Some(primary_repo_id),
         &targets,
         &prereview_plan,
         Some(5), // base_k
         Some(3), // focus_k
+        overlay,
     )
     .await;
 
     // 4) final request in LLM for review
     let ast_provider = NoopAstContextProvider;
 
-    let final_request = crate::prompt::builder::build_llm_review_request(
+    let final_request = crate::review::prompt::builder::build_llm_review_request(
         &bundle,
         &targets,
         &ast_provider,
         &rules,
         &enriched_rag,
         Some(&prereview_plan),
+        linked_mrs,
     )?;
 
     if save_logs {
@@ -217,13 +230,12 @@ fn dump_llm_request_to_temp(request: &LlmReviewRequest, id: &ChangeRequestId) {
         safe_project, id.iid, ts
     );
 
-    // Resolve "./temp" relative to current working directory.
     let base_dir = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(err) => {
             warn!(
                 error = %err,
-                "get_ai_request_data: failed to resolve current_dir for temp dump",
+                "build_two_phase_review: failed to resolve current_dir for temp dump",
             );
             return;
         }
@@ -235,7 +247,7 @@ fn dump_llm_request_to_temp(request: &LlmReviewRequest, id: &ChangeRequestId) {
         warn!(
             dir = %temp_dir.display(),
             error = %err,
-            "get_ai_request_data: failed to create temp directory",
+            "build_two_phase_review: failed to create temp directory",
         );
         return;
     }
@@ -248,12 +260,12 @@ fn dump_llm_request_to_temp(request: &LlmReviewRequest, id: &ChangeRequestId) {
                 warn!(
                     path = %path.display(),
                     error = %err,
-                    "get_ai_request_data: failed to write LLM request to temp file",
+                    "build_two_phase_review: failed to write LLM request to temp file",
                 );
             } else {
                 debug!(
                     path = %path.display(),
-                    "get_ai_request_data: LLM request dumped to temp file",
+                    "build_two_phase_review: LLM request dumped to temp file",
                 );
             }
         }
@@ -262,7 +274,7 @@ fn dump_llm_request_to_temp(request: &LlmReviewRequest, id: &ChangeRequestId) {
                 project = %id.project,
                 iid = id.iid,
                 error = %err,
-                "get_ai_request_data: failed to serialize LLM request to JSON",
+                "build_two_phase_review: failed to serialize LLM request to JSON",
             );
         }
     }

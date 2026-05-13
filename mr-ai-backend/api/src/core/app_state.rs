@@ -1,12 +1,18 @@
 use std::{env, fmt, sync::Arc};
 
-use ai_llm_service::service_profiles::LlmServiceProfiles;
+use ai_llm_service::LlmGateway;
+use rag_base::structs::rag_base_config::RagConfig;
+use secrets::SecretProvider;
+use services::llm_health::LlmHealthMonitor;
+use sqlx::PgPool;
 
-/// Application configuration loaded from environment variables.
+/// Application configuration. Sprint C4 (🅲 multi-tenant) removed the
+/// single-project invariant — `project_slug` and `default_project_id`
+/// no longer live here; tenant identity is resolved per-request from
+/// the `X-Project-Slug` header via
+/// [`crate::middleware_layer::tenant::extract_tenant`].
 #[derive(Clone, Debug)]
 pub struct AppConfig {
-    /// Human-readable project name.
-    pub project_name: String,
     /// Base URL for the Git service API (e.g. GitLab/GitHub/Gitea).
     pub git_api_base: String,
     /// Access token for the Git service API.
@@ -40,7 +46,8 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl AppConfig {
-    /// Load configuration strictly from environment variables.
+    /// Read configuration from env. Pure env now that the project
+    /// identity is per-request (sprint C4 of 🅲).
     pub fn from_env() -> Result<Self, ConfigError> {
         fn must_var(name: &'static str) -> Result<String, ConfigError> {
             let v = env::var(name).map_err(|_| ConfigError::MissingVar { name })?;
@@ -50,7 +57,6 @@ impl AppConfig {
             Ok(v)
         }
 
-        let project_name = must_var("PROJECT_NAME")?;
         let git_api_base = must_var("GIT_API_BASE")?;
         let git_token = must_var("GIT_TOKEN")?;
         let trigger_secret = must_var("TRIGGER_SECRET")?;
@@ -63,7 +69,6 @@ impl AppConfig {
         }
 
         Ok(Self {
-            project_name,
             git_api_base,
             git_token,
             trigger_secret,
@@ -76,16 +81,54 @@ impl AppConfig {
 pub struct AppState {
     /// Immutable configuration.
     pub config: Arc<AppConfig>,
-    /// LLM service profiles (e.g. Ollama).
-    pub llm_profiles: Arc<LlmServiceProfiles>,
+    /// Universal LLM Gateway (provider-agnostic).
+    pub gateway: Arc<LlmGateway>,
+    /// Secret resolution backend (env or mounted files). Always present —
+    /// defaults to `EnvSecretProvider` when nothing is configured.
+    pub secrets: Arc<dyn SecretProvider>,
+    /// Optional Postgres pool. `None` means persistence is disabled (legacy
+    /// path, controlled by `DATABASE_OPTIONAL=true`). Handlers that need DB
+    /// access must report a clean error when this is `None`.
+    pub db: Option<PgPool>,
+    /// Background-refreshed snapshot of LLM gateway health. Surfaced by
+    /// `/health/detailed` and `/health/ready` so probes do not pay for an
+    /// LLM round-trip on every tick.
+    pub llm_health: LlmHealthMonitor,
+    /// Immutable RAG / Qdrant configuration captured at boot. The
+    /// `/retrieve` hot path reads it on every request, and re-reading
+    /// ~14 env vars per call burns CPU + read-locks. Cache once here.
+    pub rag_cfg: Arc<RagConfig>,
+    /// Prometheus exposition handle. `/metrics` renders from it. `None`
+    /// in tests / when the recorder couldn't be installed (e.g. second
+    /// install in a single process).
+    pub metrics: Option<observability::MetricsHandle>,
+    /// Cached snapshot served by `/health/dashboard`. `None` when
+    /// persistence is disabled (the monitor needs a `PgPool`).
+    pub dashboard: Option<services::dashboard_monitor::DashboardCache>,
 }
 
 impl AppState {
-    /// Create state from pre-loaded configuration.
-    pub fn new(config: Arc<AppConfig>, llm_profiles: Arc<LlmServiceProfiles>) -> Self {
+    /// Create state with full dependency wiring.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        config: Arc<AppConfig>,
+        gateway: Arc<LlmGateway>,
+        secrets: Arc<dyn SecretProvider>,
+        db: Option<PgPool>,
+        llm_health: LlmHealthMonitor,
+        rag_cfg: Arc<RagConfig>,
+        metrics: Option<observability::MetricsHandle>,
+        dashboard: Option<services::dashboard_monitor::DashboardCache>,
+    ) -> Self {
         Self {
             config,
-            llm_profiles,
+            gateway,
+            secrets,
+            db,
+            llm_health,
+            rag_cfg,
+            metrics,
+            dashboard,
         }
     }
 }

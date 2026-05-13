@@ -28,12 +28,16 @@ use crate::{
 /// If the secret matches the configured `trigger_secret`, the git-context-engine
 /// will fetch the MR, run RAG + rules and post comments back via API.
 #[instrument(
-    name = "trigger__mr_route",
-    skip(state, headers, body),
-    fields(project = %state.config.project_name)
+    name = "trigger_mr",
+    skip_all,
+    fields(
+        project_id = %scope.project_id().as_uuid().simple(),
+        mr_iid = body.mr_iid,
+    ),
 )]
 pub async fn trigger_mr_route(
     State(state): State<Arc<AppState>>,
+    axum::Extension(scope): axum::Extension<domain::AuthorizedScope>,
     headers: HeaderMap,
     Json(body): Json<TriggerMrRequest>,
 ) -> Response {
@@ -89,15 +93,68 @@ pub async fn trigger_mr_route(
     );
 
     // --- Run review pipeline ----------------------------------------------------
+    // Resolve (project_id, primary_repo_id) for tenant-scoped RAG. The
+    // manual trigger predates the multi-tenant filter, so we look up the
+    // single project's primary repo from the DB. If persistence is off
+    // we can't run the review — fail loudly instead of bypassing the
+    // tenant filter silently.
+    let Some(pool) = state.db.as_ref() else {
+        let resp: ApiResponse<()> = ApiResponse::error(
+            "PERSISTENCE_DISABLED",
+            "Postgres pool is required for /trigger_git_mr".to_string(),
+            Vec::new(),
+        );
+        return resp.into_response_with_status(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let repos = match persistence::repos::projects::list_repos_for_project(
+        pool,
+        scope.project_id(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            let resp: ApiResponse<()> =
+                ApiResponse::error("REPO_LOOKUP_FAILED", err.to_string(), Vec::new());
+            return resp.into_response_with_status(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let Some(primary_repo) = repos.iter().find(|r| r.is_primary).or_else(|| repos.first())
+    else {
+        let resp: ApiResponse<()> = ApiResponse::error(
+            "NO_REPO_FOR_PROJECT",
+            "no repo configured for default project".to_string(),
+            Vec::new(),
+        );
+        return resp.into_response_with_status(StatusCode::BAD_REQUEST);
+    };
+    let qdrant_client = match rag_base::vector_db::connect(state.rag_cfg.as_ref()).await {
+        Ok(c) => Arc::new(c),
+        Err(err) => {
+            let resp: ApiResponse<()> =
+                ApiResponse::error("QDRANT_CONNECT_FAILED", err.to_string(), Vec::new());
+            return resp.into_response_with_status(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
 
-    // let result = get_ai_request_data(&state.config.project_name, cfg, id).await;
-    let result = build_two_phase_review(
-        &state.config.project_name,
+    let project_label = scope.project_id().as_uuid().simple().to_string();
+    // M2 (cross-repo): manual /trigger_git_mr doesn't build an
+    // overlay — the route doesn't carry an MR head_sha. The
+    // webhook-driven worker path is the canonical entry that
+    // exercises overlay.
+    let result = build_two_phase_review(git_context_engine::TwoPhaseReviewParams {
+        project_name: &project_label,
+        project_id: scope.project_id(),
+        primary_repo_id: primary_repo.id,
+        qdrant: qdrant_client,
+        rag_cfg: state.rag_cfg.clone(),
         cfg,
         id,
-        state.llm_profiles.clone(),
-        false,
-    )
+        gateway: state.gateway.clone(),
+        save_logs: false,
+        overlay: None,
+        linked_mrs: &[],
+    })
     .await;
     // ApiResponse::success(TriggerMrResponse {
     //     message: " MR review completed successfully.".to_string(),
@@ -113,7 +170,7 @@ pub async fn trigger_mr_route(
             };
 
             let result =
-                review_merge_request(review_request, state.llm_profiles.clone(), &config).await;
+                review_merge_request(review_request, state.gateway.clone(), &config).await;
 
             match result {
                 Ok(_) => ApiResponse::success(TriggerMrResponse {

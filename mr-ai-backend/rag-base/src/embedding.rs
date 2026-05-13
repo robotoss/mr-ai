@@ -1,9 +1,12 @@
-//! Text helpers and Ollama-based embedding utilities.
+//! Text helpers used to build inputs for the embedding gateway.
+//!
+//! Direct embedding HTTP calls have moved to `ai-llm-service`. This module
+//! now only assembles compact text payloads suitable for embedding and
+//! exposes a thin batch helper that delegates to the gateway.
 
-use std::time::Duration;
+use std::sync::Arc;
 
-use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
+use ai_llm_service::{EmbeddingRequest, EmbeddingTier, LlmGateway};
 
 use crate::errors::rag_base_error::RagBaseError;
 use crate::structs::rag_base_config::RagConfig;
@@ -73,10 +76,8 @@ pub fn build_embedding_text(
     keywords: &[String],
     max_snippet_chars: usize,
 ) -> String {
-    // 1) Structural header
     let mut parts: Vec<String> = vec![format!("{language} | {kind} | {symbol_path}")];
 
-    // 2) Signature and first doc line
     if let Some(sig) = signature {
         if !sig.is_empty() {
             parts.push(format!("Signature: {sig}"));
@@ -90,17 +91,14 @@ pub fn build_embedding_text(
         }
     }
 
-    // 3) Top imports
     if !imports_top.is_empty() {
         parts.push(format!("Imports: {}", imports_top.join(", ")));
     }
 
-    // 4) Routes
     if !routes.is_empty() {
         parts.push(format!("Routes: {}", routes.join(", ")));
     }
 
-    // 5) Keywords (small top slice)
     if !keywords.is_empty() {
         let keep = keywords
             .iter()
@@ -111,7 +109,6 @@ pub fn build_embedding_text(
         parts.push(format!("Keywords: {keep}"));
     }
 
-    // 6) Clamped snippet
     if let Some(sn) = snippet {
         let clamp = clamp_snippet_ex(sn, max_snippet_chars, 50, true);
         if !clamp.is_empty() {
@@ -123,71 +120,39 @@ pub fn build_embedding_text(
     parts.join("\n")
 }
 
-#[derive(Debug, Serialize)]
-struct OllamaEmbedRequest<'a> {
-    model: &'a str,
-    prompt: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-struct OllamaEmbedResponse {
-    embedding: Vec<f32>,
-}
-
-/// Embed texts via Ollama `/api/embeddings`.
-pub async fn embed_texts_ollama(
+/// Embed a batch of texts via the LLM Gateway and validate dimensions
+/// against `cfg.embedding.dim`.
+pub async fn embed_texts(
+    gateway: &Arc<LlmGateway>,
     cfg: &RagConfig,
     texts: &[String],
 ) -> Result<Vec<Vec<f32>>, RagBaseError> {
-    let base = std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-    let url = format!("{base}/api/embeddings");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| RagBaseError::Embedding(format!("http client build: {e}")))?;
-
-    let mut out = Vec::with_capacity(texts.len());
-
-    for text in texts {
-        let req = OllamaEmbedRequest {
-            model: &cfg.embedding.model,
-            prompt: text,
-        };
-
-        let resp = client
-            .post(&url)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| RagBaseError::Embedding(format!("POST {url}: {e}")))?;
-
-        if resp.status() != StatusCode::OK {
-            let code = resp.status();
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read body>".into());
-            return Err(RagBaseError::Embedding(format!(
-                "ollama embeddings non-200: {code}; body: {body}"
-            )));
-        }
-
-        let parsed: OllamaEmbedResponse = resp
-            .json()
-            .await
-            .map_err(|e| RagBaseError::Embedding(format!("parse embeddings json: {e}")))?;
-
-        if parsed.embedding.len() != cfg.embedding.dim {
-            return Err(RagBaseError::Embedding(format!(
-                "embedding dim {} != expected {} (model: {})",
-                parsed.embedding.len(),
-                cfg.embedding.dim,
-                cfg.embedding.model
-            )));
-        }
-
-        out.push(parsed.embedding);
+    if texts.is_empty() {
+        return Ok(Vec::new());
     }
 
-    Ok(out)
+    let resp = gateway
+        .embed_batch(EmbeddingTier::Default, EmbeddingRequest::new(texts.to_vec()))
+        .await?;
+
+    if resp.vectors.len() != texts.len() {
+        return Err(RagBaseError::Embedding(format!(
+            "embedding count mismatch: got {}, expected {}",
+            resp.vectors.len(),
+            texts.len()
+        )));
+    }
+
+    for v in &resp.vectors {
+        if v.len() != cfg.embedding.dim {
+            return Err(RagBaseError::Embedding(format!(
+                "embedding dim {} != expected {} (model: {})",
+                v.len(),
+                cfg.embedding.dim,
+                resp.model
+            )));
+        }
+    }
+
+    Ok(resp.vectors)
 }
