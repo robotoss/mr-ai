@@ -1,7 +1,9 @@
 # observability — Telemetry, Metrics, Audit
 
-> **Status:** ALPHA · **Crate:** [`observability/`](../../observability/) ·
-> **Layer:** L0 — Cross-cutting
+> **Status:** BETA · **Crate:** [`observability/`](../../observability/) ·
+> **Layer:** L0 — Cross-cutting · Sprints 1–4 landed (Prometheus
+> `/metrics`, `#[instrument]` + opt-in OTLP + W3C propagation,
+> `audit_log` + admin middleware, cached `/health/dashboard` snapshot).
 
 Single crate owning everything the runtime needs to be observable: the
 tracing subscriber, the Prometheus recorder, and (later sprints) the

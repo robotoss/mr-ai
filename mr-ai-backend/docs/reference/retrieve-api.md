@@ -1,6 +1,6 @@
 # Retrieve API
 
-> **Status:** ACTIVE (S8) ·
+> **Status:** STABLE (S8+) ·
 > **Route:** [`POST /retrieve`](../../api/src/routes/retrieve/retrieve_route.rs)
 
 `POST /retrieve` is the mechanical retrieval entry point introduced in
@@ -19,16 +19,21 @@ graph-expanded / overlay-merged neighbours.
 (env: `TRIGGER_SECRET`). Missing / wrong / empty header returns
 `401 UNAUTHORIZED`. See [Admin API → Authentication](admin-api.md#authentication).
 
+The tenant is resolved per-request via the `X-Project-Slug` header (see
+[multi-tenant](../services/multi-tenant.md)); missing / unknown slugs
+fail at the middleware layer with `400 MISSING_PROJECT_SLUG` or
+`400 UNKNOWN_PROJECT` before the handler runs.
+
 ## Request
 
 ```http
 POST /retrieve
 Content-Type: application/json
 X-Admin-Token: <TRIGGER_SECRET>
+X-Project-Slug: demo
 
 {
   "query": "user authentication middleware",
-  "project_slug": "demo",
   "repo_id": "00000000-0000-0000-0000-000000000001",
   "mr_iid": "42",
   "head_sha": "deadbeef",
@@ -43,7 +48,7 @@ X-Admin-Token: <TRIGGER_SECRET>
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `query` | string | — | Required. The free-form query. |
-| `project_slug` | string? | `AppConfig::project_slug` (S5) | Must match the cached default. Mismatch → `400 UNKNOWN_PROJECT`. |
+| `project_slug` | string? | — | **Deprecated** — body field accepted but ignored. The tenant is derived from the `X-Project-Slug` header (see [multi-tenant](../services/multi-tenant.md)). |
 | `repo_id` | string? | none | UUID. When unset, the search spans every repo in the default project. Required for graph expansion and MR mode. |
 | `mr_iid` | string? | none | MR identifier. Triggers overlay build. |
 | `head_sha` | string? | none | Required alongside `mr_iid`. The MR head commit the overlay builder checks out. |
@@ -101,7 +106,7 @@ Unknown fields are rejected (`serde(deny_unknown_fields)`).
 | --- | --- | --- |
 | `200 OK` | — | Normal success. |
 | `400 BAD_REQUEST` | various | Empty `query`, malformed UUID, etc. |
-| `400 UNKNOWN_PROJECT` | — | `project_slug` doesn't match the configured default. |
+| `400 MISSING_PROJECT_SLUG` / `UNKNOWN_PROJECT` | — | `X-Project-Slug` header missing or not found in the `projects` table (raised by `extract_tenant` middleware). |
 | `400 BAD_REPO_ID` | — | `repo_id` is not a valid UUID. |
 | `400 MR_PARAMS_INCOMPLETE` | — | `mr_iid` supplied without `repo_id` + `head_sha`. |
 | `401 UNAUTHORIZED` | — | Missing / wrong `X-Admin-Token`. |
@@ -167,9 +172,8 @@ sequenceDiagram
   Bedrock Titan 25, …) aren't exceeded. Tune `MR_FANOUT_MAX_CHUNKS`
   (see [Configuration](../guides/configuration.md)) to keep retrieval
   latency bounded.
-- `/search_vector_base` is still wired for backwards compatibility but
-  also gated by `X-Admin-Token`; expect it to be removed once external
-  callers have migrated.
+- The legacy `/search_vector_base` route has been removed; `/retrieve`
+  is the only retrieval entry point.
 - `RagConfig` is captured once at boot on `AppState::rag_cfg`; updating
   `QDRANT_*` / `EMBEDDING_DIM` / `RAG_*` env vars requires an API
   restart.

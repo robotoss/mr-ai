@@ -9,8 +9,9 @@ must update the relevant page in the same change.
 
 - **New to the project?** Start with [Getting Started](guides/getting-started.md),
   then skim the [Architecture Overview](architecture/overview.md).
-- **Looking for a specific crate?** Jump to [Services](#services) — every crate
-  has a self-contained page following the same template.
+- **Looking for a specific crate?** Jump to [Crates](#crates) — most crates
+  have a dedicated page. Cross-cutting concerns get their own pages in the
+  same directory (see [Cross-cutting concepts](#cross-cutting-concepts)).
 - **Want to extend the system?** See the how-to [Add a new LLM Provider](guides/add-llm-provider.md).
 - **Need a config knob?** See the [Configuration Reference](guides/configuration.md).
 
@@ -18,37 +19,48 @@ must update the relevant page in the same change.
 
 | Doc | What it covers |
 | --- | --- |
-| [Overview](architecture/overview.md) | System context, crate dependency graph, layered model. |
-| [Data Flow](architecture/data-flow.md) | End-to-end MR review and RAG indexing sequences. |
+| [Overview](architecture/overview.md) | System context, crate dependency graph, layered model, cross-cutting concerns. |
+| [Data Flow](architecture/data-flow.md) | End-to-end MR review, push ingestion, cross-repo overlay, `/retrieve` sequences. |
 
-## Services
+## Crates
 
-Each service page follows the same structure: **Purpose → Public API →
-Configuration → Usage Example → File Map → Errors → Testing → Related Docs**.
+One row per workspace member in `Cargo.toml`. Most crates have a page;
+cross-cutting concerns get their own page in the same directory.
 
 | Crate | Role | Page |
 | --- | --- | --- |
 | `ai-llm-service` | Universal LLM Gateway (Ollama, OpenAI, Bedrock). | [ai-llm-service](services/ai-llm-service.md) |
 | `ai-review-engine` | Generates AI review comments and publishes them to MRs. | [ai-review-engine](services/ai-review-engine.md) |
-| `git-context-engine` | Fetches MR diffs, builds review targets, two-phase prompt. | [git-context-engine](services/git-context-engine.md) |
-| `rag-base` | Qdrant-backed semantic search over indexed code. | [rag-base](services/rag-base.md) |
+| `api` | HTTP front-end (axum): trigger, retrieve, admin, webhooks, health, metrics. | [api](services/api.md) |
 | `code-indexer` | AST + LSP-style indexer producing JSONL chunks. | [code-indexer](services/code-indexer.md) |
-| `project-code-store` | Async git cloning over SSH / HTTPS. | [project-code-store](services/project-code-store.md) |
-| `git-service` | Bare clones + per-MR worktrees inside `project_code_store`. | [git-service](services/git-service.md) |
-| `graph-rag` (graph) | Postgres-backed code graph (nodes / edges / analyzer). | [graph-rag (part 1)](services/graph-rag.md) |
-| `graph-rag` (retrieval) | Seeds + k-hop expansion + rerank pipeline; transient overlay. | [graph-rag (part 2)](services/graph-rag-retrieval.md) |
-| `review-pipeline` | Worker pipeline binding webhooks → graph reindex → review bundle. | [review-pipeline](services/review-pipeline.md) |
-| `ingestion-pipeline` | Master-flow `Reindex` → Postgres graph **and** Qdrant via content-sha dedup. | [ingestion-pipeline](services/ingestion-pipeline.md) |
-| `chunking` | Hierarchical chunk emission (file / parent / symbol / sub) + `parent_symbol_id` linking. | [chunking](services/chunking.md) |
-| `rust-analyzer` | Tree-sitter Rust provider + `RustAnalyzer` graph edges (S4A). | [rust-analyzer](services/rust-analyzer.md) |
-| `typescript-analyzer` | Tree-sitter TypeScript / TSX provider + `TypescriptAnalyzer` graph edges (S4B). | [typescript-analyzer](services/typescript-analyzer.md) |
-| `overlay` | In-memory `OverlayGraph` builder + transitive walker for MR retrieval (S7). | [overlay](services/overlay.md) |
-| `persistence` | Postgres — pool, migrations, transactions, queue mechanics, per-service responsibility. | [persistence](services/persistence.md) |
-| `observability` | Telemetry init + Prometheus metrics + (later) OTLP tracing + audit middleware. | [observability](services/observability.md) |
-| (cross-cutting) | Multi-tenant isolation — type-system perimeter + Postgres RLS + (deferred) physical isolation. | [multi-tenant](services/multi-tenant.md) |
-| (cross-cutting) | Cross-repo MR review — monorepo flow across N repos and multiple providers (GitLab/GitHub/Bitbucket); BETA after M1–M5. | [multi-repo-review](services/multi-repo-review.md) |
-| `api` | HTTP front-end (axum) exposing trigger / index / search routes. | [api](services/api.md) |
-| `services` | Tiny shared utilities (UUIDv5 helper). | [services](services/services.md) |
+| `domain` | Pure data types — `AuthorizedScope`, IDs, ingestion / review payloads. | [domain](services/domain.md) |
+| `git-context-engine` | Fetches MR diffs, builds review targets, two-phase prompt, cross-repo overlay. | [git-context-engine](services/git-context-engine.md) |
+| `observability` | Telemetry init, Prometheus metrics, OTLP tracing, audit middleware. | [observability](services/observability.md) |
+| `persistence` | Postgres — pool, migrations, transactions, RLS, queue mechanics, repos. | [persistence](services/persistence.md) |
+| `project_code_store` | Async git cloning over SSH/HTTPS; bare clones + per-MR worktrees via the `git-service` subcrate. | [project-code-store](services/project-code-store.md) |
+| `rag-base` | Qdrant-backed semantic search over indexed code. | [rag-base](services/rag-base.md) |
+| `secrets` | `SecretProvider` abstraction — env vs file-mount backends. | [secrets](services/secrets.md) |
+| `services` | Tiny shared utilities (UUIDv5, llm-health monitor, dashboard monitor). | [services](services/services.md) |
+| `worker` | Background job pool — claims from Postgres `jobs` via SKIP LOCKED, dispatches by `kind`. | [worker](services/worker.md) |
+
+## Cross-cutting concepts
+
+These pages describe behaviours that span several crates. Each lives
+alongside the crate pages so they can be linked from PRs the same way.
+
+| Concept | What it covers | Page |
+| --- | --- | --- |
+| Multi-tenant isolation | `AuthorizedScope` perimeter + `X-Project-Slug` + Postgres RLS + (deferred) physical isolation. | [multi-tenant](services/multi-tenant.md) |
+| Cross-repo MR review | Monorepo flow across N repos and multiple providers (GitLab/GitHub/Bitbucket); BETA after M1–M5. | [multi-repo-review](services/multi-repo-review.md) |
+| Overlay | In-memory `OverlayGraph` builder + transitive walker for MR retrieval (S7). | [overlay](services/overlay.md) |
+| Chunking | Hierarchical chunk emission (file / parent / symbol / sub) + `parent_symbol_id` linking. | [chunking](services/chunking.md) |
+| Graph-RAG (graph) | Postgres-backed code graph — nodes, edges, analyzers. | [graph-rag](services/graph-rag.md) |
+| Graph-RAG (retrieval) | Seeds + k-hop expansion + rerank pipeline; transient overlay. | [graph-rag-retrieval](services/graph-rag-retrieval.md) |
+| Rust analyzer | Tree-sitter Rust provider + `RustAnalyzer` graph edges (S4A). | [rust-analyzer](services/rust-analyzer.md) |
+| TypeScript analyzer | Tree-sitter TS/TSX provider + `TypescriptAnalyzer` graph edges (S4B). | [typescript-analyzer](services/typescript-analyzer.md) |
+| Ingestion pipeline | Master-flow `Reindex` → Postgres graph and Qdrant via content-sha dedup. | [ingestion-pipeline](services/ingestion-pipeline.md) |
+| Review pipeline | Worker pipeline binding webhooks → graph reindex → review bundle. | [review-pipeline](services/review-pipeline.md) |
+| Git-service subcrate | Bare clones + per-MR worktrees inside `project_code_store`. | [git-service](services/git-service.md) |
 
 ## Guides (how-to)
 
@@ -62,6 +74,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 | [Add a new LLM Provider](guides/add-llm-provider.md) | Plug Anthropic / Groq / a custom backend behind the gateway. |
 | [Configuration](guides/configuration.md) | Every environment variable, where it's read, and what it controls. |
 | [Observability](guides/observability.md) | Health endpoints, retry helper, log structure, per-request analytics. |
+| [Debugging](guides/debugging.md) | Finding the right log span, correlating webhook → queue → handler, RLS gotchas. |
 | [Testing](guides/testing.md) | Running and extending the unit-test suite. |
 
 ## Reference
@@ -82,7 +95,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 
 | Doc | What it covers |
 | --- | --- |
-| [Operations](operations.md) | Single-project invariant, env checklist, pre-flight checks, where to look when things break. |
+| [Operations](operations.md) | Env checklist, pre-flight checks, multi-tenant invariants, where to look when things break. |
 
 ## Conventions
 
@@ -100,7 +113,7 @@ Configuration → Usage Example → File Map → Errors → Testing → Related 
 If you change behaviour, update the relevant page **in the same PR**. The
 checklist:
 
-- Public API change → update `Public API` section of the service page
+- Public API change → update the relevant crate / concept page
   *and* `reference/unified-schema.md` if it touches the unified types.
 - New env var → add a row to `guides/configuration.md` *and* update
   `.env.example`.

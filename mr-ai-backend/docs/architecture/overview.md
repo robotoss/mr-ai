@@ -1,110 +1,195 @@
 # Architecture Overview
 
 > **Purpose.** Map of how the workspace is organised, who depends on whom,
-> and which layer owns which concern. Read this once, link to it from PR
-> descriptions whenever the topology changes.
+> and which cross-cutting concerns ride above the crate layout. Read this
+> once, link to it from PR descriptions whenever the topology changes.
 
-## System context
+## What this service does
+
+mr-ai-backend is a self-hosted MR/PR review service: it ingests source
+code from one or more git providers (GitLab, GitHub, Bitbucket), keeps a
+hybrid Postgres-graph + Qdrant-vector index of every project, and on
+each merge request publishes AI-generated review comments built from
+the diff plus retrieved context. The same workspace also exposes a
+`/retrieve` admin API so external tooling can reuse the same
+multi-tenant retrieval stack. Cross-repo (monorepo-style) MR review
+across N repositories and multiple providers is supported via overlay
+BFS + linked-MR discovery (sprints M1–M5).
+
+## Crate dependency graph
+
+The workspace has **13 crates**. Edges are real `[dependencies]`
+entries (see each crate's `Cargo.toml`); the binary `mr-ai-backend`
+only depends on `api`, which transitively wires the rest.
 
 ```mermaid
-flowchart LR
-    User([Reviewer / CI hook]) -->|HTTPS trigger| API
-    Git[Git provider<br/>GitLab / GitHub] -->|clone & MR API| API
+flowchart TD
+    BIN([mr-ai-backend bin]) --> API[api]
 
-    subgraph mr-ai-backend
-        API[api<br/>axum HTTP server]
-        ARE[ai-review-engine]
-        GCE[git-context-engine]
-        RAG[rag-base]
-        CI[code-indexer]
-        PCS[project-code-store]
-        GW[ai-llm-service<br/>LlmGateway]
-    end
+    API --> AIR[ai-review-engine]
+    API --> GCE[git-context-engine]
+    API --> RAG[rag-base]
+    API --> CI[code-indexer]
+    API --> SVC[services]
+    API --> GW[ai-llm-service]
+    API --> DOM[domain]
+    API --> SEC[secrets]
+    API --> PER[persistence]
+    API --> WRK[worker]
+    API --> OBS[observability]
 
-    API --> ARE
-    API --> GCE
-    API --> RAG
-    API --> PCS
-    API --> CI
+    WRK --> PER
+    WRK --> DOM
+    WRK --> OBS
+    WRK --> CI
+    WRK --> GCE
+    WRK --> GW
+    WRK --> AIR
+    WRK --> RAG
+    WRK --> SEC
 
-    GCE --> RAG
+    AIR --> GW
+    AIR --> GCE
+
     GCE --> GW
-    ARE --> GW
-    RAG  --> GW
+    GCE --> CI
+    GCE --> RAG
+    GCE --> DOM
+    GCE --> PER
 
-    GW -->|HTTP| Ollama[(Ollama<br/>local)]
-    GW -->|HTTPS| OpenAI[(OpenAI<br/>api.openai.com)]
-    GW -->|SigV4| Bedrock[(AWS Bedrock<br/>region runtime)]
+    RAG --> GW
+    RAG --> CI
+    RAG --> DOM
+    RAG --> OBS
 
-    RAG -->|gRPC| Qdrant[(Qdrant)]
-    PCS -->|SSH/HTTPS| Git
-    CI -->|reads| Repo[(code_data/...)]
-    PCS -->|writes| Repo
+    SVC --> GW
+    SVC --> PER
+
+    PER --> DOM
+    PER --> OBS
+
+    PCS[project_code_store] --> SEC
+    PCS --> DOM
+
+    GW --> DOM
+    GW --> OBS
+
+    CI --> DOM
+    SEC --> DOM
 ```
+
+Notes:
+
+- `project_code_store` is not pulled in by `api` directly — it is used
+  by handlers in `worker` via the bundled `git-service` subcrate.
+- `services` is the small shared-utilities crate (UUIDv5 helper,
+  background monitors); not to be confused with the `docs/services/`
+  folder, which contains a page per crate.
+- The dependency direction is strictly top-down. Cycles are caught at
+  `cargo build`.
 
 ## Layered model
 
-The workspace is intentionally split so that "how to talk to AI" is separate
-from "how to run a review". Each layer below depends only on the ones beneath
-it.
-
 | Layer | Crates | Concern |
 | --- | --- | --- |
-| **L4 — Transport** | `api` | HTTP framing, routing, request validation, app state wiring. |
-| **L3 — Orchestration** | `ai-review-engine`, `git-context-engine` | Stitch git context + RAG + LLM + comment publishing into a workflow. |
-| **L2 — Capabilities** | `rag-base`, `code-indexer`, `project-code-store` | Self-contained capabilities: semantic search, AST parsing, git cloning. |
-| **L1 — AI Gateway** | `ai-llm-service` | Provider-agnostic chat completion and embeddings via traits. |
-| **L0 — Utilities** | `services` | Tiny cross-cutting helpers (UUIDv5). |
+| **L4 — Entrypoint** | `mr-ai-backend` (binary), `api` | HTTP framing, routing, request validation, tenant extraction, app-state wiring. |
+| **L3 — Orchestration** | `worker`, `ai-review-engine`, `git-context-engine` | Job pool + per-kind handlers; stitch git context + RAG + LLM + comment publishing into a workflow. |
+| **L2 — Capabilities** | `rag-base`, `code-indexer`, `project_code_store`, `services` | Self-contained capabilities: semantic search over Qdrant, AST chunking, async git cloning, shared helpers. |
+| **L1 — Infrastructure** | `ai-llm-service`, `persistence`, `observability`, `secrets` | Provider-agnostic LLM gateway, Postgres pool / migrations / repos, telemetry init + Prometheus / OTLP, secret provider abstraction. |
+| **L0 — Domain** | `domain` | Pure data types: `AuthorizedScope`, `ProjectId`, `IngestionEvent`, `ReviewBundle`, identity helpers. No IO. |
 
-The dependency direction is **strictly top-down**. L1 never imports anything
-from L2/L3/L4. L2 may use L1 (rag-base now consumes the gateway for
-embeddings). Violations show up as cyclic crate deps in `cargo build`.
+Every crate at layer N may import only from layers `< N`. The graph
+above is the source of truth; the table is the human-readable
+summary.
 
-## Why a Universal LLM Gateway
+## Cross-cutting concerns
 
-`ai-llm-service` exists for two reasons:
+### Multi-tenant isolation (sprints C1–C5)
 
-1. **Decouple business logic from vendor JSON.** The review engine never
-   touches `/api/chat` versus `/v1/chat/completions` versus Bedrock Converse
-   — it speaks `UnifiedRequest` and `UnifiedResponse` only.
-2. **Centralise observability and cost controls.** Token counting, cost
-   estimation, structured logging, and health probes happen exactly once,
-   inside the gateway. New providers inherit them automatically.
+- **Identity at the edge.** Every admin / retrieve / trigger request
+  carries `X-Project-Slug`; the `extract_tenant` middleware resolves
+  it to an `AuthorizedScope` (`domain::scope`) and stores it in the
+  request extensions.
+- **Intended perimeter.** `AuthorizedScope` is a marker type designed
+  to make tenant identity a compile-time argument for every repo
+  function — handlers should accept `&AuthorizedScope` instead of a
+  bare `ProjectId`.
+- **Actual enforcement.** Today the runtime perimeter is
+  `persistence::tenant::with_tenant(pool, scope, |tx| …)`, which sets
+  `app.current_project` on the transaction so Postgres **row-level
+  security** policies filter every read and write. The C4 audit
+  identified 8 repo functions still taking a bare `&PgPool`; these
+  rely on RLS catching mistakes rather than the type system. Treat
+  `AuthorizedScope` as aspirational coverage, not a guarantee.
+- **Worker re-verification.** The worker re-resolves
+  `remote_url → project_id` at claim time and force-kills any job
+  whose payload `project_id` disagrees (see
+  `worker::process_one::tenant.mismatch`).
 
-See [services/ai-llm-service](../services/ai-llm-service.md) for the
-deep-dive and [guides/add-llm-provider](../guides/add-llm-provider.md) for
-the extension recipe.
+See [services/multi-tenant](../services/multi-tenant.md) for the
+end-to-end story.
 
-## Data flow at a glance
+### Cross-repo MR review (sprints M1–M5)
 
-The two main flows are described in detail in
-[Data Flow](data-flow.md). In one sentence each:
+A merge request in one repo can touch symbols defined in sibling
+repos of the same project group. `git-context-engine` builds a
+transient `OverlayGraph` keyed by `project_group_id`, runs BFS
+expansion across repo boundaries, and discovers **linked MRs** in
+sibling repos via provider APIs so the review prompt sees the full
+multi-repo change set. The flow is BETA and is bounded to a
+`project_group` declared in `projects.toml`.
 
-- **Index a project** → `project-code-store` clones the repo →
-  `code-indexer` walks files, builds AST chunks, writes JSONL →
-  `rag-base` reads JSONL, asks the gateway for embeddings, upserts to Qdrant.
-- **Review an MR** → `git-context-engine` fetches the MR bundle and builds
-  review targets → `rag-base` retrieves relevant code via semantic search
-  → `git-context-engine` runs a pre-review planning prompt (smart tier) →
-  `ai-review-engine` runs the per-hunk review prompt (fast tier) →
-  comments are published back to the MR.
+See [services/multi-repo-review](../services/multi-repo-review.md)
+and [services/overlay](../services/overlay.md).
+
+### Observability (sprints O1–O4)
+
+- `observability::install_prometheus_recorder()` is installed once at
+  boot; `/metrics` serves the Prometheus snapshot.
+- `#[instrument]` spans + W3C `traceparent` propagation; OTLP export
+  is opt-in via env (`OTEL_EXPORTER_OTLP_ENDPOINT`).
+- Admin routes are wrapped by `observability::audit_layer`, which
+  writes `request_id`, route, status, latency and payload SHA to the
+  `audit_log` table (retention controlled by `AUDIT_RETENTION_DAYS`).
+- `/health/dashboard` returns a cached snapshot refreshed every
+  `DASHBOARD_REFRESH_SECS` so an ops UI can poll cheaply.
+
+See [guides/observability](../guides/observability.md) and
+[services/observability](../services/observability.md).
+
+## Key flows
+
+End-to-end sequence diagrams (push ingestion, MR review, cross-repo
+overlay, `/retrieve`) live in [Data Flow](data-flow.md). One-liners:
+
+- **Index a project** → webhook → `worker::IngestPush` →
+  `code-indexer` chunks → `persistence` writes graph nodes/edges →
+  `rag-base` upserts vectors to Qdrant.
+- **Review an MR** → webhook → `worker::IngestMr` →
+  `git-context-engine` builds overlay + review targets → `rag-base`
+  retrieves context → `ai-review-engine` runs per-hunk prompts →
+  comments published via provider API.
+- **Retrieve** → `POST /retrieve` (admin auth + tenant extraction) →
+  `rag-base` master search ∪ MR overlay → optional rerank
+  (`rerank_cache` keyed by query+chunk SHA).
 
 ## Configuration philosophy
 
-- **Single source of truth.** `.env` at the workspace root is the only
-  runtime configuration. No code has hard-coded endpoints, models, or
-  pricing.
-- **Typed, validated upfront.** `GatewayConfig::from_env()` parses
-  everything once at startup; downstream code receives strongly-typed
-  structs and never re-reads env vars.
-- **Provider-specific knobs in `extras`.** New providers can extend
-  configuration without modifying `ProviderConfig` (e.g., AWS region lives
-  in `cfg.extras["region"]`).
+- **Single source of truth.** `.env` at the workspace root plus
+  `projects.toml` (project groups + per-repo remotes). No code has
+  hard-coded endpoints, models, or pricing.
+- **Typed, validated upfront.** `AppConfig::from_env()` and
+  `GatewayConfig::from_env()` parse everything once at startup;
+  downstream code receives strongly-typed structs.
+- **Secrets through a provider.** `secrets::from_env()` picks an env
+  or file-mount backend; rotation does not require a restart of
+  callers that re-read on every use.
 
 Full reference: [guides/configuration](../guides/configuration.md).
 
 ## Related docs
 
-- [Data Flow](data-flow.md) — sequence diagrams for the two main flows.
-- [services/ai-llm-service](../services/ai-llm-service.md) — gateway internals.
+- [Data Flow](data-flow.md) — sequence diagrams for the main flows.
+- [services/multi-tenant](../services/multi-tenant.md) — tenant perimeter deep-dive.
+- [services/multi-repo-review](../services/multi-repo-review.md) — M1–M5 design.
 - [guides/getting-started](../guides/getting-started.md) — local setup.

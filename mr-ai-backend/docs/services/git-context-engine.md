@@ -22,10 +22,9 @@ Implements the **two-phase review** strategy (planning then execution).
 
 | Item | File | Purpose |
 | --- | --- | --- |
-| `get_ai_request_data(gateway, project, cfg, id)` | [`src/lib.rs:43`](../../git-context-engine/src/lib.rs#L43) | One-shot path: bundle → targets → general RAG → request. |
-| `build_two_phase_review(project, cfg, id, gateway, save_logs)` | [`src/lib.rs:116`](../../git-context-engine/src/lib.rs#L116) | Planning + enriched RAG, recommended for production. |
-| `LlmReviewRequest` | [`src/prompt/`](../../git-context-engine/src/prompt/) | Output structure consumed by `ai-review-engine`. |
-| `ProviderConfig`, `ProviderKind`, `ChangeRequestId` | [`src/git_providers/`](../../git-context-engine/src/git_providers/) | Git provider configuration. |
+| `build_two_phase_review(params)` | [`src/lib.rs`](../../git-context-engine/src/lib.rs) | Planning + enriched RAG, the production path. Takes a `TwoPhaseReviewParams` aggregate. |
+| `LlmReviewRequest` | [`src/review/prompt/`](../../git-context-engine/src/review/prompt/) | Output structure consumed by `ai-review-engine`. |
+| `ProviderConfig`, `ProviderKind`, `ChangeRequestId` | [`src/providers/git_providers/`](../../git-context-engine/src/providers/git_providers/) | Git provider configuration. |
 | `GitContextEngineError`, `GitContextEngineResult` | [`src/errors.rs`](../../git-context-engine/src/errors.rs) | Error types. |
 
 ## Architecture
@@ -52,7 +51,7 @@ the `Arc<LlmGateway>` passed in.
 
 Used env vars (consumed by callers, not this crate directly):
 - `GIT_API_BASE`, `GIT_TOKEN` — Git provider credentials.
-- `PROJECTS_CONFIG` — `projects.toml` provides the single-project slug used for RAG calls; see [Configuration](../guides/configuration.md#single-project-invariant-s5).
+- `PROJECTS_CONFIG` — `projects.toml` declares one or more tenant projects (C4+ multi-tenant); the project slug used for RAG is resolved per-request from `X-Project-Slug`. See [Configuration](../guides/configuration.md) and [multi-tenant](multi-tenant.md).
 
 ## Usage example
 
@@ -60,22 +59,18 @@ Used env vars (consumed by callers, not this crate directly):
 use std::sync::Arc;
 use ai_llm_service::LlmGateway;
 use git_context_engine::{
-    build_two_phase_review,
+    build_two_phase_review, TwoPhaseReviewParams,
     git_providers::{ChangeRequestId, ProviderConfig, ProviderKind},
 };
 
 async fn run(
-    gateway: Arc<LlmGateway>,
-    project_name: &str,
+    p: TwoPhaseReviewParams<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = ProviderConfig {
-        kind: ProviderKind::GitLab,
-        base_api: std::env::var("GIT_API_BASE")?,
-        token: std::env::var("GIT_TOKEN")?,
-    };
-    let id = ChangeRequestId { project: "team/repo".into(), iid: 42 };
-
-    let request = build_two_phase_review(project_name, cfg, id, gateway, false).await?;
+    // TwoPhaseReviewParams was introduced in M5 — it aggregates
+    // project_id / primary_repo_id, the shared Qdrant + RagConfig
+    // handles, the provider cfg, the MR id, the gateway, plus optional
+    // overlay (M2) and linked_mrs (M4) cross-repo inputs.
+    let request = build_two_phase_review(p).await?;
     println!("targets prepared: {}", request.targets.len());
     Ok(())
 }
@@ -85,17 +80,19 @@ async fn run(
 
 ```
 git-context-engine/src/
-├── lib.rs                  # get_ai_request_data, build_two_phase_review
+├── lib.rs                  # TwoPhaseReviewParams + build_two_phase_review
 ├── errors.rs               # GitContextEngineError + From<GatewayError>
-├── git_providers/          # GitLab/GitHub/Bitbucket REST clients
-├── diff_model.rs           # ReviewTarget construction from unified diff
-├── ast_context.rs          # NoopAstContextProvider + extension point
-├── rag_layer/              # build_rag_contexts_for_targets, build_enriched_rag_contexts
-├── pre_review/             # planning prompt + LLM call (smart tier)
-├── prompt/
-│   ├── builder.rs          # final LlmReviewRequest assembly
-│   └── ...
-└── rules/                  # built-in & per-language review rules
+├── providers/              # GitLab/GitHub/Bitbucket REST clients (M5 move)
+├── diff/                   # ReviewTarget construction from unified diff
+├── context/
+│   ├── ast/                # NoopAstContextProvider + extension point
+│   ├── overlay/            # OverlayGraph builder (S7)
+│   ├── rag/                # build_rag_contexts_for_targets, build_enriched_rag_contexts
+│   └── rules/              # built-in & per-language review rules
+└── review/
+    ├── pre_review/         # planning prompt + LLM call (smart tier)
+    ├── prompt/             # final LlmReviewRequest assembly
+    └── retrieval/          # llm_rerank + review_rerank_request
 ```
 
 ### Two-phase strategy in detail

@@ -49,7 +49,7 @@ sequenceDiagram
 
 ## ReindexHandler
 
-[`worker::handlers::ReindexHandler`](../../worker/src/handlers.rs)
+[`worker::handlers::ReindexHandler`](../../worker/src/handlers/reindex/mod.rs)
 
 | Step | Module | Notes |
 | --- | --- | --- |
@@ -68,7 +68,7 @@ the Dart Analyzer sidecar in S8.
 
 ## IngestMrHandler
 
-[`worker::handlers::IngestMrHandler`](../../worker/src/handlers.rs)
+[`worker::handlers::IngestMrHandler`](../../worker/src/handlers/ingest_mr/mod.rs)
 
 The handler:
 
@@ -93,7 +93,7 @@ After the bundle lands, two optional stages run depending on env flags:
 ### Optional rerank (`RAG_LLM_RERANK_ENABLED`)
 
 When true, the handler calls
-[`rerank_review_request`](../../git-context-engine/src/retrieval/review_rerank.rs)
+[`rerank_review_request`](../../git-context-engine/src/review/retrieval/review_rerank.rs)
 which lifts every `LlmReviewTarget` into a `RetrievalSeed` (priority of
 the planned anchor → seed score), runs `llm_rerank` against `ModelTier::Smart`
 under `RAG_RERANK_TIMEOUT_SECS`, and folds the result back into a list of
@@ -124,7 +124,7 @@ review with LLM rerank diagnostics.
 | --- | --- | --- |
 | `GIT_API_BASE` | (required) | Provider base URL passed into both `git-context-engine` and `ai-review-engine` config. |
 | `GIT_TOKEN` | (required) | Provider auth token. Resolved via `SecretProvider`. |
-| `PROJECTS_CONFIG` | `projects.toml` | Single `[[project]]` declaration sourced at boot; its slug is forwarded into the prompt assembly path. |
+| `PROJECTS_CONFIG` | `projects.toml` | One or more `[[project]]` declarations sourced at boot (C4+ multi-tenant); the tenant slug resolved per-request from `X-Project-Slug` is forwarded into the prompt assembly path. |
 | `RAG_LLM_RERANK_ENABLED` | `false` | When `true`, run the LLM rerank diagnostic step after the bundle is built **and** reorder review targets by rerank score before publish (sprint 4a). |
 | `RAG_RERANK_TIMEOUT_SECS` | `20` | Hard timeout for the rerank LLM call. |
 | `REVIEW_V2_ENABLED` | `false` | When `true`, run one Smart/Fast-tier LLM call per hypothesis after rerank. Outcomes recorded in `mr_review_hypotheses` (sprint 4b). |

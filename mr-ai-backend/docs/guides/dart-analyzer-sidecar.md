@@ -11,7 +11,7 @@ edge kinds (`data_flow`, `control_flow`, precise `async_boundary`). The
 > [Rust client](../../code-indexer/src/lsp/dart/sidecar.rs) drives it;
 > [`augment_with_sidecar`](../../code-indexer/src/analyzer/dart.rs)
 > folds the result into `AnalysisOutcome`; the
-> [`ReindexHandler`](../../worker/src/handlers.rs) opts in when configured.
+> [`ReindexHandler`](../../worker/src/handlers/reindex/mod.rs) opts in when configured.
 > All three AstVisitor passes (data_flow / control_flow /
 > async_boundary) emit canonical edge intents — see
 > [`analyzer_engine.dart`](../../dart_sidecar/lib/analyzer_engine.dart)

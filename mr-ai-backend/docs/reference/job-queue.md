@@ -74,9 +74,9 @@ UPDATE jobs
 
 | Kind | Producer | Handler | Pipeline |
 | --- | --- | --- | --- |
-| `IngestPush` | `/webhooks/*` push events | [`IngestPushHandler`](../../worker/src/handlers.rs) | refresh bare clone → enqueue `Reindex` |
-| `IngestMr` | `/webhooks/*` MR events | [`IngestMrHandler`](../../worker/src/handlers.rs) | resolve provider → build two-phase review bundle → optional inline comments |
-| `Reindex` | `IngestPush`, `/admin/reindex_*` (S5), auto-split fan-out (S9) | [`ReindexHandler`](../../worker/src/handlers.rs) | worktree → multi-language analyzer fan-out → `graph_persist` (Postgres) + `upsert_repo_chunks` (Qdrant, content-sha dedup). Auto-splits at `REINDEX_SPLIT_FILES`, times out at `REINDEX_JOB_TIMEOUT_MIN`. |
+| `IngestPush` | `/webhooks/*` push events | [`IngestPushHandler`](../../worker/src/handlers/ingest_push.rs) | refresh bare clone → enqueue `Reindex` |
+| `IngestMr` | `/webhooks/*` MR events | [`IngestMrHandler`](../../worker/src/handlers/ingest_mr/mod.rs) | resolve provider → build two-phase review bundle → optional inline comments |
+| `Reindex` | `IngestPush`, `/admin/reindex_*` (S5), auto-split fan-out (S9) | [`ReindexHandler`](../../worker/src/handlers/reindex/mod.rs) | worktree → multi-language analyzer fan-out → `graph_persist` (Postgres) + `upsert_repo_chunks` (Qdrant, content-sha dedup). Auto-splits at `REINDEX_SPLIT_FILES`, times out at `REINDEX_JOB_TIMEOUT_MIN`. |
 
 Adding a new kind:
 

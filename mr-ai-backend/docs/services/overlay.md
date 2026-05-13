@@ -1,10 +1,10 @@
 # Overlay Builder
 
-> **Status:** ACTIVE (S7) ·
-> **Source:** [`git-context-engine/src/overlay/`](../../git-context-engine/src/overlay)
+> **Status:** STABLE (S7) ·
+> **Source:** [`git-context-engine/src/context/overlay/`](../../git-context-engine/src/context/overlay)
 
 When retrieval needs to answer "what does this MR look like layered over
-the stable index?" we build a transient [`OverlayGraph`](../../git-context-engine/src/overlay/mod.rs)
+the stable index?" we build a transient [`OverlayGraph`](../../git-context-engine/src/context/overlay/mod.rs)
 per call. The overlay is **in-memory only** — neither Qdrant nor
 Postgres are mutated. It captures:
 

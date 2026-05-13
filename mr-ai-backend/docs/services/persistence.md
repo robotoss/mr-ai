@@ -1,6 +1,6 @@
 # Persistence (Postgres)
 
-> **Status:** ACTIVE · **Crate:** [`persistence/`](../../persistence) ·
+> **Status:** STABLE · **Crate:** [`persistence/`](../../persistence) ·
 > **Schema reference:** [reference/database-schema](../reference/database-schema.md)
 
 Postgres 16 is the system of record. Everything that needs durable

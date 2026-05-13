@@ -1,6 +1,6 @@
 # Chunking — Hierarchical Code Chunks
 
-> **Status:** ACTIVE (S3 — Dart shipped · Rust + TypeScript land in S4)
+> **Status:** STABLE — Dart (S3), Rust (S4A), and TypeScript/JS (S4B) all ship hierarchical chunks; 11 more languages parse via `GenericTextAst` fallback.
 > **Source of truth:** `code_indexer::ast::dart::hierarchy` ·
 > `code_indexer::types::ChunkKind`
 
@@ -43,7 +43,7 @@ filter `must([parent_symbol_id = X])`.
 
 ## Sub-chunk slicing
 
-[`hierarchy::append_sub_chunks`](../../code-indexer/src/ast/dart/hierarchy.rs)
+[`hierarchy::append_sub_chunks`](../../code-indexer/src/ast/hierarchy.rs)
 runs after the extractor has produced the flat chunk list. For every
 `parent` or `symbol` chunk whose span exceeds the threshold, it slices
 the body into overlapping windows:

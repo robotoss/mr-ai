@@ -1,7 +1,8 @@
 # Multi-tenant (🅲)
 
-> **Status:** IN PROGRESS · spans `domain/`, `persistence/`, `api/`,
-> `worker/` · Sprint C1 in flight.
+> **Status:** BETA · spans `domain/`, `persistence/`, `api/`,
+> `worker/` · Sprints C1–C5 landed; C6+ callsite migration is the
+> remaining follow-up before operators can flip RLS `FORCE` in prod.
 
 Multi-tenant isolation is treated as an **invariant**, not a feature.
 Developer discipline ("remember to filter by project_id") is the

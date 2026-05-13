@@ -122,8 +122,8 @@ sequenceDiagram
 **Key call sites:**
 
 - HTTP entry: [`api/src/routes/check_mr/trigger_mr_route.rs`](../../api/src/routes/check_mr/trigger_mr_route.rs)
-- Two-phase orchestration: [`git-context-engine/src/lib.rs:116`](../../git-context-engine/src/lib.rs#L116)
-- Pre-review planning prompt: [`git-context-engine/src/pre_review/mod.rs`](../../git-context-engine/src/pre_review/mod.rs)
+- Two-phase orchestration: [`git-context-engine/src/lib.rs`](../../git-context-engine/src/lib.rs) (`build_two_phase_review`)
+- Pre-review planning prompt: [`git-context-engine/src/review/pre_review/mod.rs`](../../git-context-engine/src/review/pre_review/mod.rs)
 - Per-hunk review: [`ai-review-engine/src/lib.rs:87`](../../ai-review-engine/src/lib.rs#L87)
 - Comment publishing: [`ai-review-engine/src/publish/`](../../ai-review-engine/src/publish/)
 

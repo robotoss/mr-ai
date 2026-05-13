@@ -1,6 +1,6 @@
 # Rust Analyzer
 
-> **Status:** ACTIVE (S4A — tree-sitter only; `syn`-based sidecar is future work)
+> **Status:** STABLE (S4A — tree-sitter only; `syn`-based sidecar is future work)
 > **Crate:** [`code-indexer/`](../../code-indexer) ·
 > **Layer:** L2 — Capabilities
 
@@ -50,7 +50,7 @@ identifiers near a slice boundary don't get double-counted.
 
 ## Worker fan-out
 
-[`ReindexHandler`](../../worker/src/handlers.rs) runs both analyzers
+[`ReindexHandler`](../../worker/src/handlers/reindex/mod.rs) runs both analyzers
 unconditionally and merges their outcomes via `merge_outcomes`. Each
 analyzer filters by `LanguageKind` so a Dart-only workspace never sees
 Rust edges and vice versa. The merged outcome flows into the existing

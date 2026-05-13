@@ -1,6 +1,6 @@
 # TypeScript Analyzer
 
-> **Status:** ACTIVE (S4B — tree-sitter only; `ts-morph` sidecar is future work)
+> **Status:** STABLE (S4B — tree-sitter only; `ts-morph` sidecar is future work)
 > **Crate:** [`code-indexer/`](../../code-indexer) ·
 > **Layer:** L2 — Capabilities
 
@@ -51,7 +51,7 @@ near a slice boundary don't get double-counted.
 
 ## Worker fan-out
 
-[`ReindexHandler`](../../worker/src/handlers.rs) now runs the Dart,
+[`ReindexHandler`](../../worker/src/handlers/reindex/mod.rs) now runs the Dart,
 Rust, **and** TypeScript analyzers unconditionally and merges their
 outcomes via `merge_outcomes`. Each analyzer filters by `LanguageKind`
 so a single-language workspace doesn't pay for the others.
