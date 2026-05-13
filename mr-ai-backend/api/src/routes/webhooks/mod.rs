@@ -10,9 +10,12 @@
 //!    pointing to unknown repos are recorded but rejected.
 //! 5. Enqueue an `IngestPush` / `IngestMr` job. Worker pool picks it up.
 //!
-//! HMAC secrets are resolved through `SecretProvider` —
-//! `WEBHOOK_HMAC_SECRET` (global) by default; per-project overrides land in
-//! S3 alongside the project-aware credential routing.
+//! HMAC secrets are resolved through `SecretProvider` per provider
+//! (sprint M1 of cross-repo MR review):
+//! `GITLAB_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` /
+//! `BITBUCKET_WEBHOOK_SECRET`. No global fallback — each provider
+//! has its own key so two providers can coexist on the same
+//! instance.
 
 pub mod bitbucket;
 pub mod common;

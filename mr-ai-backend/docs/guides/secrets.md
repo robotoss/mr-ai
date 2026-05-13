@@ -19,7 +19,9 @@ Reads from process environment variables. Names follow the convention in
 | `ssh_key_passphrase` | `SSH_KEY_PASSPHRASE` |
 | `git_http_token` | `GIT_HTTP_TOKEN` |
 | `git_http_user` | `GIT_HTTP_USER` |
-| `webhook_hmac` | `WEBHOOK_HMAC_SECRET` |
+| `webhook_hmac_gitlab` | `GITLAB_WEBHOOK_SECRET` |
+| `webhook_hmac_github` | `GITHUB_WEBHOOK_SECRET` |
+| `webhook_hmac_bitbucket` | `BITBUCKET_WEBHOOK_SECRET` |
 | `trigger_secret` | `TRIGGER_SECRET` |
 
 For per-project overrides, the synchronous helper `secrets::sync::resolve`

@@ -1,0 +1,139 @@
+//! Provider-side configuration helpers — currently the canonical API
+//! base URL for a given (host, provider) pair. Sprint M1 of cross-
+//! repo MR review.
+//!
+//! Why this lives in `secrets/`: the same crate already resolves
+//! tokens by host (see `sync::resolve_with_host`). Pairing the API
+//! base derivation with the token resolver keeps both pieces in one
+//! place so a downstream provider client can pick up everything via
+//! a single call.
+
+use crate::host_key::slug_from_host;
+use domain::ProviderKind;
+use std::env;
+
+/// Resolve the canonical API base URL for a given remote host +
+/// provider kind. Lookup order:
+///
+/// 1. `GIT_API_BASE_<HOST_SLUG>` env variable (self-hosted overrides).
+/// 2. Provider-default for well-known public hosts.
+/// 3. Provider-default URL pattern when the host is unknown.
+///
+/// **GitLab self-hosted** at `gitlab.acme.io`:
+/// - `GIT_API_BASE_GITLAB_ACME_IO=https://gitlab.acme.io/api/v4`
+///   wins immediately;
+/// - otherwise the function returns `https://gitlab.acme.io/api/v4`
+///   (the default pattern for GitLab CE/EE installations).
+///
+/// **GitHub Enterprise** at `github.acme.io`:
+/// - `GIT_API_BASE_GITHUB_ACME_IO=https://github.acme.io/api/v3` wins;
+/// - otherwise returns `https://github.acme.io/api/v3` (the standard
+///   GHE path). Public `github.com` returns `https://api.github.com`.
+pub fn base_api_for(host: &str, provider: ProviderKind) -> String {
+    let slug = slug_from_host(host);
+    let env_key = format!("GIT_API_BASE_{slug}");
+    if let Ok(v) = env::var(&env_key) {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    match provider {
+        ProviderKind::Gitlab => format!("https://{host}/api/v4"),
+        ProviderKind::Github => {
+            if host.eq_ignore_ascii_case("github.com") {
+                "https://api.github.com".to_owned()
+            } else {
+                format!("https://{host}/api/v3")
+            }
+        }
+        ProviderKind::Bitbucket => {
+            if host.eq_ignore_ascii_case("bitbucket.org") {
+                "https://api.bitbucket.org/2.0".to_owned()
+            } else {
+                format!("https://{host}/2.0")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Save + restore an env var around a test body. Tests must use
+    /// unique slugs so cargo's parallel runner can't race.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = env::var(key).ok();
+            unsafe { env::set_var(key, value) };
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => unsafe { env::set_var(self.key, v) },
+                None => unsafe { env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn base_api_for_github_com_returns_canonical_api_url() {
+        assert_eq!(
+            base_api_for("github.com", ProviderKind::Github),
+            "https://api.github.com"
+        );
+    }
+
+    #[test]
+    fn base_api_for_gitlab_com_returns_canonical_api_url() {
+        assert_eq!(
+            base_api_for("gitlab.com", ProviderKind::Gitlab),
+            "https://gitlab.com/api/v4"
+        );
+    }
+
+    #[test]
+    fn base_api_for_bitbucket_org_returns_canonical_api_url() {
+        assert_eq!(
+            base_api_for("bitbucket.org", ProviderKind::Bitbucket),
+            "https://api.bitbucket.org/2.0"
+        );
+    }
+
+    #[test]
+    fn base_api_for_self_hosted_gitlab_falls_back_to_per_host_pattern() {
+        // No env override → default pattern with the host inlined.
+        assert_eq!(
+            base_api_for("gitlab.acme.io", ProviderKind::Gitlab),
+            "https://gitlab.acme.io/api/v4"
+        );
+    }
+
+    #[test]
+    fn base_api_for_self_hosted_github_falls_back_to_v3_pattern() {
+        assert_eq!(
+            base_api_for("github.acme.io", ProviderKind::Github),
+            "https://github.acme.io/api/v3"
+        );
+    }
+
+    #[test]
+    fn base_api_env_override_wins_over_default() {
+        let _g = EnvGuard::set(
+            "GIT_API_BASE_GITLAB_TEST_BASE_API_OVERRIDE_COM",
+            "https://internal.proxy/api",
+        );
+        assert_eq!(
+            base_api_for("gitlab.test-base-api-override.com", ProviderKind::Gitlab),
+            "https://internal.proxy/api"
+        );
+    }
+}

@@ -1,7 +1,7 @@
 //! Bitbucket webhook handler.
 //!
 //! Authentication: `X-Hub-Signature: sha256=<hex>` (HMAC-SHA256 over the raw
-//! body, secret = `webhook_hmac` / `WEBHOOK_HMAC_SECRET`). This is the
+//! body, secret = `webhook_hmac_bitbucket` / `BITBUCKET_WEBHOOK_SECRET`). This is the
 //! Bitbucket Server scheme; Bitbucket Cloud has no built-in HMAC and must
 //! be fronted by a reverse proxy that adds the same header.
 //! Event id source: `X-Request-UUID` header, with body-hash fallback.
@@ -59,7 +59,7 @@ pub async fn bitbucket_webhook_route(
         .unwrap_or_default();
     let expected = state
         .secrets
-        .get_optional(None, &SecretKey::WebhookHmac)
+        .get_optional(None, &SecretKey::WebhookHmacBitbucket)
         .await
         .map_err(|e| AppError::Http {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -70,7 +70,7 @@ pub async fn bitbucket_webhook_route(
         return Err(AppError::Http {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "WEBHOOK_SECRET_UNSET",
-            message: "WEBHOOK_HMAC_SECRET is not configured".into(),
+            message: "BITBUCKET_WEBHOOK_SECRET is not configured".into(),
         });
     };
     if let Err(err) =

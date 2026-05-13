@@ -61,7 +61,7 @@ pub async fn gitlab_webhook_route(
         .to_vec();
     let expected = state
         .secrets
-        .get_optional(None, &SecretKey::WebhookHmac)
+        .get_optional(None, &SecretKey::WebhookHmacGitlab)
         .await
         .map_err(|e| AppError::Http {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -72,7 +72,7 @@ pub async fn gitlab_webhook_route(
         return Err(AppError::Http {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "WEBHOOK_SECRET_UNSET",
-            message: "WEBHOOK_HMAC_SECRET is not configured".into(),
+            message: "GITLAB_WEBHOOK_SECRET is not configured".into(),
         });
     };
     if let Err(err) = webhook::verify_gitlab_token(&presented, expected_secret.as_bytes()) {

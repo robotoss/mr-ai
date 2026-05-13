@@ -123,7 +123,10 @@ async fn webhook_gitlab_full_round_trip() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let global_dir = tmp.path().join("_global");
     std::fs::create_dir_all(&global_dir).expect("create _global dir");
-    std::fs::write(global_dir.join("webhook_hmac"), secret).expect("write secret");
+    // Sprint M1: per-provider secret. The smoke fires a GitLab
+    // webhook, so we plant `webhook_hmac_gitlab` rather than the
+    // legacy global `webhook_hmac` file.
+    std::fs::write(global_dir.join("webhook_hmac_gitlab"), secret).expect("write secret");
 
     let state = build_state(pool.clone(), tmp.path());
     let app = Router::new()

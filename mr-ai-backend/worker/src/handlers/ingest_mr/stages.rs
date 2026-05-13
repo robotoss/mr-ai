@@ -130,9 +130,20 @@ impl IngestMrHandler {
             ),
         })?;
 
+        // Sprint M1 of cross-repo MR review: base_api is derived per
+        // repo from `host_from_remote_url` rather than the (removed)
+        // global `git_api_base` — this lets one project federate
+        // repos on GitLab + GitHub + Bitbucket simultaneously.
+        // `host` was extracted above; fall back to the legacy global
+        // env when host parsing fails so misconfigured remote URLs
+        // surface as a TENANT_RESOLVE_FAILED later, not here.
+        let base_api = match host.as_deref() {
+            Some(h) => secrets::base_api_for(h, provider),
+            None => self.git_api_base.clone(),
+        };
         let cfg = ProviderConfig {
             kind: map_provider_to_context(provider),
-            base_api: self.git_api_base.clone(),
+            base_api,
             token: token.clone(),
         };
 
@@ -394,9 +405,12 @@ impl IngestMrHandler {
                 "reason": "provider has no inline-comment publisher",
             });
         };
+        // Sprint M1: publisher base_url mirrors the per-repo
+        // base_api decision. ctx.cfg.base_api was resolved via
+        // secrets::base_api_for from the repo's remote_url host.
         let publisher_cfg = PublisherConfig {
             kind,
-            base_url: self.git_api_base.clone(),
+            base_url: ctx.cfg.base_api.clone(),
             token: ctx.token.clone(),
         };
         match review_merge_request(request, self.gateway.concrete(), &publisher_cfg).await {

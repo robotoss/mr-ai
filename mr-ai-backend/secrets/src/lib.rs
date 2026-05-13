@@ -15,15 +15,25 @@ use tokio::fs;
 use tracing::{debug, warn};
 
 pub mod host_key;
+pub mod providers;
 pub mod webhook;
 
 pub use host_key::{
     host_env_key, host_from_remote_url, slug_from_host, slug_from_remote_url, validate_host,
 };
+pub use providers::base_api_for;
 
 /// Strongly-typed key for a known secret. Stringly-typed escape hatch lives in
 /// `SecretKey::Custom` for migration ergonomics — prefer adding variants over
 /// abusing it.
+///
+/// Sprint M1 of cross-repo MR review removed the legacy `WebhookHmac`
+/// in favour of `WebhookHmacGitlab` / `WebhookHmacGithub` /
+/// `WebhookHmacBitbucket` — each webhook handler now reads its own
+/// per-provider secret so two providers can coexist on the same
+/// instance without sharing keys. **This is a breaking change**;
+/// operators must set `GITLAB_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET`
+/// / `BITBUCKET_WEBHOOK_SECRET` for the providers they use.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SecretKey {
     GitToken,
@@ -31,7 +41,9 @@ pub enum SecretKey {
     SshKeyPassphrase,
     GitHttpToken,
     GitHttpUser,
-    WebhookHmac,
+    WebhookHmacGitlab,
+    WebhookHmacGithub,
+    WebhookHmacBitbucket,
     TriggerSecret,
     Custom(&'static str),
 }
@@ -44,7 +56,9 @@ impl SecretKey {
             SecretKey::SshKeyPassphrase => "ssh_key_passphrase",
             SecretKey::GitHttpToken => "git_http_token",
             SecretKey::GitHttpUser => "git_http_user",
-            SecretKey::WebhookHmac => "webhook_hmac",
+            SecretKey::WebhookHmacGitlab => "webhook_hmac_gitlab",
+            SecretKey::WebhookHmacGithub => "webhook_hmac_github",
+            SecretKey::WebhookHmacBitbucket => "webhook_hmac_bitbucket",
             SecretKey::TriggerSecret => "trigger_secret",
             SecretKey::Custom(name) => name,
         }
@@ -60,7 +74,9 @@ impl SecretKey {
             SecretKey::SshKeyPassphrase => "SSH_KEY_PASSPHRASE",
             SecretKey::GitHttpToken => "GIT_HTTP_TOKEN",
             SecretKey::GitHttpUser => "GIT_HTTP_USER",
-            SecretKey::WebhookHmac => "WEBHOOK_HMAC_SECRET",
+            SecretKey::WebhookHmacGitlab => "GITLAB_WEBHOOK_SECRET",
+            SecretKey::WebhookHmacGithub => "GITHUB_WEBHOOK_SECRET",
+            SecretKey::WebhookHmacBitbucket => "BITBUCKET_WEBHOOK_SECRET",
             SecretKey::TriggerSecret => "TRIGGER_SECRET",
             SecretKey::Custom(name) => name,
         }

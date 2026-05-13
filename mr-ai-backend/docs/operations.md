@@ -32,7 +32,9 @@ returns zero rows. See [multi-tenant service page](services/multi-tenant.md).
 | Var | Required? | Sketch |
 | --- | --- | --- |
 | `API_ADDRESS` | yes | Listening address. |
-| `GIT_API_BASE`, `GIT_TOKEN` | yes | Provider credentials. Host-scoped overrides documented in [Secrets](guides/secrets.md#host-scoped-overrides-s6). |
+| `GIT_API_BASE`, `GIT_TOKEN` | yes | Legacy fallback (used when remote host can't be parsed). M1 onward the worker derives `base_api` per repo via `secrets::base_api_for`. |
+| `GIT_API_BASE_<HOST_SLUG>` | optional | Self-hosted override, mirrors the existing `GIT_TOKEN_<HOST_SLUG>` pattern. E.g. `GIT_API_BASE_GITLAB_ACME_IO=https://gitlab.acme.io/api/v4`. |
+| `GITLAB_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` / `BITBUCKET_WEBHOOK_SECRET` | yes per provider used | **Breaking change in M1:** the legacy global `WEBHOOK_HMAC_SECRET` is gone. Set the per-provider keys for the providers you actually receive webhooks from. |
 | `TRIGGER_SECRET` | yes | Doubles as the **`X-Admin-Token`** every operator route (`/admin/*`, `/retrieve`, `/search_vector_base`, `/trigger_git_mr`) checks. Rotate by restarting the API; the comparison is constant-time. |
 | `PROJECTS_CONFIG` | yes | Path to `projects.toml`. |
 | `DATABASE_URL` (+ `DATABASE_OPTIONAL=false` in prod) | yes | Postgres pool. |

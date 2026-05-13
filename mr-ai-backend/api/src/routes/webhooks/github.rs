@@ -1,7 +1,7 @@
 //! GitHub webhook handler.
 //!
 //! Authentication: `X-Hub-Signature-256: sha256=<hex>` (HMAC-SHA256 over the
-//! raw body, secret = `webhook_hmac` / `WEBHOOK_HMAC_SECRET`).
+//! raw body, secret = `webhook_hmac_github` / `GITHUB_WEBHOOK_SECRET`).
 //! Event id source: `X-GitHub-Delivery` header (UUID), with body-hash
 //! fallback for resilience against malformed deliveries.
 //! Recognised events: `push` → `IngestPush`, `pull_request` → `IngestMr`.
@@ -57,7 +57,7 @@ pub async fn github_webhook_route(
         .unwrap_or_default();
     let expected = state
         .secrets
-        .get_optional(None, &SecretKey::WebhookHmac)
+        .get_optional(None, &SecretKey::WebhookHmacGithub)
         .await
         .map_err(|e| AppError::Http {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -68,7 +68,7 @@ pub async fn github_webhook_route(
         return Err(AppError::Http {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "WEBHOOK_SECRET_UNSET",
-            message: "WEBHOOK_HMAC_SECRET is not configured".into(),
+            message: "GITHUB_WEBHOOK_SECRET is not configured".into(),
         });
     };
     if let Err(err) = webhook::verify_github_sha256(signature, &body, expected_secret.as_bytes()) {
