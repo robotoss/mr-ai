@@ -7,8 +7,9 @@ must update the relevant page in the same change.
 
 ## How to read this
 
-- **New to the project?** Start with [Getting Started](guides/getting-started.md),
-  then skim the [Architecture Overview](architecture/overview.md).
+- **New to the project?** Start with **[Quick Start](guides/quick-start.md)**
+  (zero → working review in ~30 minutes), then skim the
+  [Architecture Overview](architecture/overview.md).
 - **Looking for a specific crate?** Jump to [Crates](#crates) — most crates
   have a dedicated page. Cross-cutting concerns get their own pages in the
   same directory (see [Cross-cutting concepts](#cross-cutting-concepts)).
@@ -66,8 +67,10 @@ alongside the crate pages so they can be linked from PRs the same way.
 
 | Guide | When to use |
 | --- | --- |
-| [Getting Started](guides/getting-started.md) | First-time local setup and smoke run. |
+| **[Quick Start](guides/quick-start.md)** | **Start here.** From zero to a working MR review in ~30 minutes (Flutter single-repo → monorepo expansion). |
+| [Getting Started](guides/getting-started.md) | Bare-bones smoke run when you already know the moving parts. |
 | [Installation](guides/installation.md) | Full local environment with Postgres + Qdrant via Docker. |
+| **[Monitoring & Cost](guides/monitoring.md)** | Health probes, Prometheus metrics, token-cost tracking (`/usage` + `usage.jsonl`), canonical alert rules, smoke-test script. |
 | [Secrets](guides/secrets.md) | `SecretProvider` model — env vs file-mount backends, layout, rotation. |
 | [Webhooks](guides/webhooks.md) | Native GitLab/GitHub/Bitbucket endpoints — signature, dedup, payloads. |
 | [Dart Analyzer sidecar](guides/dart-analyzer-sidecar.md) | Plan + RPC contract for the upcoming control-flow / data-flow extractor. |
