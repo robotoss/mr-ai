@@ -108,6 +108,34 @@ impl ProviderClient {
         }
     }
 
+    /// Sprint M3 of cross-repo MR review — discover all open MRs/PRs
+    /// in `project` whose `source_branch` matches the supplied
+    /// branch name. Best-effort: providers return whatever they have
+    /// today on one page of 100. The worker uses this to build the
+    /// `head_overrides` map for `build_for_mr` in case 3 (parallel
+    /// branches across linked repos).
+    pub async fn list_open_mrs_by_branch(
+        &self,
+        project: &str,
+        source_branch: &str,
+    ) -> GitContextEngineResult<Vec<MrSummary>> {
+        debug!(
+            "Listing open MRs by branch: provider={}, project={}, source_branch={}",
+            match self {
+                Self::GitLab(_) => "gitlab",
+                Self::GitHub(_) => "github",
+                Self::Bitbucket(_) => "bitbucket",
+            },
+            project,
+            source_branch,
+        );
+        match self {
+            Self::GitLab(c) => c.list_open_mrs_by_branch(project, source_branch).await,
+            Self::GitHub(c) => c.list_open_mrs_by_branch(project, source_branch).await,
+            Self::Bitbucket(c) => c.list_open_mrs_by_branch(project, source_branch).await,
+        }
+    }
+
     /// Posts a batch of inline comments to the given change request.
     ///
     /// The comments are described by provider-agnostic locations. Each

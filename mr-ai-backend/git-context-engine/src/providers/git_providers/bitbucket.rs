@@ -340,6 +340,76 @@ impl BitbucketClient {
 
         Ok(())
     }
+
+    /// List open PRs in a workspace/repo whose source branch matches.
+    /// Sprint M3 of cross-repo MR review.
+    ///
+    /// Endpoint: `GET /repositories/{ws}/{slug}/pullrequests?q=...&state=OPEN`.
+    /// Bitbucket Cloud filters via the `q` query parameter with a
+    /// BBQL-style predicate.
+    pub async fn list_open_mrs_by_branch(
+        &self,
+        project: &str,
+        source_branch: &str,
+    ) -> GitContextEngineResult<Vec<MrSummary>> {
+        let (workspace, repo) = split_workspace_repo(project)?;
+        // Bitbucket's `q` accepts a quoted string with no further
+        // URL escaping beyond the standard one — `urlencoding`
+        // handles the outer escape.
+        let query = format!(
+            "source.branch.name = \"{}\" AND state = \"OPEN\"",
+            source_branch.replace('"', "")
+        );
+        let url = format!(
+            "{}/repositories/{workspace}/{repo}/pullrequests?q={}&pagelen=100",
+            self.base_api,
+            urlencoding::encode(&query),
+        );
+        debug!("Bitbucket list_open_mrs_by_branch: {}", url);
+        let page: BitbucketPrSummaryPage = self
+            .http
+            .get(url)
+            .header("Authorization", &self.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(page
+            .values
+            .into_iter()
+            .map(|r| MrSummary {
+                id: ChangeRequestId {
+                    project: project.to_owned(),
+                    iid: r.id,
+                },
+                head_sha: r.source.commit.hash,
+                source_branch: r.source.branch.name,
+                target_branch: r.destination.branch.name,
+                web_url: r
+                    .links
+                    .and_then(|l| l.html.map(|h| h.href))
+                    .unwrap_or_default(),
+                updated_at: r.updated_on.map(|d| d.to_rfc3339()).unwrap_or_default(),
+            })
+            .collect())
+    }
+}
+
+/// Bitbucket PR list page (subset).
+#[derive(Debug, Deserialize)]
+struct BitbucketPrSummaryPage {
+    values: Vec<BitbucketPrSummaryRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketPrSummaryRow {
+    id: u64,
+    updated_on: Option<DateTime<Utc>>,
+    source: BitbucketPrBranch,
+    destination: BitbucketPrBranch,
+    #[serde(default)]
+    links: Option<BitbucketPrLinks>,
 }
 
 /// Splits "workspace/repo_slug" into components or returns a validation error.

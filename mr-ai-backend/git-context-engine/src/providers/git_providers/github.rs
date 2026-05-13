@@ -339,6 +339,74 @@ impl GitHubClient {
 
         Ok(())
     }
+
+    /// List open PRs in a repo that match a given `source_branch`.
+    /// Sprint M3 of cross-repo MR review.
+    ///
+    /// Endpoint: `GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}
+    /// &state=open&per_page=100`. The `head` filter accepts
+    /// `<head_user_or_org>:<branch>` form; we use the owner extracted
+    /// from the project slug as the prefix (works for same-repo
+    /// branches; for forks the caller's `source_branch` already
+    /// embeds the prefix and we pass it through unchanged).
+    pub async fn list_open_mrs_by_branch(
+        &self,
+        project: &str,
+        source_branch: &str,
+    ) -> GitContextEngineResult<Vec<MrSummary>> {
+        let (owner, repo) = split_owner_repo(project)?;
+        let head_param = if source_branch.contains(':') {
+            source_branch.to_owned()
+        } else {
+            format!("{owner}:{source_branch}")
+        };
+        let url = format!(
+            "{}/repos/{owner}/{repo}/pulls?head={}&state=open&per_page=100",
+            self.base_api,
+            urlencoding::encode(&head_param),
+        );
+        debug!("GitHub list_open_mrs_by_branch: {}", url);
+        let rows: Vec<GitHubPrSummaryRow> = self
+            .http
+            .get(url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| MrSummary {
+                id: ChangeRequestId {
+                    project: project.to_owned(),
+                    iid: r.number,
+                },
+                head_sha: r.head.sha,
+                source_branch: r.head.r#ref,
+                target_branch: r.base.r#ref,
+                web_url: r.html_url,
+                updated_at: r.updated_at,
+            })
+            .collect())
+    }
+}
+
+/// GitHub open-PR list response row (subset).
+#[derive(Debug, Deserialize)]
+struct GitHubPrSummaryRow {
+    number: u64,
+    html_url: String,
+    updated_at: String,
+    head: GitHubPrRef,
+    base: GitHubPrRef,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPrRef {
+    r#ref: String,
+    sha: String,
 }
 
 /// Splits "owner/repo" into components or returns a validation error.

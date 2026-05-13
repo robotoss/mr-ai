@@ -392,6 +392,62 @@ impl GitLabClient {
 
         Ok(())
     }
+
+    /// List open MRs in a project that match a given `source_branch`.
+    /// Sprint M3 of cross-repo MR review — used by the worker to
+    /// discover sibling MRs in linked repos.
+    ///
+    /// Endpoint: `GET /projects/:id/merge_requests?source_branch=...
+    /// &state=opened&per_page=100`. Handles up to one page of 100;
+    /// projects with more than 100 open MRs sharing a branch name
+    /// are rare enough to defer pagination.
+    pub async fn list_open_mrs_by_branch(
+        &self,
+        project: &str,
+        source_branch: &str,
+    ) -> GitContextEngineResult<Vec<MrSummary>> {
+        let url = format!(
+            "{}/projects/{}/merge_requests?source_branch={}&state=opened&per_page=100",
+            self.base_api,
+            urlencoding::encode(project),
+            urlencoding::encode(source_branch),
+        );
+        debug!("GitLab list_open_mrs_by_branch: {}", url);
+        let rows: Vec<GitLabMrSummaryRow> = self
+            .http
+            .get(url)
+            .header("PRIVATE-TOKEN", &self.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| MrSummary {
+                id: ChangeRequestId {
+                    project: project.to_owned(),
+                    iid: r.iid,
+                },
+                head_sha: r.sha,
+                source_branch: r.source_branch,
+                target_branch: r.target_branch,
+                web_url: r.web_url,
+                updated_at: r.updated_at,
+            })
+            .collect())
+    }
+}
+
+/// GitLab open-MR list response row (subset).
+#[derive(Debug, Deserialize)]
+struct GitLabMrSummaryRow {
+    iid: u64,
+    sha: String,
+    source_branch: String,
+    target_branch: String,
+    web_url: String,
+    updated_at: String,
 }
 
 /// GitLab MR response (subset).

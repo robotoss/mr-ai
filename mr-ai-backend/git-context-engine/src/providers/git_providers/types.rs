@@ -23,6 +23,25 @@ pub struct ChangeRequestId {
     pub iid: u64,
 }
 
+/// Compact summary of one open MR/PR, returned by
+/// [`crate::providers::git_providers::ProviderClient::list_open_mrs_by_branch`].
+///
+/// Carries everything cross-repo discovery needs (sprint M3 of cross-
+/// repo MR review): identity, branch metadata, head SHA for overlay
+/// pinning, and a human-readable URL for diagnostics. Diff body is
+/// **not** included — fetch via `fetch_bundle` when needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MrSummary {
+    pub id: ChangeRequestId,
+    pub head_sha: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub web_url: String,
+    /// ISO-8601 timestamp of the last update. Used for tie-breaking
+    /// when multiple MRs share the same source_branch.
+    pub updated_at: String,
+}
+
 /// Triple of SHAs used to bind inline comments reliably.
 ///
 /// GitLab exposes `base/start/head`; other providers might expose only
